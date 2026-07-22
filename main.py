@@ -60,7 +60,7 @@ def bootstrap_runtime(workspace_root: str):
     api_key = config_data.get("api_key") or os.getenv("OPENAI_API_KEY") or os.getenv("DASHSCOPE_API_KEY") or "mock-key"
     base_url = config_data.get("base_url") or os.getenv("OPENAI_BASE_URL") or "https://dashscope.aliyuncs.com/compatible-mode/v1"
     model_name = config_data.get("model_name") or os.getenv("OPENAI_MODEL_NAME") or "qwen-turbo"
-    ssl_verify = config_data.get("ssl_verify", False)
+    ssl_verify = config_data.get("ssl_verify", True)
     ssl_cert_path = config_data.get("ssl_cert_path", "")
     denied_capabilities = config_data.get("denied_capabilities", [])
     approval_required = config_data.get("approval_required_capabilities", ["shell", "devteam.approve_quality_gate"])

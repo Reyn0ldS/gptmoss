@@ -2,7 +2,7 @@
   "api_key": "mock-key",
   "base_url": "https://gpu01.quartz.moss/general/v1",
   "model_name": "Qwen/Qwen3.6-35B",
-  "ssl_verify": false,
+  "ssl_verify": true,
   "ssl_cert_path": "",
   "denied_capabilities": [],
   "approval_required_capabilities": [

@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import os
@@ -50,8 +51,8 @@ app = FastAPI(title="MOSS Agent Runtime Platform API", version="0.1.0")
 # CORS middleware for potential frontend clients
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=["http://127.0.0.1:8000", "http://localhost:8000"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -404,14 +405,15 @@ async def get_settings():
     
     if os.path.exists(config_path):
         with open(config_path, "r", encoding="utf-8") as f:
-            return json.load(f)
+            config = json.load(f)
+        config.pop("api_key", None)
+        return config
             
     # Fallback to current memory values
     llm = app_state.execution_engine.llm_provider
     policy = app_state.execution_engine.policy_provider
     fs = app_state.execution_engine.get_capability("filesystem")
     return {
-        "api_key": getattr(llm, "api_key", ""),
         "base_url": getattr(llm, "base_url", ""),
         "model_name": getattr(llm, "default_model", ""),
         "ssl_verify": False,
@@ -433,8 +435,11 @@ async def update_settings(req: SettingsRequest):
     workspace_root = app_state.execution_engine.get_capability("filesystem").workspace_root
     config_path = os.path.join(workspace_root, "config.json")
     
+    llm = app_state.execution_engine.llm_provider
+    # A blank settings form must not erase an existing secret.
+    api_key = req.api_key or getattr(llm, "api_key", "")
     config_data = {
-        "api_key": req.api_key,
+        "api_key": api_key,
         "base_url": req.base_url,
         "model_name": req.model_name,
         "ssl_verify": req.ssl_verify,
@@ -451,12 +456,11 @@ async def update_settings(req: SettingsRequest):
     with open(config_path, "w", encoding="utf-8") as f:
         json.dump(config_data, f, indent=2)
         
-    llm = app_state.execution_engine.llm_provider
     policy = app_state.execution_engine.policy_provider
     
     if hasattr(llm, "update_config"):
         llm.update_config(
-            api_key=req.api_key,
+            api_key=api_key,
             base_url=req.base_url,
             ssl_verify=req.ssl_verify,
             ssl_cert_path=req.ssl_cert_path,

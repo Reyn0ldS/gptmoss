@@ -25,8 +25,9 @@ class QwenProvider(LLMProvider):
         
         logger.info(f"Initializing QwenProvider calling base_url={self.base_url} with default_model={self.default_model}")
         import httpx
-        # Bypass SSL verification to support local self-signed certificates
-        http_client = httpx.AsyncClient(verify=False)
+        # Certificate validation is secure by default. A local/self-signed
+        # endpoint can still be enabled explicitly through settings.
+        http_client = httpx.AsyncClient(verify=True)
         self.client = AsyncOpenAI(api_key=self.api_key, base_url=self.base_url, http_client=http_client)
 
     def update_config(self, api_key: str, base_url: str, ssl_verify: bool = False, ssl_cert_path: str = "", model_name: str = "qwen-turbo"):

@@ -87,6 +87,8 @@ class DeveloperTeamCapability:
             
         parent_id = context.get("execution_id") if context else None
             
+        if not project_name or os.path.basename(project_name) != project_name or project_name in {".", ".."}:
+            return "Error: Invalid project name."
         project_dir = os.path.join(self.workspace_root, project_name)
         os.makedirs(project_dir, exist_ok=True)
         

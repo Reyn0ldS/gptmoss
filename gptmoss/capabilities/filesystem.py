@@ -44,22 +44,28 @@ class FilesystemCapability:
         if custom_path:
             return os.path.abspath(custom_path)
             
+        if not isinstance(project_id, str) or not project_id or os.path.basename(project_id) != project_id or project_id in {".", ".."}:
+            raise PermissionError("Invalid project identifier.")
         target_dir = os.path.join(self.workspace_root, "projects", project_id)
         os.makedirs(target_dir, exist_ok=True)
         return target_dir
 
     def _resolve_path(self, path: str, execution_id: Optional[str] = None) -> str:
-        root_dir = self._get_workspace_for_execution(execution_id)
-        full_path = os.path.abspath(os.path.join(root_dir, path))
+        root_dir = os.path.realpath(self._get_workspace_for_execution(execution_id))
+        full_path = os.path.realpath(os.path.join(root_dir, path))
         
         if self.restrict_to_workspace:
-            if not full_path.startswith(root_dir):
+            try:
+                is_within_root = os.path.commonpath([os.path.normcase(root_dir), os.path.normcase(full_path)]) == os.path.normcase(root_dir)
+            except ValueError:
+                is_within_root = False
+            if not is_within_root:
                 raise PermissionError("Access denied: path is outside the workspace root.")
                 
         if not self.allow_subfolders:
             # Check that the file/folder's parent directory is exactly the resolved root
             parent_dir = os.path.dirname(full_path)
-            if parent_dir != root_dir:
+            if os.path.normcase(parent_dir) != os.path.normcase(root_dir):
                 raise PermissionError("Access denied: subfolder operations are blocked by configuration.")
                 
         return full_path

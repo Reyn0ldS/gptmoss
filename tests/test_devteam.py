@@ -85,3 +85,14 @@ def test_custom_project_path_routing():
                 
             # Verify that it is NOT in tmp_dir
             assert not os.path.exists(os.path.join(tmp_dir, "projects", "proj-custom", "hello_custom.txt"))
+
+def test_filesystem_rejects_path_traversal_and_prefix_escape():
+    from gptmoss.capabilities.filesystem import FilesystemCapability
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        workspace = os.path.join(tmp_dir, "workspace")
+        fs = FilesystemCapability(workspace_root=workspace)
+        with pytest.raises(PermissionError):
+            fs.write("../outside.txt", "blocked")
+        with pytest.raises(PermissionError):
+            fs._resolve_path(os.path.join(tmp_dir, "workspace-other", "file.txt"))

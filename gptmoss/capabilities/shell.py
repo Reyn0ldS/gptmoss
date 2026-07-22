@@ -41,6 +41,8 @@ class ShellCapability:
         if custom_path:
             return os.path.abspath(custom_path)
             
+        if not isinstance(project_id, str) or not project_id or os.path.basename(project_id) != project_id or project_id in {".", ".."}:
+            raise PermissionError("Invalid project identifier.")
         target_dir = os.path.join(self.workspace_root, "projects", project_id)
         os.makedirs(target_dir, exist_ok=True)
         return target_dir

@@ -98,7 +98,7 @@ def test_api_settings_flow():
     response_get = client.get("/api/settings")
     assert response_get.status_code == 200
     body_get = response_get.json()
-    assert "api_key" in body_get
+    assert "api_key" not in body_get
     assert "base_url" in body_get
 
     # Post new settings
@@ -125,6 +125,9 @@ def test_api_settings_flow():
     assert mock_llm.default_model == "test-qwen-model"
     assert "shell" in policy.denied
     assert "filesystem" in policy.approval_required
+
+    response_get_after_save = client.get("/api/settings")
+    assert "api_key" not in response_get_after_save.json()
 
     # Clean up test config.json file
     if os.path.exists("./config.json"):

@@ -94,7 +94,9 @@ class StateEngine:
             max_retries = 5
             for attempt in range(max_retries):
                 try:
-                    os.makedirs(os.path.dirname(self.persist_path), exist_ok=True)
+                    persist_dir = os.path.dirname(self.persist_path)
+                    if persist_dir:
+                        os.makedirs(persist_dir, exist_ok=True)
                     data = {
                         "conversations": {k: v.model_dump() for k, v in self.conversations.items()},
                         "executions": {k: v.model_dump() for k, v in self.executions.items()},
