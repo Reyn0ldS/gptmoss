@@ -1,11 +1,37 @@
+import asyncio
+
+import httpx
 import pytest
-from fastapi.testclient import TestClient
 from gptmoss.api.server import app, init_app
 from gptmoss.core import EventBus, StateEngine, ContextEngine, ExecutionEngine, RuntimeKernel
 from gptmoss.planners import SimplePlanner
 from gptmoss.policies import SimplePolicyProvider
 from gptmoss.memory import RAMMemoryProvider
 from tests.mock_llm import MockLLMProvider
+
+
+class ASGIClient:
+    """Small synchronous adapter around HTTPX's maintained ASGI transport."""
+
+    def __init__(self, app):
+        self.app = app
+
+    def request(self, method, url, **kwargs):
+        async def send():
+            transport = httpx.ASGITransport(app=self.app)
+            async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+                return await client.request(method, url, **kwargs)
+
+        return asyncio.run(send())
+
+    def get(self, url, **kwargs):
+        return self.request("GET", url, **kwargs)
+
+    def post(self, url, **kwargs):
+        return self.request("POST", url, **kwargs)
+
+    def delete(self, url, **kwargs):
+        return self.request("DELETE", url, **kwargs)
 
 def test_api_submit_and_query_flow():
     # Setup test dependencies
@@ -38,7 +64,7 @@ def test_api_submit_and_query_flow():
     )
 
     init_app(kernel, exec_engine, state_engine, event_bus)
-    client = TestClient(app)
+    client = ASGIClient(app)
 
     # Submit task
     response = client.post("/executions", json={"task": "Api test task"})
@@ -92,7 +118,7 @@ def test_api_settings_flow():
     )
 
     init_app(kernel, exec_engine, state_engine, event_bus)
-    client = TestClient(app)
+    client = ASGIClient(app)
 
     # Get settings
     response_get = client.get("/api/settings")
@@ -159,7 +185,7 @@ def test_api_delete_cascade_flow():
     )
 
     init_app(kernel, exec_engine, state_engine, event_bus)
-    client = TestClient(app)
+    client = ASGIClient(app)
 
     # Manually populate a parent-child execution relationship in the state engine
     parent_id = "parent-uuid-1234"
@@ -211,7 +237,7 @@ def test_api_unified_feed_flow():
     )
 
     init_app(kernel, exec_engine, state_engine, event_bus)
-    client = TestClient(app)
+    client = ASGIClient(app)
 
     # Manually populate parent and child executions with messages containing timestamps
     parent_id = "parent-uuid"

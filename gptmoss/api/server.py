@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import os
+from contextlib import asynccontextmanager, suppress
 from typing import Dict, Any, List, Optional
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
@@ -44,9 +45,33 @@ class AppState:
     execution_engine: Optional[ExecutionEngine] = None
     state_engine: Optional[StateEngine] = None
     event_bus: Optional[EventBus] = None
+    flush_task: Optional[asyncio.Task] = None
+    subscribed_event_bus: Optional[EventBus] = None
 
 app_state = AppState()
-app = FastAPI(title="MOSS Agent Runtime Platform API", version="0.1.0")
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    """Attach runtime services when the API starts and stop them cleanly."""
+    if app_state.event_bus and app_state.subscribed_event_bus is not app_state.event_bus:
+        app_state.event_bus.subscribe_all(manager.broadcast_event)
+        app_state.subscribed_event_bus = app_state.event_bus
+        logger.info("Subscribed websocket manager to event bus")
+
+    if app_state.state_engine and app_state.event_bus and not app_state.flush_task:
+        app_state.flush_task = app_state.state_engine.start_db_flush_loop(app_state.event_bus)
+        logger.info("Started debounced state persistence loop")
+
+    try:
+        yield
+    finally:
+        if app_state.flush_task:
+            app_state.flush_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await app_state.flush_task
+            app_state.flush_task = None
+
+app = FastAPI(title="MOSS Agent Runtime Platform API", version="0.1.0", lifespan=lifespan)
 
 # CORS middleware for potential frontend clients
 app.add_middleware(
@@ -103,18 +128,6 @@ class ConnectionManager:
                     self.disconnect_execution(exec_id, ws)
 
 manager = ConnectionManager()
-
-@app.on_event("startup")
-async def startup_event():
-    # Connect the event bus to the websocket manager
-    if app_state.event_bus:
-        app_state.event_bus.subscribe_all(manager.broadcast_event)
-        logger.info("Subscribed websocket manager to event bus")
-        
-    # Start the debounced state saving loop
-    if app_state.state_engine and app_state.event_bus:
-        app_state.state_engine.start_db_flush_loop(app_state.event_bus)
-        logger.info("Started debounced state persistence loop")
 
 @app.get("/", response_class=HTMLResponse)
 async def get_gui():

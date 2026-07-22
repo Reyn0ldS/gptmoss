@@ -628,10 +628,9 @@ class ExecutionEngine:
                 )
                 kwargs["context"] = context
 
-            if asyncio.iscoroutinefunction(bound_method):
-                res = await bound_method(**kwargs)
-            else:
-                res = bound_method(**kwargs)
+            res = bound_method(**kwargs)
+            if inspect.isawaitable(res):
+                res = await res
             return str(res)
         except Exception as e:
             logger.error(f"Error executing action {capability}.{action}: {e}", exc_info=True)

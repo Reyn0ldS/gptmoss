@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import time
 import uuid
 import logging
@@ -52,10 +53,9 @@ class EventBus:
 
         async def run_callback(cb: EventCallback):
             try:
-                if asyncio.iscoroutinefunction(cb):
-                    await cb(event)
-                else:
-                    cb(event)
+                result = cb(event)
+                if inspect.isawaitable(result):
+                    await result
             except Exception as e:
                 logger.error(f"Error in event callback {cb} for event {event.type}: {e}", exc_info=True)
 
