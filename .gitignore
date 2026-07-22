@@ -1,0 +1,25 @@
+# Python build and test artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Local environments and editor settings
+.venv/
+venv/
+.env
+.vscode/
+.idea/
+
+# Runtime data and logs
+app.log
+workspace/config.json
+workspace/state_store.json
+workspace/memories.json
+workspace/projects/
+
+# Distribution artifacts
+build/
+dist/
+*.egg-info/

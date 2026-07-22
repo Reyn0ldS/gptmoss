@@ -1,0 +1,2253 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MOSS - Agent Runtime Console</title>
+    <!-- Outfit Font from Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <!-- Marked.js for markdown rendering -->
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <style>
+        :root {
+            --bg-base: #080b11;
+            --bg-sidebar: #0e121b;
+            --bg-surface: rgba(16, 22, 35, 0.6);
+            --bg-surface-opaque: #101625;
+            --border-color: rgba(255, 255, 255, 0.08);
+            --border-hover: rgba(255, 255, 255, 0.16);
+            --border-focus: rgba(129, 140, 248, 0.5);
+            
+            --accent-primary: #818cf8; /* indigo */
+            --accent-secondary: #a78bfa; /* purple */
+            --accent-gradient: linear-gradient(135deg, #818cf8 0%, #a78bfa 100%);
+            
+            --text-main: #e5e7eb;
+            --text-muted: #9ca3af;
+            --text-inverse: #0b0f19;
+            
+            --status-running: #60a5fa; /* blue */
+            --status-completed: #34d399; /* emerald */
+            --status-failed: #f87171; /* red */
+            --status-paused: #fbbf24; /* amber */
+            
+            --font-family: 'Outfit', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            background-color: var(--bg-base);
+            color: var(--text-main);
+            font-family: var(--font-family);
+            overflow: hidden;
+            height: 100vh;
+            display: flex;
+        }
+
+        /* Scrollbar styles */
+        ::-webkit-scrollbar {
+            width: 8px;
+            height: 8px;
+        }
+        ::-webkit-scrollbar-track {
+            background: rgba(0, 0, 0, 0.1);
+        }
+        ::-webkit-scrollbar-thumb {
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 4px;
+        }
+        ::-webkit-scrollbar-thumb:hover {
+            background: rgba(255, 255, 255, 0.2);
+        }
+
+        /* Sidebar styling */
+        .sidebar {
+            width: 320px;
+            background-color: var(--bg-sidebar);
+            border-right: 1px solid var(--border-color);
+            display: flex;
+            flex-direction: column;
+            height: 100%;
+            flex-shrink: 0;
+        }
+
+        .sidebar-header {
+            padding: 20px 24px;
+            border-bottom: 1px solid var(--border-color);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+
+        .brand {
+            font-weight: 700;
+            font-size: 18px;
+            background: var(--accent-gradient);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            letter-spacing: 0.5px;
+        }
+
+        .ws-badge {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 12px;
+            font-weight: 500;
+            color: var(--text-muted);
+        }
+
+        .ws-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            transition: background-color 0.3s, box-shadow 0.3s;
+        }
+
+        .ws-dot.connected {
+            background-color: var(--status-completed);
+            box-shadow: 0 0 8px var(--status-completed);
+        }
+
+        .ws-dot.disconnected {
+            background-color: var(--status-failed);
+            box-shadow: 0 0 8px var(--status-failed);
+        }
+
+        .new-task-btn {
+            margin: 16px 20px 8px 20px;
+            padding: 12px;
+            background: var(--accent-gradient);
+            border: none;
+            border-radius: 8px;
+            color: white;
+            font-family: var(--font-family);
+            font-weight: 600;
+            font-size: 14px;
+            cursor: pointer;
+            transition: transform 0.2s, box-shadow 0.2s;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+        }
+
+        .new-task-btn:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 4px 12px rgba(129, 140, 248, 0.4);
+        }
+
+        .executions-list {
+            flex: 1;
+            overflow-y: auto;
+            padding: 12px 20px;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+
+        .execution-group-container {
+            border: 1px solid rgba(255, 255, 255, 0.05);
+            border-radius: 8px;
+            margin-bottom: 12px;
+            padding: 8px;
+            background: rgba(255, 255, 255, 0.012);
+            box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.01);
+            transition: border-color 0.25s, background-color 0.25s;
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+        .execution-group-container:hover {
+            border-color: rgba(129, 140, 248, 0.18);
+            background: rgba(255, 255, 255, 0.02);
+        }
+
+        .execution-card {
+            background: var(--bg-surface);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 12px 14px;
+            cursor: pointer;
+            transition: border-color 0.2s, background-color 0.2s, transform 0.2s;
+        }
+
+        .execution-card:hover {
+            border-color: var(--border-hover);
+            background-color: rgba(255, 255, 255, 0.02);
+            transform: translateX(2px);
+        }
+
+        .execution-card.active {
+            border-color: var(--accent-primary);
+            background-color: rgba(129, 140, 248, 0.08);
+        }
+
+        .execution-card.sub-card {
+            border-left: 3px solid var(--accent-secondary);
+            background-color: rgba(255, 255, 255, 0.01);
+            transform: scale(0.96);
+            transform-origin: left center;
+        }
+        
+        .execution-card.sub-card:hover {
+            background-color: rgba(255, 255, 255, 0.03);
+            transform: translateX(1px) scale(0.96);
+        }
+        
+        .execution-card.sub-card.active {
+            border-left-color: var(--accent-primary);
+            background-color: rgba(129, 140, 248, 0.05);
+        }
+
+        .card-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 6px;
+        }
+
+        .card-id {
+            font-size: 11px;
+            color: var(--text-muted);
+            font-family: monospace;
+        }
+
+        .badge {
+            font-size: 10px;
+            font-weight: 600;
+            padding: 1px 6px;
+            border-radius: 4px;
+            text-transform: uppercase;
+        }
+
+        .badge.running { background-color: rgba(96, 165, 250, 0.15); color: var(--status-running); }
+        .badge.completed { background-color: rgba(52, 211, 153, 0.15); color: var(--status-completed); }
+        .badge.failed { background-color: rgba(248, 113, 113, 0.15); color: var(--status-failed); }
+        .badge.paused { background-color: rgba(251, 191, 36, 0.15); color: var(--status-paused); }
+        .badge.cancelled { background-color: rgba(156, 163, 175, 0.15); color: var(--text-muted); }
+
+        .card-title {
+            font-size: 13px;
+            font-weight: 500;
+            line-height: 1.4;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        /* Main view styling */
+        .main-content {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            height: 100%;
+            background-color: var(--bg-base);
+            position: relative;
+        }
+
+        .landing-view {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            padding: 40px;
+            text-align: center;
+        }
+
+        .landing-logo {
+            width: 72px;
+            height: 72px;
+            border-radius: 16px;
+            background: var(--accent-gradient);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 32px;
+            font-weight: 700;
+            color: white;
+            margin-bottom: 20px;
+            box-shadow: 0 8px 24px rgba(129, 140, 248, 0.3);
+        }
+
+        .landing-title {
+            font-size: 24px;
+            font-weight: 700;
+            margin-bottom: 8px;
+        }
+
+        .landing-subtitle {
+            color: var(--text-muted);
+            font-size: 14px;
+            max-width: 440px;
+            margin-bottom: 30px;
+            line-height: 1.5;
+        }
+
+        .task-form-container {
+            width: 100%;
+            max-width: 560px;
+            background: var(--bg-surface-opaque);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 24px;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.3);
+            text-align: left;
+        }
+
+        .form-label {
+            display: block;
+            font-size: 13px;
+            font-weight: 600;
+            color: var(--text-muted);
+            margin-bottom: 8px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .task-textarea {
+            width: 100%;
+            height: 120px;
+            background-color: rgba(0, 0, 0, 0.2);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 14px;
+            color: var(--text-main);
+            font-family: var(--font-family);
+            font-size: 14px;
+            resize: none;
+            outline: none;
+            transition: border-color 0.2s;
+            margin-bottom: 16px;
+        }
+
+        .task-textarea:focus {
+            border-color: var(--accent-primary);
+        }
+
+        .task-submit-btn {
+            width: 100%;
+            padding: 12px;
+            background: var(--accent-gradient);
+            border: none;
+            border-radius: 8px;
+            color: white;
+            font-family: var(--font-family);
+            font-weight: 600;
+            cursor: pointer;
+            font-size: 14px;
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+
+        .task-submit-btn:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 4px 15px rgba(129, 140, 248, 0.4);
+        }
+
+        /* Detail view styling */
+        .detail-view {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            height: 100%;
+            overflow: hidden;
+        }
+
+        .detail-header {
+            padding: 20px 32px;
+            border-bottom: 1px solid var(--border-color);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            background-color: rgba(255, 255, 255, 0.01);
+        }
+
+        .detail-title-area {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+            max-width: 60%;
+            min-width: 0;
+        }
+
+        .detail-title {
+            font-size: 16px;
+            font-weight: 600;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            width: 100%;
+        }
+
+        .detail-subtitle {
+            font-size: 11px;
+            color: var(--text-muted);
+            font-family: monospace;
+        }
+
+        .detail-actions {
+            display: flex;
+            gap: 10px;
+        }
+
+        .btn-control {
+            padding: 6px 14px;
+            border-radius: 6px;
+            font-family: var(--font-family);
+            font-weight: 600;
+            font-size: 12px;
+            cursor: pointer;
+            border: 1px solid var(--border-color);
+            background-color: rgba(255, 255, 255, 0.02);
+            color: var(--text-main);
+            transition: background-color 0.2s, border-color 0.2s, color 0.2s;
+        }
+
+        .btn-control:hover {
+            background-color: rgba(255, 255, 255, 0.06);
+            border-color: rgba(255, 255, 255, 0.2);
+        }
+
+        .btn-control.pause:hover {
+            border-color: var(--status-paused);
+            color: var(--status-paused);
+        }
+
+        .btn-control.resume:hover {
+            border-color: var(--status-running);
+            color: var(--status-running);
+        }
+        
+        .btn-control.cancel:hover {
+            border-color: var(--status-failed);
+            color: var(--status-failed);
+        }
+
+        .btn-control.delete:hover {
+            border-color: #f87171;
+            background-color: rgba(248, 113, 113, 0.1);
+            color: #f87171;
+        }
+
+        /* Detail split layout */
+        .detail-body {
+            flex: 1;
+            display: flex;
+            overflow: hidden;
+            min-width: 0;
+        }
+
+        .feed-column {
+            flex: 6;
+            border-right: 1px solid var(--border-color);
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+            background-color: rgba(0, 0, 0, 0.05);
+            min-width: 0;
+            position: relative;
+        }
+
+        .plan-column {
+            flex: 4;
+            display: flex;
+            flex-direction: column;
+            overflow-y: auto;
+            padding: 24px;
+            background-color: rgba(0, 0, 0, 0.1);
+            min-width: 0;
+        }
+
+        /* Glowing loader bar representing active background LLM requests */
+        .loader-bar {
+            height: 3px;
+            width: 100%;
+            background: linear-gradient(90deg, var(--accent-primary) 0%, var(--accent-secondary) 50%, var(--accent-primary) 100%);
+            background-size: 200% 100%;
+            animation: loading-bar 1.5s infinite linear;
+            flex-shrink: 0;
+            z-index: 50;
+            box-shadow: 0 1px 6px rgba(129, 140, 248, 0.4);
+        }
+
+        @keyframes loading-bar {
+            0% { background-position: 200% 0; }
+            100% { background-position: -200% 0; }
+        }
+
+        /* Running badge with animated pulsing indicator dot */
+        .badge.running {
+            background-color: rgba(96, 165, 250, 0.15);
+            color: var(--status-running);
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .badge.running::before {
+            content: "";
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            background-color: var(--status-running);
+            display: inline-block;
+            animation: pulse-dot 1.2s infinite;
+        }
+
+        @keyframes pulse-dot {
+            0% { transform: scale(1); opacity: 1; box-shadow: 0 0 0 0 rgba(96, 165, 250, 0.6); }
+            70% { transform: scale(1.1); opacity: 0.4; box-shadow: 0 0 0 6px rgba(96, 165, 250, 0); }
+            100% { transform: scale(1); opacity: 1; box-shadow: 0 0 0 0 rgba(96, 165, 250, 0); }
+        }
+
+        /* Tabs for Chat Feed */
+        .feed-tabs {
+            display: flex;
+            gap: 12px;
+            margin: 16px 32px 0 32px;
+            border-bottom: 1.5px solid var(--border-color);
+            padding-bottom: 10px;
+        }
+
+        .tab-btn {
+            background: none;
+            border: none;
+            color: var(--text-muted);
+            font-family: inherit;
+            font-size: 13.5px;
+            font-weight: 500;
+            cursor: pointer;
+            padding: 8px 16px;
+            border-radius: 6px;
+            transition: all 0.25s ease;
+            outline: none;
+        }
+
+        .tab-btn:hover {
+            color: var(--text-normal);
+            background-color: rgba(255, 255, 255, 0.025);
+        }
+
+        .tab-btn.active {
+            color: var(--accent-primary);
+            font-weight: 600;
+            background-color: rgba(99, 102, 241, 0.08);
+            border-bottom: 2px solid var(--accent-primary);
+            border-radius: 6px 6px 0 0;
+        }
+
+        /* Chat Messages area */
+        .chat-container {
+            flex: 1;
+            overflow-y: auto;
+            padding: 24px 32px;
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+            scroll-behavior: smooth;
+        }
+
+        .message {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            max-width: 90%;
+            padding: 14px 16px;
+            border-radius: 8px;
+            border: 1px solid var(--border-color);
+            min-width: 0;
+            word-wrap: break-word;
+            overflow-wrap: break-word;
+        }
+
+        .message.user {
+            align-self: flex-end;
+            background-color: rgba(255, 255, 255, 0.015);
+            border-color: var(--border-color);
+        }
+
+        .message.assistant {
+            align-self: flex-start;
+            background-color: rgba(129, 140, 248, 0.03);
+            border-color: rgba(129, 140, 248, 0.12);
+        }
+
+        .message.system {
+            align-self: flex-start;
+            background-color: rgba(255, 255, 255, 0.005);
+            border-color: var(--border-color);
+            max-width: 95%;
+        }
+
+        .message-header {
+            display: flex;
+            justify-content: space-between;
+            font-size: 11px;
+            font-weight: 600;
+            color: var(--text-muted);
+        }
+
+        .message-role {
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .message-role.assistant {
+            color: var(--accent-primary);
+        }
+
+        .message-content {
+            font-size: 13.5px;
+            line-height: 1.55;
+            word-wrap: break-word;
+            overflow-wrap: break-word;
+            word-break: break-word;
+        }
+
+        /* Markdown rendered elements inside message-content */
+        .message-content h1, .message-content h2, .message-content h3 {
+            margin-top: 12px;
+            margin-bottom: 6px;
+            color: var(--accent-secondary);
+            font-weight: 600;
+        }
+        .message-content h1 { font-size: 1.25em; }
+        .message-content h2 { font-size: 1.15em; }
+        .message-content h3 { font-size: 1.05em; }
+        .message-content p {
+            margin-bottom: 10px;
+        }
+        .message-content ul, .message-content ol {
+            margin-left: 20px;
+            margin-bottom: 10px;
+        }
+        .message-content li {
+            margin-bottom: 4px;
+        }
+        .message-content code {
+            background-color: rgba(0, 0, 0, 0.3);
+            padding: 2px 5px;
+            border-radius: 4px;
+            font-family: Consolas, Monaco, monospace;
+            font-size: 0.9em;
+            color: #f472b6;
+        }
+        .message-content pre {
+            background-color: #04060b;
+            border: 1px solid rgba(255, 255, 255, 0.04);
+            border-radius: 6px;
+            padding: 12px;
+            font-family: Consolas, Monaco, monospace;
+            margin-top: 8px;
+            margin-bottom: 8px;
+            overflow-x: auto;
+        }
+        .message-content pre code {
+            background-color: transparent;
+            padding: 0;
+            color: inherit;
+            font-size: inherit;
+        }
+        .message-content table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 8px;
+            margin-bottom: 12px;
+            display: block;
+            overflow-x: auto;
+        }
+        .message-content th, .message-content td {
+            border: 1px solid var(--border-color);
+            padding: 8px 12px;
+            text-align: left;
+        }
+        .message-content th {
+            background-color: rgba(255, 255, 255, 0.02);
+            font-weight: 600;
+        }
+
+        /* Monospace logs */
+        .terminal-box {
+            background-color: #04060b;
+            border: 1px solid rgba(255, 255, 255, 0.04);
+            border-radius: 6px;
+            padding: 10px 12px;
+            font-family: Consolas, Monaco, "Lucida Console", monospace;
+            font-size: 12px;
+            color: #d1d5db;
+            margin-top: 6px;
+            overflow-x: auto;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+            overflow-wrap: anywhere;
+            line-height: 1.4;
+        }
+
+        /* Human in the loop approval banner */
+        .approval-banner {
+            background-color: rgba(251, 191, 36, 0.06);
+            border-bottom: 2px solid var(--status-paused);
+            padding: 16px 32px;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            animation: slideDown 0.25s ease-out;
+            flex-shrink: 0;
+        }
+
+        @keyframes slideDown {
+            from { transform: translateY(-20px); opacity: 0; }
+            to { transform: translateY(0); opacity: 1; }
+        }
+
+        .approval-title-row {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .approval-icon {
+            font-size: 18px;
+            color: var(--status-paused);
+        }
+
+        .approval-title {
+            font-size: 14px;
+            font-weight: 600;
+            color: var(--status-paused);
+        }
+
+        .approval-details {
+            display: grid;
+            grid-template-columns: 140px 1fr;
+            gap: 6px;
+            font-size: 13px;
+        }
+
+        .details-label {
+            font-weight: 600;
+            color: var(--text-muted);
+        }
+
+        .details-val {
+            font-family: monospace;
+            color: var(--status-running);
+        }
+
+        .approval-reason-input {
+            background-color: rgba(0, 0, 0, 0.25);
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            padding: 8px 12px;
+            color: var(--text-main);
+            font-family: var(--font-family);
+            font-size: 13px;
+            outline: none;
+            width: 100%;
+        }
+
+        .approval-reason-input:focus {
+            border-color: var(--status-paused);
+        }
+
+        .approval-buttons {
+            display: flex;
+            gap: 10px;
+        }
+
+        .btn-approval {
+            padding: 8px 16px;
+            border-radius: 6px;
+            font-family: var(--font-family);
+            font-weight: 600;
+            font-size: 12px;
+            cursor: pointer;
+            border: none;
+            transition: background-color 0.2s, transform 0.1s;
+        }
+
+        .btn-approval:active {
+            transform: scale(0.98);
+        }
+
+        .btn-approval.allow {
+            background-color: var(--status-completed);
+            color: var(--text-inverse);
+        }
+
+        .btn-approval.allow:hover {
+            background-color: #3fe0a6;
+        }
+
+        .btn-approval.reject {
+            background-color: var(--status-failed);
+            color: white;
+        }
+
+        .btn-approval.reject:hover {
+            background-color: #fa8282;
+        }
+
+        /* Plan components */
+        .plan-title {
+            font-size: 14px;
+            font-weight: 600;
+            margin-bottom: 16px;
+            color: var(--text-main);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .plan-steps {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+
+        .step-item {
+            display: flex;
+            gap: 12px;
+            background-color: rgba(255, 255, 255, 0.01);
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            padding: 12px;
+        }
+
+        .step-item.running {
+            border-color: var(--status-running);
+            background-color: rgba(96, 165, 250, 0.02);
+        }
+
+        .step-item.completed {
+            border-color: rgba(52, 211, 153, 0.2);
+            background-color: rgba(52, 211, 153, 0.01);
+        }
+
+        .step-item.failed {
+            border-color: rgba(248, 113, 113, 0.2);
+            background-color: rgba(248, 113, 113, 0.01);
+        }
+
+        .step-indicator {
+            width: 18px;
+            height: 18px;
+            border-radius: 50%;
+            border: 2px solid var(--border-color);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 9px;
+            font-weight: 700;
+            flex-shrink: 0;
+            margin-top: 1px;
+            color: var(--text-muted);
+        }
+
+        .step-item.completed .step-indicator {
+            border-color: var(--status-completed);
+            background-color: var(--status-completed);
+            color: var(--text-inverse);
+        }
+
+        .step-item.running .step-indicator {
+            border-color: var(--status-running);
+            background-color: rgba(96, 165, 250, 0.2);
+            color: var(--status-running);
+            animation: pulse 1.5s infinite;
+        }
+
+        .step-item.failed .step-indicator {
+            border-color: var(--status-failed);
+            background-color: var(--status-failed);
+            color: white;
+        }
+
+        @keyframes pulse {
+            0% { transform: scale(1); opacity: 1; }
+            50% { transform: scale(1.08); opacity: 0.6; }
+            100% { transform: scale(1); opacity: 1; }
+        }
+
+        .step-content {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+            flex: 1;
+        }
+
+        .step-desc {
+            font-size: 13px;
+            font-weight: 500;
+            line-height: 1.4;
+        }
+
+        .step-result {
+            font-size: 11px;
+            color: var(--text-muted);
+            font-family: monospace;
+            background-color: rgba(0, 0, 0, 0.15);
+            padding: 6px;
+            border-radius: 4px;
+            margin-top: 4px;
+            overflow-x: auto;
+        }
+
+        /* Thinking animation indicator */
+        .thinking-indicator {
+            align-self: flex-start;
+            background-color: rgba(129, 140, 248, 0.02);
+            border-color: rgba(129, 140, 248, 0.1);
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .thinking-dots {
+            display: flex;
+            gap: 4px;
+        }
+
+        .thinking-dot {
+            width: 6px;
+            height: 6px;
+            background-color: var(--accent-primary);
+            border-radius: 50%;
+            animation: bounce 1.4s infinite ease-in-out both;
+        }
+
+        .thinking-dot:nth-child(1) { animation-delay: -0.32s; }
+        .thinking-dot:nth-child(2) { animation-delay: -0.16s; }
+
+        @keyframes bounce {
+            0%, 80%, 100% { transform: scale(0); }
+            40% { transform: scale(1); }
+        }
+
+        /* Toast notification styling */
+        .toast-container {
+            position: fixed;
+            bottom: 24px;
+            right: 24px;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            z-index: 1000;
+        }
+
+        .toast {
+            background-color: var(--bg-surface-opaque);
+            border: 1px solid var(--border-color);
+            border-left: 4px solid var(--accent-primary);
+            border-radius: 6px;
+            padding: 12px 18px;
+            color: var(--text-main);
+            font-family: var(--font-family);
+            font-size: 13px;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            min-width: 250px;
+            max-width: 350px;
+            animation: slideInRight 0.3s ease-out;
+            transition: opacity 0.3s, transform 0.3s;
+        }
+
+        @keyframes slideInRight {
+            from { transform: translateX(100%); opacity: 0; }
+            to { transform: translateX(0); opacity: 1; }
+        }
+
+        .toast.info { border-left-color: var(--status-running); }
+        .toast.success { border-left-color: var(--status-completed); }
+        .toast.warning { border-left-color: var(--status-paused); }
+        .toast.error { border-left-color: var(--status-failed); }
+
+        /* Responsive design improvements */
+        .message-content {
+            word-break: break-word;
+            overflow-wrap: break-word;
+        }
+        
+        .step-desc {
+            word-break: break-word;
+            overflow-wrap: break-word;
+        }
+
+        @media (max-width: 1200px) {
+            .detail-header {
+                flex-direction: column;
+                align-items: flex-start;
+                gap: 12px;
+                padding: 16px 20px;
+            }
+            .detail-title-area {
+                max-width: 100%;
+                width: 100%;
+            }
+            .detail-actions {
+                width: 100%;
+                justify-content: flex-start;
+                flex-wrap: wrap;
+            }
+        }
+
+        @media (max-width: 1024px) {
+            .detail-body {
+                flex-direction: column;
+                overflow-y: auto;
+            }
+            .feed-column {
+                flex: none;
+                border-right: none;
+                border-bottom: 1px solid var(--border-color);
+                height: 50vh;
+            }
+            .plan-column {
+                flex: none;
+                height: auto;
+            }
+        }
+
+        @media (max-width: 768px) {
+            body {
+                flex-direction: column;
+                overflow-y: auto;
+                height: auto;
+            }
+            .sidebar {
+                width: 100%;
+                height: auto;
+                max-height: 250px;
+                border-right: none;
+                border-bottom: 1px solid var(--border-color);
+            }
+            .detail-view {
+                height: auto;
+            }
+            .feed-column {
+                height: 45vh;
+            }
+        }
+    </style>
+</head>
+<body>
+
+    <!-- Sidebar with task execution logs -->
+    <div class="sidebar">
+        <div class="sidebar-header">
+            <div class="brand">MOSS Agent</div>
+            <div class="ws-badge">
+                <div class="ws-dot disconnected" id="ws-dot"></div>
+                <span id="ws-status">Hors ligne</span>
+            </div>
+        </div>
+        
+        <button class="new-task-btn" onclick="showLandingView()">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+            Nouvelle Tâche
+        </button>
+
+        <div class="executions-list" id="executions-list">
+            <!-- Execution cards injected here -->
+        </div>
+        <div class="sidebar-footer" style="padding: 12px 20px; border-top: 1px solid var(--border-color); display: flex; gap: 10px; justify-content: center;">
+            <button class="btn-control delete" onclick="clearAllExecutions()" style="flex: 1; border-color: rgba(248, 113, 113, 0.3); color: #f87171; background-color: rgba(248, 113, 113, 0.01);">Effacer</button>
+            <button class="btn-control pause" onclick="openSettingsModal()" style="flex: 1; border-color: var(--accent-primary); color: var(--accent-primary); background-color: rgba(129, 140, 248, 0.01); display: block;">Paramètres</button>
+        </div>
+    </div>
+
+    <!-- Main Workspace Container -->
+    <div class="main-content">
+        <!-- Default landing / Submission view -->
+        <div class="landing-view" id="landing-view">
+            <div class="landing-logo">M</div>
+            <h1 class="landing-title">Console d'exécution MOSS</h1>
+            <p class="landing-subtitle">Pilotez votre agent autonome en temps réel. Soumettez des tâches système ou de gestion de fichiers complexes.</p>
+            
+            <div class="task-form-container">
+                <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px;">
+                    <label class="form-label" for="task-project-select" style="margin: 0;">Projet d'association</label>
+                    <div style="display: flex; gap: 8px; align-items: center;">
+                        <select id="task-project-select" class="approval-reason-input" style="margin: 0; padding: 4px 8px; font-size: 12px; width: 180px; height: 28px; line-height: 20px; border-radius: 4px; background: var(--bg-card); color: var(--text-normal);">
+                            <option value="proj-default">Projet Par Défaut</option>
+                        </select>
+                        <button onclick="createNewProjectQuick()" class="btn-control resume" style="padding: 2px 8px; font-size: 11px; height: 28px; background: var(--accent-primary); border-color: var(--accent-primary); color: white; border-radius: 4px;">+ Nouveau</button>
+                    </div>
+                </div>
+                <label class="form-label" for="task-input">Décrivez la tâche à accomplir</label>
+                <textarea class="task-textarea" id="task-input" placeholder="Ex: Crée un fichier de salutations, ou analyse le dossier actuel..."></textarea>
+                <button class="task-submit-btn" onclick="submitNewTask()">Démarrer l'exécution</button>
+            </div>
+        </div>
+
+        <!-- Task execution detail view (hidden by default) -->
+        <div class="detail-view" id="detail-view" style="display: none;">
+            
+            <!-- Approval banner (shown only when task is paused for decision) -->
+            <div class="approval-banner" id="approval-banner" style="display: none;">
+                <div class="approval-title-row">
+                    <span class="approval-icon">⚠️</span>
+                    <span class="approval-title">Autorisation requise pour l'action</span>
+                </div>
+                <div class="approval-details">
+                    <span class="details-label">Capacité :</span>
+                    <span class="details-val" id="approval-capability">-</span>
+                    
+                    <span class="details-label">Action :</span>
+                    <span class="details-val" id="approval-action">-</span>
+                    
+                    <span class="details-label">Arguments :</span>
+                    <span class="details-val" id="approval-args">-</span>
+                </div>
+                <div id="approval-preview-container" style="display: none; width: 100%; margin-bottom: 10px;">
+                    <div style="font-size: 11px; font-weight: 600; color: var(--text-muted); margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.5px;">Prévisualisation :</div>
+                    <pre id="approval-preview-content" class="terminal-box" style="margin: 0; max-height: 250px; white-space: pre-wrap; word-break: break-all;"></pre>
+                </div>
+                <div>
+                    <input type="text" class="approval-reason-input" id="approval-reason" placeholder="Raison de la décision (facultatif)">
+                </div>
+                <div class="approval-buttons">
+                    <button class="btn-approval allow" onclick="submitApprovalDecision(true)">Autoriser l'action</button>
+                    <button class="btn-approval reject" onclick="submitApprovalDecision(false)">Refuser</button>
+                </div>
+            </div>
+
+            <!-- Detail header with task summary and state -->
+            <div class="detail-header">
+                <div class="detail-title-area">
+                    <div class="detail-title" id="active-task-title">-</div>
+                    <div class="detail-subtitle" id="active-task-id">-</div>
+                </div>
+                <div class="detail-actions">
+                    <span class="badge" id="active-task-status">-</span>
+                    <button class="btn-control pause" id="btn-pause" onclick="pauseActiveExecution()">Pause</button>
+                    <button class="btn-control resume" id="btn-resume" onclick="resumeActiveExecution()">Reprendre</button>
+                    <button class="btn-control cancel" id="btn-cancel" onclick="cancelActiveExecution()">Arrêter</button>
+                    <button class="btn-control delete" id="btn-delete" onclick="deleteActiveExecution()">Supprimer</button>
+                </div>
+            </div>
+
+            <div class="detail-body">
+                <!-- Chat Feed / Logs column -->
+                <div class="feed-column">
+                    <div class="feed-tabs">
+                        <button class="tab-btn active" id="tab-active-agent" onclick="switchFeedTab('active')">Agent Actif</button>
+                        <button class="tab-btn" id="tab-unified-feed" onclick="switchFeedTab('unified')">Discussion Inter-Agents 👥</button>
+                    </div>
+                    <div class="loader-bar" id="loader-bar" style="display: none;"></div>
+                    <div class="chat-container" id="chat-container">
+                        <!-- Messages injected here -->
+                    </div>
+                </div>
+
+                <!-- Plan steps column -->
+                <div class="plan-column">
+                    <div class="plan-title">Plan de l'agent</div>
+                    <div class="plan-steps" id="plan-steps">
+                        <!-- Steps checklist injected here -->
+                    </div>
+                </div>
+            </div>
+
+        </div>
+    </div>
+
+    <script>
+        const API_HOST = window.location.host;
+        let activeExecutionId = null;
+        let activeFeedTab = "active"; // "active" or "unified"
+        let globalExecutions = [];
+        let socket = null;
+
+        function switchFeedTab(tab) {
+            activeFeedTab = tab;
+            
+            // Toggle active styles on tab buttons
+            const btnActive = document.getElementById("tab-active-agent");
+            const btnUnified = document.getElementById("tab-unified-feed");
+            if (btnActive) btnActive.classList.toggle("active", tab === "active");
+            if (btnUnified) btnUnified.classList.toggle("active", tab === "unified");
+            
+            if (activeExecutionId) {
+                fetchExecutionDetails(activeExecutionId);
+            }
+        }
+
+        // Configure marked options
+        marked.setOptions({
+            gfm: true,
+            breaks: true
+        });
+
+        // Request desktop notifications permission if supported
+        if (window.Notification && Notification.permission === "default") {
+            Notification.requestPermission();
+        }
+
+        // Show a custom toast notification in the UI and a desktop notification
+        function showToast(message, type = "info") {
+            let container = document.getElementById("toast-container");
+            if (!container) {
+                container = document.createElement("div");
+                container.id = "toast-container";
+                container.className = "toast-container";
+                document.body.appendChild(container);
+            }
+            
+            const toast = document.createElement("div");
+            toast.className = `toast ${type}`;
+            
+            let icon = "ℹ️";
+            if (type === "success") icon = "✅";
+            else if (type === "warning") icon = "⚠️";
+            else if (type === "error") icon = "❌";
+            
+            toast.innerHTML = `<span>${icon}</span><span>${escapeHTML(message)}</span>`;
+            container.appendChild(toast);
+            
+            // Auto dismiss toast
+            setTimeout(() => {
+                toast.style.opacity = "0";
+                toast.style.transform = "translateY(10px)";
+                setTimeout(() => toast.remove(), 300);
+            }, 4000);
+
+            // Trigger desktop notification if granted
+            if (window.Notification && Notification.permission === "granted") {
+                try {
+                    new Notification("MOSS Agent Runtime", { body: message });
+                } catch (e) {
+                    console.warn("Desktop notification blocked or unsupported by browser:", e);
+                }
+            }
+        }
+
+        let globalProjects = [];
+        const collapsedProjects = {};
+        const collapsedExecutions = {};
+
+        async function loadProjectOptions() {
+            try {
+                const res = await fetch("/api/settings");
+                if (!res.ok) return;
+                const data = await res.json();
+                globalProjects = data.projects || [{"id": "proj-default", "name": "Projet Par Défaut"}];
+                
+                // Update select dropdown
+                const select = document.getElementById("task-project-select");
+                if (select) {
+                    const currentVal = select.value;
+                    select.innerHTML = "";
+                    globalProjects.forEach(proj => {
+                        const opt = document.createElement("option");
+                        opt.value = proj.id;
+                        opt.textContent = proj.name;
+                        select.appendChild(opt);
+                    });
+                    if (currentVal && Array.from(select.options).some(o => o.value === currentVal)) {
+                        select.value = currentVal;
+                    }
+                }
+            } catch (err) {
+                console.error("Error loading project options:", err);
+            }
+        }
+
+        // On page load, fetch previous tasks and open WebSockets
+        document.addEventListener("DOMContentLoaded", () => {
+            loadProjectOptions();
+            fetchExecutions();
+            setupWebSocket();
+        });
+
+        function toggleCollapse(event, execId) {
+            event.stopPropagation();
+            collapsedExecutions[execId] = !collapsedExecutions[execId];
+            fetchExecutions();
+        }
+
+        // Fetch executions list from server and render hierarchically
+        async function fetchExecutions() {
+            try {
+                // First get projects list to align with config on disk
+                const settingsRes = await fetch("/api/settings");
+                let projects = [{"id": "proj-default", "name": "Projet Par Défaut"}];
+                if (settingsRes.ok) {
+                    const settingsData = await settingsRes.json();
+                    projects = settingsData.projects || projects;
+                    globalProjects = projects;
+                }
+
+                const res = await fetch("/executions");
+                const data = await res.json();
+                globalExecutions = data;
+                
+                const list = document.getElementById("executions-list");
+                list.innerHTML = "";
+                
+                if (data.length === 0) {
+                    list.innerHTML = `<div style="text-align: center; color: var(--text-muted); font-size: 13px; padding-top: 20px;">Aucune tâche</div>`;
+                    return;
+                }
+                
+                // Build execution map and group sub-tasks by parent
+                const execMap = {};
+                const roots = [];
+                const childrenMap = {};
+                
+                data.forEach(exec => {
+                    execMap[exec.execution_id] = exec;
+                    if (exec.parent_execution_id) {
+                        if (!childrenMap[exec.parent_execution_id]) {
+                            childrenMap[exec.parent_execution_id] = [];
+                        }
+                        childrenMap[exec.parent_execution_id].push(exec);
+                    }
+                });
+                
+                // Identify root tasks (no parent, or parent not in map)
+                data.forEach(exec => {
+                    if (!exec.parent_execution_id || !execMap[exec.parent_execution_id]) {
+                        roots.push(exec);
+                    }
+                });
+
+                // Group root tasks by project
+                const rootsByProject = {};
+                roots.forEach(root => {
+                    const projId = root.project_id || "proj-default";
+                    if (!rootsByProject[projId]) {
+                        rootsByProject[projId] = [];
+                    }
+                    rootsByProject[projId].push(root);
+                });
+                
+                // Helper to render node and its children recursively
+                function renderNode(exec, container, depth = 0) {
+                    const card = document.createElement("div");
+                    card.className = `execution-card ${exec.execution_id === activeExecutionId ? 'active' : ''} ${depth > 0 ? 'sub-card' : ''}`;
+                    card.onclick = (e) => {
+                        e.stopPropagation();
+                        selectExecution(exec.execution_id);
+                    };
+                    
+                    let titleText = `Tâche : ${exec.execution_id.substring(0, 8)}`;
+                    if (exec.role_name) {
+                        titleText = `🤖 [${exec.role_name}]`;
+                    } else if (depth > 0) {
+                        titleText = `📋 Sous-tâche`;
+                    }
+                    
+                    const hasChildren = childrenMap[exec.execution_id] && childrenMap[exec.execution_id].length > 0;
+                    const isCollapsed = collapsedExecutions[exec.execution_id] || false;
+                    
+                    let toggleHtml = "";
+                    if (hasChildren) {
+                        toggleHtml = `
+                            <span class="toggle-arrow" onclick="toggleCollapse(event, '${exec.execution_id}')" style="cursor: pointer; margin-right: 6px; font-size: 10px; color: var(--accent-secondary); transition: transform 0.2s; display: inline-block; ${isCollapsed ? 'transform: rotate(-90deg);' : ''}">▼</span>
+                        `;
+                    } else if (depth > 0) {
+                        toggleHtml = `<span style="margin-right: 6px; font-size: 10px; color: var(--text-muted); opacity: 0.4;">├─</span>`;
+                    }
+                    
+                    card.innerHTML = `
+                        <div class="card-header">
+                            <span class="card-id">${toggleHtml}${exec.execution_id.substring(0, 8)}...</span>
+                            <span class="badge ${exec.status}">${exec.status}</span>
+                        </div>
+                        <div class="card-title" title="${exec.execution_id}" style="${depth > 0 ? 'padding-left: 4px;' : ''}">${titleText}</div>
+                    `;
+                    container.appendChild(card);
+                    
+                    if (hasChildren && !isCollapsed) {
+                        const children = childrenMap[exec.execution_id];
+                        const subContainer = document.createElement("div");
+                        subContainer.className = "sub-executions-container";
+                        subContainer.style.borderLeft = "1px dashed rgba(255,255,255,0.1)";
+                        subContainer.style.marginLeft = "12px";
+                        subContainer.style.paddingLeft = "4px";
+                        container.appendChild(subContainer);
+                        
+                        // Render children in order of execution
+                        children.forEach(child => {
+                            renderNode(child, subContainer, depth + 1);
+                        });
+                    }
+                }
+                
+                // Render root tasks grouped by active projects
+                const activeProjects = projects.filter(p => p.id === "proj-default" || (rootsByProject[p.id] && rootsByProject[p.id].length > 0));
+                
+                activeProjects.forEach(proj => {
+                    const groupContainer = document.createElement("div");
+                    groupContainer.className = "execution-group-container";
+                    list.appendChild(groupContainer);
+                    
+                    const isProjCollapsed = collapsedProjects[proj.id] || false;
+                    
+                    const header = document.createElement("div");
+                    header.className = "project-group-header";
+                    header.style.display = "flex";
+                    header.style.alignItems = "center";
+                    header.style.justifyContent = "space-between";
+                    header.style.padding = "4px 8px";
+                    header.style.marginBottom = isProjCollapsed ? "0" : "8px";
+                    header.style.borderBottom = isProjCollapsed ? "none" : "1px solid rgba(255,255,255,0.03)";
+                    header.style.cursor = "pointer";
+                    
+                    header.onclick = (e) => {
+                        collapsedProjects[proj.id] = !collapsedProjects[proj.id];
+                        fetchExecutions();
+                    };
+                    
+                    const projToggleHtml = `<span style="font-size: 10px; color: var(--text-muted); margin-right: 6px; transition: transform 0.2s; display: inline-block; ${isProjCollapsed ? 'transform: rotate(-90deg);' : ''}">▼</span>`;
+                    const count = (rootsByProject[proj.id] || []).length;
+                    
+                    header.innerHTML = `
+                        <div style="font-weight: 600; font-size: 11px; color: var(--accent-secondary); text-transform: uppercase; letter-spacing: 0.5px; display: flex; align-items: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 170px;">
+                            ${projToggleHtml} 📁 ${proj.name}
+                        </div>
+                        <span style="font-size: 10px; background: rgba(255,255,255,0.05); color: var(--text-muted); padding: 1px 6px; border-radius: 10px; font-weight: 500;">
+                            ${count}
+                        </span>
+                    `;
+                    groupContainer.appendChild(header);
+                    
+                    if (!isProjCollapsed) {
+                        const roots = rootsByProject[proj.id] || [];
+                        roots.reverse().forEach(root => {
+                            renderNode(root, groupContainer, 0);
+                        });
+                        if (roots.length === 0) {
+                            const emptyMsg = document.createElement("div");
+                            emptyMsg.style.textAlign = "center";
+                            emptyMsg.style.fontSize = "11px";
+                            emptyMsg.style.color = "var(--text-muted)";
+                            emptyMsg.style.padding = "10px 0";
+                            emptyMsg.textContent = "Aucune tâche lancée";
+                            groupContainer.appendChild(emptyMsg);
+                        }
+                    }
+                });
+            } catch (err) {
+                console.error("Error fetching executions:", err);
+            }
+        }
+
+        // Connect WebSockets for live status updates
+        function setupWebSocket() {
+            const wsProtocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+            socket = new WebSocket(`${wsProtocol}//${API_HOST}/ws/events`);
+            
+            const dot = document.getElementById("ws-dot");
+            const text = document.getElementById("ws-status");
+
+            socket.onopen = () => {
+                dot.className = "ws-dot connected";
+                text.textContent = "Connecté";
+            };
+
+            socket.onclose = () => {
+                dot.className = "ws-dot disconnected";
+                text.textContent = "Hors ligne";
+                // Auto-reconnect in 3s
+                setTimeout(setupWebSocket, 3000);
+            };
+
+            socket.onmessage = (event) => {
+                try {
+                    const data = JSON.parse(event.data);
+                    
+                    // Refresh sidebar list for any updates
+                    fetchExecutions();
+                    
+                    // If the active task changed, refresh current view
+                    const eventExecId = data.payload?.execution_id;
+                    if (eventExecId && activeExecutionId) {
+                        let shouldRefresh = (eventExecId === activeExecutionId);
+                        if (!shouldRefresh && globalExecutions.length > 0) {
+                            let currentId = eventExecId;
+                            while (currentId) {
+                                const currentExec = globalExecutions.find(e => e.execution_id === currentId);
+                                if (currentExec && currentExec.parent_execution_id) {
+                                    if (currentExec.parent_execution_id === activeExecutionId) {
+                                        shouldRefresh = true;
+                                        break;
+                                    }
+                                    currentId = currentExec.parent_execution_id;
+                                } else {
+                                    break;
+                                }
+                            }
+                        }
+                        
+                        if (shouldRefresh) {
+                            fetchExecutionDetails(activeExecutionId);
+                            
+                            // Toggle loader bar during active LLM calls
+                            const loaderBar = document.getElementById("loader-bar");
+                            if (loaderBar) {
+                                if (data.type === "LLMRequest") {
+                                    loaderBar.style.display = "block";
+                                } else if (data.type === "LLMResponse") {
+                                    loaderBar.style.display = "none";
+                                }
+                            }
+                            
+                            // Trigger toast alerts based on event type
+                            if (data.type === "StepStarted") {
+                                showToast(`Étape ${data.payload.step_index + 1} : ${data.payload.description}`, "info");
+                            } else if (data.type === "StepCompleted") {
+                                showToast(`Étape ${data.payload.step_index + 1} terminée avec succès.`, "success");
+                            } else if (data.type === "ExecutionPaused") {
+                                showToast("L'exécution est suspendue (validation requise).", "warning");
+                            } else if (data.type === "ExecutionCompleted") {
+                                showToast("Félicitations, la tâche est terminée !", "success");
+                            } else if (data.type === "ExecutionFailed") {
+                                showToast(`Erreur d'exécution : ${data.payload.error}`, "error");
+                            }
+                        }
+                    }
+                } catch (err) {
+                    console.error("Error parsing WebSocket event:", err);
+                }
+            };
+        }
+
+        // Show/hide views
+        function showLandingView() {
+            activeExecutionId = null;
+            document.getElementById("landing-view").style.display = "flex";
+            document.getElementById("detail-view").style.display = "none";
+            document.getElementById("task-input").value = "";
+            
+            // Remove active classes
+            document.querySelectorAll(".execution-card").forEach(c => c.classList.remove("active"));
+        }
+
+        // Select a task execution
+        function selectExecution(id) {
+            activeExecutionId = id;
+            document.getElementById("landing-view").style.display = "none";
+            document.getElementById("detail-view").style.display = "flex";
+            
+            // Highlight active card
+            document.querySelectorAll(".execution-card").forEach(c => {
+                c.classList.remove("active");
+                if (c.innerHTML.includes(id.substring(0, 8))) {
+                    c.classList.add("active");
+                }
+            });
+
+            fetchExecutionDetails(id);
+        }
+
+        // Fetch execution details
+        async function fetchExecutionDetails(id) {
+            try {
+                const res = await fetch(`/executions/${id}`);
+                if (!res.ok) throw new Error("Could not find execution details.");
+                
+                const exec = await res.json();
+                
+                // 1. Header details
+                let taskText = "Tâche MOSS";
+                if (exec.messages && exec.messages.length > 0) {
+                    const firstMsg = exec.messages[0];
+                    if (firstMsg.content.startsWith("Task: ")) {
+                        taskText = firstMsg.content.substring(6);
+                    } else {
+                        taskText = firstMsg.content;
+                    }
+                }
+                
+                document.getElementById("active-task-title").textContent = taskText;
+                document.getElementById("active-task-title").title = taskText;
+                document.getElementById("active-task-id").textContent = `ID: ${exec.execution_id}`;
+                
+                const statusBadge = document.getElementById("active-task-status");
+                statusBadge.textContent = exec.status;
+                statusBadge.className = `badge ${exec.status}`;
+                
+                // Toggle loader bar based on active status
+                const loaderBar = document.getElementById("loader-bar");
+                if (loaderBar) {
+                    loaderBar.style.display = exec.status === "running" ? "block" : "none";
+                }
+                
+                // Show/hide pause, resume, cancel, and delete buttons
+                const btnPause = document.getElementById("btn-pause");
+                const btnResume = document.getElementById("btn-resume");
+                const btnCancel = document.getElementById("btn-cancel");
+                const btnDelete = document.getElementById("btn-delete");
+                
+                btnPause.style.display = exec.status === "running" ? "block" : "none";
+                btnResume.style.display = (exec.status === "paused" && !exec.variables?.pending_approval) ? "block" : "none";
+                btnCancel.style.display = (exec.status === "running" || exec.status === "paused" || exec.status === "pending") ? "block" : "none";
+                btnDelete.style.display = "block";
+
+                // 2. Approval Request details
+                const approvalBanner = document.getElementById("approval-banner");
+                if (exec.status === "paused" && exec.variables?.pending_approval) {
+                    const pending = exec.variables.pending_approval;
+                    document.getElementById("approval-capability").textContent = pending.capability || "-";
+                    document.getElementById("approval-action").textContent = pending.action || "-";
+                    document.getElementById("approval-args").textContent = JSON.stringify(pending.arguments || {});
+                    
+                    // Show preview container if there's interesting content
+                    const previewContainer = document.getElementById("approval-preview-container");
+                    const previewContent = document.getElementById("approval-preview-content");
+                    if (previewContainer && previewContent) {
+                        let previewText = "";
+                        if (pending.capability === "shell" && pending.action === "execute" && pending.arguments?.command) {
+                            previewText = `$ ${pending.arguments.command}`;
+                            previewContainer.style.display = "block";
+                        } else if (pending.capability === "filesystem" && pending.action === "write" && pending.arguments?.content) {
+                            previewText = `Fichier : ${pending.arguments.path || 'inconnu'}\n\n${pending.arguments.content}`;
+                            previewContainer.style.display = "block";
+                        } else {
+                            previewContainer.style.display = "none";
+                        }
+                        previewContent.textContent = previewText;
+                    }
+                    
+                    document.getElementById("approval-reason").value = "";
+                    approvalBanner.style.display = "flex";
+                } else {
+                    approvalBanner.style.display = "none";
+                }
+
+                // 3. Conversation Logs (render with Marked.js)
+                const chatContainer = document.getElementById("chat-container");
+                chatContainer.innerHTML = "";
+                
+                let messages = [];
+                if (activeFeedTab === "unified") {
+                    try {
+                        const feedRes = await fetch(`/executions/${id}/unified-feed`);
+                        if (feedRes.ok) {
+                            messages = await feedRes.json();
+                        }
+                    } catch (e) {
+                        console.error("Failed to load unified feed:", e);
+                    }
+                } else {
+                    messages = exec.messages || [];
+                }
+                
+                if (messages) {
+                    messages.forEach(msg => {
+                        const msgDiv = document.createElement("div");
+                        msgDiv.className = `message ${msg.role}`;
+                        
+                        // Parse content: escape if tool output, markdown render otherwise
+                        let contentHtml = "";
+                        if (msg.role === "tool") {
+                            const escaped = (msg.content || "").replace(/[&<>"']/g, m => {
+                                return {'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;'}[m];
+                            });
+                            contentHtml = `<div class="terminal-box">${escaped}</div>`;
+                        } else {
+                            contentHtml = marked.parse(msg.content || "");
+                        }
+                        
+                        // Show tool calls if any
+                        let toolCallsHtml = "";
+                        if (msg.tool_calls) {
+                            msg.tool_calls.forEach(tc => {
+                                toolCallsHtml += `
+                                    <div class="terminal-box" style="border-left: 3px solid var(--accent-primary);">
+                                        <strong>[Appel Capacité]</strong> ${tc.function.name}<br>
+                                        <strong>Arguments:</strong> ${JSON.stringify(tc.function.arguments, null, 2)}
+                                    </div>
+                                `;
+                            });
+                        }
+                        
+                        let roleDisplayName = msg.role;
+                        if (msg.role === "assistant") {
+                            let roleName = msg.sender_role || exec.variables?.role_name || "Coordinateur";
+                            let icon = "🤖";
+                            let color = "var(--accent-primary)";
+                            
+                            const roleLower = roleName.toLowerCase();
+                            if (roleLower.includes("architect")) {
+                                icon = "📐";
+                                color = "#fbbf24"; // gold
+                            } else if (roleLower.includes("sécurité") || roleLower.includes("security") || roleLower.includes("reviewer")) {
+                                icon = "🛡️";
+                                color = "#f87171"; // crimson
+                            } else if (roleLower.includes("développeur") || roleLower.includes("developer") || roleLower.includes("coder")) {
+                                icon = "💻";
+                                color = "#34d399"; // emerald green
+                            } else if (roleLower.includes("test") || roleLower.includes("qa")) {
+                                icon = "🧪";
+                                color = "#60a5fa"; // blue
+                            } else if (roleLower.includes("débug") || roleLower.includes("debug") || roleLower.includes("fixer")) {
+                                icon = "🐛";
+                                color = "#fb923c"; // orange
+                            } else if (roleLower.includes("rédacteur") || roleLower.includes("writer")) {
+                                icon = "📝";
+                                color = "#9ca3af"; // gray
+                            } else if (roleName === "Coordinateur") {
+                                icon = "👑";
+                                color = "var(--accent-primary)";
+                            }
+                            
+                            roleDisplayName = `<span style="display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 9999px; background-color: ${color}20; color: ${color}; border: 1px solid ${color}40; font-size: 11px;">${icon} ${roleName}</span>`;
+                        } else if (msg.role === "tool") {
+                            roleDisplayName = `<span style="display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 9999px; background-color: rgba(255,255,255,0.05); color: #d1d5db; border: 1px solid rgba(255,255,255,0.15); font-family: monospace; font-size: 11px;">📟 OUTIL : ${msg.name || 'exécuté'}</span>`;
+                        } else if (msg.role === "user") {
+                            roleDisplayName = `<span style="display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 9999px; background-color: rgba(255,255,255,0.03); color: #e5e7eb; border: 1px solid rgba(255,255,255,0.1); font-size: 11px;">👤 UTILISATEUR</span>`;
+                        }
+                        
+                        let timeStr = "";
+                        if (msg.timestamp) {
+                            const date = new Date(msg.timestamp * 1000);
+                            timeStr = date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+                        }
+                        
+                        msgDiv.innerHTML = `
+                            <div class="message-header">
+                                <span class="message-role ${msg.role}">${roleDisplayName}</span>
+                                ${timeStr ? `<span class="message-time" style="font-size: 10.5px; color: var(--text-muted); opacity: 0.7; font-weight: 400; font-family: var(--font-family);">${timeStr}</span>` : ""}
+                            </div>
+                            <div class="message-content">${contentHtml}</div>
+                            ${toolCallsHtml}
+                        `;
+                        chatContainer.appendChild(msgDiv);
+                    });
+                    
+                    // Show a dynamic thinking indicator if active task is running
+                    if (exec.status === "running") {
+                        const thinkingDiv = document.createElement("div");
+                        thinkingDiv.className = "message assistant thinking-indicator";
+                        
+                        let thinkingText = "L'agent réfléchit et prépare l'action suivante...";
+                        if (exec.variables?.role_name) {
+                            thinkingText = `L'agent (${exec.variables.role_name}) réfléchit et prépare l'action suivante...`;
+                        }
+                        
+                        thinkingDiv.innerHTML = `
+                            <div class="thinking-dots">
+                                <div class="thinking-dot"></div>
+                                <div class="thinking-dot"></div>
+                                <div class="thinking-dot"></div>
+                            </div>
+                            <span style="font-size: 13px; color: var(--text-muted);">${thinkingText}</span>
+                        `;
+                        chatContainer.appendChild(thinkingDiv);
+                    }
+                    
+                    // Auto-scroll chat
+                    chatContainer.scrollTop = chatContainer.scrollHeight;
+                }
+
+                // 4. Plan Steps Checklist
+                const planSteps = document.getElementById("plan-steps");
+                planSteps.innerHTML = "";
+                
+                if (exec.plan && exec.plan.steps) {
+                    exec.plan.steps.forEach((step, idx) => {
+                        const stepDiv = document.createElement("div");
+                        stepDiv.className = `step-item ${step.status || 'pending'}`;
+                        
+                        let resultHtml = "";
+                        if (step.result) {
+                            resultHtml = `<div class="step-result">${escapeHTML(step.result)}</div>`;
+                        } else if (step.error) {
+                            resultHtml = `<div class="step-result" style="color: var(--status-failed); border-color: rgba(248, 113, 113, 0.2);">${escapeHTML(step.error)}</div>`;
+                        }
+                        
+                        let depsHtml = "";
+                        if (step.dependencies && step.dependencies.length > 0) {
+                            const depLabels = step.dependencies.map(depId => {
+                                const depIdx = exec.plan.steps.findIndex(s => s.id === depId);
+                                return depIdx !== -1 ? `#${depIdx + 1}` : `#${depId}`;
+                            });
+                            depsHtml = `<span style="font-size: 10px; color: var(--text-muted); background: rgba(255,255,255,0.05); padding: 1px 5px; border-radius: 4px; font-weight: 500;">Dépend de : ${depLabels.join(", ")}</span>`;
+                        }
+                        
+                        stepDiv.innerHTML = `
+                            <div class="step-indicator">${idx + 1}</div>
+                            <div class="step-content">
+                                <div class="step-desc" style="display: flex; align-items: center; flex-wrap: wrap; gap: 6px;">
+                                    <span>${escapeHTML(step.description || 'Étape sans description')}</span>
+                                    ${depsHtml}
+                                </div>
+                                ${resultHtml}
+                            </div>
+                        `;
+                        planSteps.appendChild(stepDiv);
+                    });
+                } else {
+                    planSteps.innerHTML = `<div style="color: var(--text-muted); font-size: 13px;">Planification en cours...</div>`;
+                }
+
+            } catch (err) {
+                console.error("Error fetching execution details:", err);
+            }
+        }
+
+        // Submit new task to FastAPI
+        async function submitNewTask() {
+            const input = document.getElementById("task-input");
+            const task = input.value.trim();
+            if (!task) return;
+            
+            const projSelect = document.getElementById("task-project-select");
+            const project_id = projSelect ? projSelect.value : "proj-default";
+            
+            try {
+                const res = await fetch("/executions", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ task: task, project_id: project_id })
+                });
+                
+                if (!res.ok) throw new Error("Could not submit task.");
+                
+                const data = await res.json();
+                const newId = data.execution_id;
+                
+                // Instantly select new task
+                activeExecutionId = newId;
+                selectExecution(newId);
+                fetchExecutions();
+            } catch (err) {
+                alert(`Erreur lors de la soumission de la tâche : ${err.message}`);
+            }
+        }
+
+        // Actions: Pause execution
+        async function pauseActiveExecution() {
+            if (!activeExecutionId) return;
+            try {
+                await fetch(`/executions/${activeExecutionId}/pause`, { method: "POST" });
+                fetchExecutionDetails(activeExecutionId);
+            } catch (err) {
+                console.error("Error pausing:", err);
+            }
+        }
+
+        // Actions: Resume execution
+        async function resumeActiveExecution() {
+            if (!activeExecutionId) return;
+            try {
+                await fetch(`/executions/${activeExecutionId}/resume`, { method: "POST" });
+                fetchExecutionDetails(activeExecutionId);
+            } catch (err) {
+                console.error("Error resuming:", err);
+            }
+        }
+
+        // Actions: Cancel/Stop execution
+        async function cancelActiveExecution() {
+            if (!activeExecutionId) return;
+            if (!confirm("Voulez-vous vraiment arrêter cette tâche ?")) return;
+            try {
+                await fetch(`/executions/${activeExecutionId}/cancel`, { method: "POST" });
+                fetchExecutionDetails(activeExecutionId);
+                fetchExecutions();
+            } catch (err) {
+                console.error("Error cancelling task:", err);
+            }
+        }
+
+        // Actions: Delete execution from history
+        async function deleteActiveExecution() {
+            if (!activeExecutionId) return;
+            if (!confirm("Voulez-vous vraiment supprimer définitivement cette tâche de l'historique ?")) return;
+            try {
+                await fetch(`/executions/${activeExecutionId}`, { method: "DELETE" });
+                showLandingView();
+                fetchExecutions();
+            } catch (err) {
+                console.error("Error deleting task:", err);
+            }
+        }
+
+        // Actions: Clear all task history
+        async function clearAllExecutions() {
+            if (!confirm("Voulez-vous vraiment vider tout l'historique des tâches ? Cette opération est irréversible.")) return;
+            try {
+                await fetch("/executions/clear-all", { method: "POST" });
+                showLandingView();
+                fetchExecutions();
+            } catch (err) {
+                console.error("Error clearing task history:", err);
+            }
+        }
+
+        // Actions: Submit HITL approval/rejection
+        async function submitApprovalDecision(allow) {
+            if (!activeExecutionId) return;
+            const endpoint = allow ? "approve" : "reject";
+            const reasonInput = document.getElementById("approval-reason");
+            const reason = reasonInput.value.trim();
+            
+            try {
+                const res = await fetch(`/executions/${activeExecutionId}/${endpoint}`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ reason: reason || undefined })
+                });
+                
+                if (!res.ok) throw new Error("Failed to submit decision.");
+                
+                // Refresh details
+                fetchExecutionDetails(activeExecutionId);
+            } catch (err) {
+                alert(`Erreur : ${err.message}`);
+            }
+        }
+
+        // Helper to escape HTML tags
+        function escapeHTML(str) {
+            return str
+                .replace(/&/g, "&amp;")
+                .replace(/</g, "&lt;")
+                .replace(/>/g, "&gt;")
+                .replace(/"/g, "&quot;")
+                .replace(/'/g, "&#039;");
+        }
+
+        // Settings Modal actions
+        function toggleSslCertPath() {
+            const verify = document.getElementById("settings-ssl-verify").checked;
+            document.getElementById("settings-ssl-cert-container").style.display = verify ? "flex" : "none";
+        }
+
+        let localProjects = [];
+
+        function renderSettingsProjectsList() {
+            const container = document.getElementById("settings-projects-list");
+            if (!container) return;
+            container.innerHTML = "";
+            
+            localProjects.forEach(proj => {
+                const div = document.createElement("div");
+                div.style.display = "flex";
+                div.style.flexDirection = "column";
+                div.style.gap = "4px";
+                div.style.padding = "8px";
+                div.style.background = "rgba(255,255,255,0.02)";
+                div.style.border = "1px solid var(--border-color)";
+                div.style.borderRadius = "4px";
+                div.style.marginBottom = "6px";
+                
+                const pathText = proj.path ? 
+                    `<div style="font-size: 11px; color: var(--text-muted); font-style: italic;">Dossier : ${escapeHTML(proj.path)}</div>` : 
+                    `<div style="font-size: 11px; color: var(--text-muted); opacity: 0.5;">Dossier : (Par défaut)</div>`;
+                
+                const isDefault = proj.id === "proj-default";
+                const actionsHtml = `
+                    <div style="display: flex; gap: 6px; justify-content: flex-end; margin-top: 4px;">
+                        <button class="btn-control resume" onclick="renameLocalProject('${proj.id}')" style="padding: 2px 6px; font-size: 10px; margin: 0; line-height: 12px; height: auto; width: auto; border-radius: 4px;">Renommer</button>
+                        <button class="btn-control pause" onclick="editLocalProjectPath('${proj.id}')" style="padding: 2px 6px; font-size: 10px; margin: 0; line-height: 12px; height: auto; width: auto; border-radius: 4px;">Dossier</button>
+                        ${isDefault ? 
+                            `<span style="font-size: 10px; color: var(--text-muted); opacity: 0.5; padding: 2px 6px;">Défaut</span>` :
+                            `<button class="btn-control delete" onclick="deleteLocalProject('${proj.id}')" style="padding: 2px 6px; font-size: 10px; margin: 0; line-height: 12px; height: auto; width: auto; border-radius: 4px;">Supprimer</button>`
+                        }
+                    </div>
+                `;
+                
+                div.innerHTML = `
+                    <div style="display: flex; justify-content: space-between; align-items: center;">
+                        <span style="font-size: 12px; color: var(--text-normal); font-weight: 600;">${escapeHTML(proj.name)}</span>
+                    </div>
+                    ${pathText}
+                    ${actionsHtml}
+                `;
+                container.appendChild(div);
+            });
+        }
+
+        function renameLocalProject(id) {
+            const proj = localProjects.find(p => p.id === id);
+            if (!proj) return;
+            const newName = prompt("Entrez le nouveau nom du projet :", proj.name);
+            if (!newName || !newName.trim()) return;
+            proj.name = newName.trim();
+            renderSettingsProjectsList();
+        }
+
+        function editLocalProjectPath(id) {
+            const proj = localProjects.find(p => p.id === id);
+            if (!proj) return;
+            const newPath = prompt("Entrez le chemin absolu du dossier pour ce projet (laisser vide pour utiliser le défaut) :", proj.path || "");
+            if (newPath === null) return;
+            proj.path = newPath.trim() || undefined;
+            renderSettingsProjectsList();
+        }
+
+        function addLocalProject() {
+            const input = document.getElementById("settings-new-project-name");
+            const name = input.value.trim();
+            if (!name) return;
+            
+            const id = "proj-" + Date.now();
+            localProjects.push({ id, name });
+            input.value = "";
+            renderSettingsProjectsList();
+        }
+
+        function deleteLocalProject(id) {
+            localProjects = localProjects.filter(p => p.id !== id);
+            renderSettingsProjectsList();
+        }
+
+        function createNewProjectQuick() {
+            const name = prompt("Entrez le nom du nouveau projet :");
+            if (!name || !name.trim()) return;
+            const id = "proj-" + Date.now();
+            
+            const select = document.getElementById("task-project-select");
+            const opt = document.createElement("option");
+            opt.value = id;
+            opt.textContent = name.trim();
+            select.appendChild(opt);
+            select.value = id;
+            
+            saveProjectToBackendDirectly(id, name.trim());
+        }
+
+        async function saveProjectToBackendDirectly(id, name) {
+            try {
+                const res = await fetch("/api/settings");
+                if (!res.ok) throw new Error();
+                const data = await res.json();
+                
+                const projects = data.projects || [];
+                projects.push({ id, name });
+                data.projects = projects;
+                
+                await fetch("/api/settings", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify(data)
+                });
+                showToast(`Projet "${name}" créé et enregistré.`, "success");
+                loadProjectOptions();
+            } catch (err) {
+                console.error("Failed to persist new project quick:", err);
+            }
+        }
+
+        async function openSettingsModal() {
+            try {
+                const res = await fetch("/api/settings");
+                if (!res.ok) throw new Error("Could not load settings.");
+                const data = await res.json();
+                
+                document.getElementById("settings-base-url").value = data.base_url || "";
+                document.getElementById("settings-api-key").value = data.api_key || "";
+                document.getElementById("settings-model-name").value = data.model_name || "qwen-turbo";
+                
+                const sslVerify = data.ssl_verify || false;
+                document.getElementById("settings-ssl-verify").checked = sslVerify;
+                document.getElementById("settings-ssl-cert-path").value = data.ssl_cert_path || "";
+                toggleSslCertPath();
+                
+                // Populate checkboxes for approval and deny
+                const approvals = data.approval_required_capabilities || [];
+                document.querySelectorAll("input[name='settings-approval']").forEach(cb => {
+                    cb.checked = approvals.map(a => a.toLowerCase()).includes(cb.value.toLowerCase());
+                });
+                
+                const denies = data.denied_capabilities || [];
+                document.querySelectorAll("input[name='settings-deny']").forEach(cb => {
+                    cb.checked = denies.map(d => d.toLowerCase()).includes(cb.value.toLowerCase());
+                });
+
+                // Workspace settings
+                document.getElementById("settings-workspace-path").value = data.workspace_path || "";
+                document.getElementById("settings-restrict-to-workspace").checked = data.restrict_to_workspace !== false;
+                document.getElementById("settings-allow-subfolders").checked = data.allow_subfolders !== false;
+                document.getElementById("settings-max-step-iterations").value = data.max_step_iterations || 30;
+
+                // Projects list
+                localProjects = data.projects || [{"id": "proj-default", "name": "Projet Par Défaut"}];
+                renderSettingsProjectsList();
+                
+                document.getElementById("settings-modal").style.display = "flex";
+            } catch (err) {
+                showToast("Erreur lors du chargement des paramètres: " + err.message, "error");
+            }
+        }
+
+        function closeSettingsModal() {
+            document.getElementById("settings-modal").style.display = "none";
+        }
+
+        async function saveSettings() {
+            try {
+                const api_key = document.getElementById("settings-api-key").value;
+                const base_url = document.getElementById("settings-base-url").value;
+                const model_name = document.getElementById("settings-model-name").value;
+                const ssl_verify = document.getElementById("settings-ssl-verify").checked;
+                const ssl_cert_path = document.getElementById("settings-ssl-cert-path").value;
+                const workspace_path = document.getElementById("settings-workspace-path").value;
+                const restrict_to_workspace = document.getElementById("settings-restrict-to-workspace").checked;
+                const allow_subfolders = document.getElementById("settings-allow-subfolders").checked;
+                const max_step_iterations = parseInt(document.getElementById("settings-max-step-iterations").value, 10) || 30;
+                
+                const approval_required_capabilities = [];
+                document.querySelectorAll("input[name='settings-approval']:checked").forEach(cb => {
+                    approval_required_capabilities.push(cb.value);
+                });
+                
+                const denied_capabilities = [];
+                document.querySelectorAll("input[name='settings-deny']:checked").forEach(cb => {
+                    denied_capabilities.push(cb.value);
+                });
+                
+                const res = await fetch("/api/settings", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        api_key,
+                        base_url,
+                        model_name,
+                        ssl_verify,
+                        ssl_cert_path,
+                        denied_capabilities,
+                        approval_required_capabilities,
+                        workspace_path,
+                        restrict_to_workspace,
+                        allow_subfolders,
+                        projects: localProjects,
+                        max_step_iterations
+                    })
+                });
+                
+                if (!res.ok) throw new Error("Could not save settings.");
+                showToast("Paramètres enregistrés et appliqués !", "success");
+                closeSettingsModal();
+                loadProjectOptions();
+                fetchExecutions();
+            } catch (err) {
+                showToast("Erreur lors de l'enregistrement: " + err.message, "error");
+            }
+        }
+    </script>
+
+    <!-- Settings Modal -->
+    <div id="settings-modal" class="modal-overlay" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0, 0, 0, 0.8); backdrop-filter: blur(8px); z-index: 1000; justify-content: center; align-items: center;">
+        <div class="settings-container" style="background: var(--bg-card); border: 1px solid var(--border-color); border-radius: 12px; width: 500px; max-width: 90%; padding: 24px; box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5); display: flex; flex-direction: column; gap: 16px;">
+            <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border-color); padding-bottom: 10px;">
+                <h3 style="margin: 0; font-size: 16px; color: var(--accent-secondary); display: flex; align-items: center; gap: 8px;">⚙️ Configuration de l'Agent MOSS</h3>
+                <span onclick="closeSettingsModal()" style="cursor: pointer; font-size: 18px; color: var(--text-muted);">&times;</span>
+            </div>
+            
+            <div style="display: flex; flex-direction: column; gap: 12px; overflow-y: auto; max-height: 70vh; padding-right: 4px;">
+                <!-- LLM Connection Section -->
+                <div style="font-weight: 600; font-size: 12px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 4px;">Connexion au LLM (Qwen)</div>
+                
+                <div style="display: flex; flex-direction: column; gap: 4px;">
+                    <label style="font-size: 11px; color: var(--text-normal);">Adresse API (Base URL)</label>
+                    <input type="text" id="settings-base-url" class="approval-reason-input" style="margin: 0;" placeholder="https://api.openai.com/v1">
+                </div>
+                
+                <div style="display: flex; flex-direction: column; gap: 4px;">
+                    <label style="font-size: 11px; color: var(--text-normal);">Clé API</label>
+                    <input type="password" id="settings-api-key" class="approval-reason-input" style="margin: 0;" placeholder="Saisir la clé API">
+                </div>
+
+                <div style="display: flex; flex-direction: column; gap: 4px;">
+                    <label style="font-size: 11px; color: var(--text-normal);">Modèle par défaut</label>
+                    <input type="text" id="settings-model-name" class="approval-reason-input" style="margin: 0;" placeholder="qwen-turbo">
+                </div>
+
+                <!-- SSL Certificate Settings -->
+                <div style="display: flex; align-items: center; gap: 8px; margin-top: 4px;">
+                    <input type="checkbox" id="settings-ssl-verify" onchange="toggleSslCertPath()">
+                    <label for="settings-ssl-verify" style="font-size: 12px; color: var(--text-normal); cursor: pointer;">Vérifier le certificat SSL</label>
+                </div>
+                
+                <div id="settings-ssl-cert-container" style="display: none; flex-direction: column; gap: 4px;">
+                    <label style="font-size: 11px; color: var(--text-normal);">Chemin du certificat custom (Optionnel)</label>
+                    <input type="text" id="settings-ssl-cert-path" class="approval-reason-input" style="margin: 0;" placeholder="C:\chemin\vers\certificat.pem">
+                </div>
+
+                <hr style="border: 0; border-top: 1px solid var(--border-color); margin: 8px 0;">
+
+                <!-- Workspace and Capabilities Restrictions -->
+                <div style="font-weight: 600; font-size: 12px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 4px;">Gestion de l'espace de travail (Droits)</div>
+                
+                <div style="display: flex; flex-direction: column; gap: 4px;">
+                    <label style="font-size: 11px; color: var(--text-normal);">Répertoire de travail (Workspace Path)</label>
+                    <input type="text" id="settings-workspace-path" class="approval-reason-input" style="margin: 0;" placeholder="C:\chemin\vers\workspace">
+                </div>
+
+                <div style="display: flex; gap: 16px; margin-top: 4px;">
+                    <label style="font-size: 11px; display: inline-flex; align-items: center; gap: 4px; cursor: pointer;">
+                        <input type="checkbox" id="settings-restrict-to-workspace"> Restreindre au répertoire (Sandbox)
+                    </label>
+                    <label style="font-size: 11px; display: inline-flex; align-items: center; gap: 4px; cursor: pointer;">
+                        <input type="checkbox" id="settings-allow-subfolders"> Autoriser les sous-dossiers
+                    </label>
+                </div>
+                
+                <div style="display: flex; flex-direction: column; gap: 4px; margin-top: 6px;">
+                    <label style="font-size: 11px; color: var(--text-normal);">Nombre maximum d'itérations par étape (ReAct)</label>
+                    <input type="number" id="settings-max-step-iterations" class="approval-reason-input" style="margin: 0;" placeholder="30" min="1">
+                </div>
+
+                <div style="display: flex; flex-direction: column; gap: 8px; margin-top: 8px;">
+                    <div style="font-size: 12px; color: var(--text-normal); font-weight: 500;">Capacités nécessitant une validation humaine :</div>
+                    <div style="display: flex; flex-wrap: wrap; gap: 12px;">
+                        <label style="font-size: 11px; display: inline-flex; align-items: center; gap: 4px; cursor: pointer;">
+                            <input type="checkbox" name="settings-approval" value="shell"> Exécution Shell (shell)
+                        </label>
+                        <label style="font-size: 11px; display: inline-flex; align-items: center; gap: 4px; cursor: pointer;">
+                            <input type="checkbox" name="settings-approval" value="filesystem"> Système de fichiers (filesystem)
+                        </label>
+                        <label style="font-size: 11px; display: inline-flex; align-items: center; gap: 4px; cursor: pointer;">
+                            <input type="checkbox" name="settings-approval" value="devteam.approve_quality_gate"> Quality Gate de livraison
+                        </label>
+                    </div>
+                </div>
+
+                <div style="display: flex; flex-direction: column; gap: 8px; margin-top: 6px;">
+                    <div style="font-size: 12px; color: var(--text-normal); font-weight: 500;">Capacités interdites (Bloquées) :</div>
+                    <div style="display: flex; flex-wrap: wrap; gap: 12px;">
+                        <label style="font-size: 11px; display: inline-flex; align-items: center; gap: 4px; cursor: pointer;">
+                            <input type="checkbox" name="settings-deny" value="shell"> Exécution Shell (shell)
+                        </label>
+                        <label style="font-size: 11px; display: inline-flex; align-items: center; gap: 4px; cursor: pointer;">
+                            <input type="checkbox" name="settings-deny" value="filesystem"> Système de fichiers (filesystem)
+                        </label>
+                    </div>
+                </div>
+
+                <hr style="border: 0; border-top: 1px solid var(--border-color); margin: 8px 0;">
+
+                <!-- Projects Configuration -->
+                <div style="font-weight: 600; font-size: 12px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 4px;">Gestion des Projets</div>
+                <div id="settings-projects-list" style="display: flex; flex-direction: column; gap: 4px; max-height: 150px; overflow-y: auto; padding-right: 4px;">
+                    <!-- Projects injected here -->
+                </div>
+                <div style="display: flex; gap: 8px; margin-top: 6px;">
+                    <input type="text" id="settings-new-project-name" class="approval-reason-input" style="margin: 0; flex: 1;" placeholder="Nouveau nom de projet">
+                    <button class="btn-control resume" onclick="addLocalProject()" style="padding: 4px 12px; font-size: 11px; height: auto;">Ajouter</button>
+                </div>
+            </div>
+
+            <div style="display: flex; justify-content: flex-end; gap: 12px; border-top: 1px solid var(--border-color); padding-top: 14px;">
+                <button class="btn-control pause" onclick="closeSettingsModal()" style="border-color: var(--border-color); color: var(--text-muted); background: transparent;">Annuler</button>
+                <button class="btn-control resume" onclick="saveSettings()" style="border-color: var(--accent-secondary); color: var(--bg-card); background: var(--accent-secondary);">Enregistrer</button>
+            </div>
+        </div>
+    </div>
+</body>
+</html>

@@ -1,0 +1,491 @@
+import json
+import logging
+import os
+from typing import Dict, Any, List, Optional
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, BackgroundTasks
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse
+from pydantic import BaseModel
+
+# GUI HTML path
+CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+GUI_FILE_PATH = os.path.join(CURRENT_DIR, "gui.html")
+
+from gptmoss.core import EventBus, Event, StateEngine, RuntimeKernel, ExecutionEngine, DEFAULT_SYSTEM_PROMPT
+
+logger = logging.getLogger("gptmoss.api")
+
+# Models for request/response validation
+class SubmitTaskRequest(BaseModel):
+    task: str
+    agent_config: Optional[Dict[str, Any]] = None
+    project_id: Optional[str] = None
+
+class DecisionRequest(BaseModel):
+    reason: Optional[str] = None
+
+class SettingsRequest(BaseModel):
+    api_key: str
+    base_url: str
+    model_name: str
+    ssl_verify: bool
+    ssl_cert_path: str
+    denied_capabilities: List[str]
+    approval_required_capabilities: List[str]
+    workspace_path: str
+    restrict_to_workspace: bool
+    allow_subfolders: bool
+    projects: List[Dict[str, Any]]
+    max_step_iterations: Optional[int] = 30
+
+class AppState:
+    kernel: Optional[RuntimeKernel] = None
+    execution_engine: Optional[ExecutionEngine] = None
+    state_engine: Optional[StateEngine] = None
+    event_bus: Optional[EventBus] = None
+
+app_state = AppState()
+app = FastAPI(title="MOSS Agent Runtime Platform API", version="0.1.0")
+
+# CORS middleware for potential frontend clients
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Store active websocket connections
+class ConnectionManager:
+    def __init__(self):
+        self.global_connections: List[WebSocket] = []
+        self.execution_connections: Dict[str, List[WebSocket]] = {}
+
+    async def connect_global(self, websocket: WebSocket):
+        await websocket.accept()
+        self.global_connections.append(websocket)
+
+    def disconnect_global(self, websocket: WebSocket):
+        if websocket in self.global_connections:
+            self.global_connections.remove(websocket)
+
+    async def connect_execution(self, exec_id: str, websocket: WebSocket):
+        await websocket.accept()
+        if exec_id not in self.execution_connections:
+            self.execution_connections[exec_id] = []
+        self.execution_connections[exec_id].append(websocket)
+
+    def disconnect_execution(self, exec_id: str, websocket: WebSocket):
+        if exec_id in self.execution_connections and websocket in self.execution_connections[exec_id]:
+            self.execution_connections[exec_id].remove(websocket)
+
+    async def broadcast_event(self, event: Event):
+        # Broadcaster callback for EventBus
+        data = event.model_dump()
+        json_str = json.dumps(data)
+
+        # 1. Global broadcast
+        for ws in list(self.global_connections):
+            try:
+                await ws.send_text(json_str)
+            except Exception:
+                self.disconnect_global(ws)
+
+        # 2. Execution-specific broadcast
+        exec_id = event.payload.get("execution_id")
+        if exec_id and exec_id in self.execution_connections:
+            for ws in list(self.execution_connections[exec_id]):
+                try:
+                    await ws.send_text(json_str)
+                except Exception:
+                    self.disconnect_execution(exec_id, ws)
+
+manager = ConnectionManager()
+
+@app.on_event("startup")
+async def startup_event():
+    # Connect the event bus to the websocket manager
+    if app_state.event_bus:
+        app_state.event_bus.subscribe_all(manager.broadcast_event)
+        logger.info("Subscribed websocket manager to event bus")
+        
+    # Start the debounced state saving loop
+    if app_state.state_engine and app_state.event_bus:
+        app_state.state_engine.start_db_flush_loop(app_state.event_bus)
+        logger.info("Started debounced state persistence loop")
+
+@app.get("/", response_class=HTMLResponse)
+async def get_gui():
+    if not os.path.exists(GUI_FILE_PATH):
+        raise HTTPException(status_code=404, detail="GUI file not found.")
+    with open(GUI_FILE_PATH, "r", encoding="utf-8") as f:
+        return f.read()
+
+@app.post("/executions", status_code=201)
+async def submit_task(req: SubmitTaskRequest):
+    if not app_state.kernel:
+        raise HTTPException(status_code=500, detail="Runtime kernel not initialized.")
+    
+    agent_config = req.agent_config or {"system_prompt": DEFAULT_SYSTEM_PROMPT}
+    exec_id = await app_state.kernel.submit_task(req.task, agent_config)
+    
+    state = app_state.state_engine.get_execution(exec_id)
+    if state:
+        project_id = req.project_id or "proj-default"
+        state.variables["project_id"] = project_id
+        
+        # Resolve and store custom project path from config.json
+        try:
+            filesystem_cap = app_state.execution_engine.get_capability("filesystem")
+            if filesystem_cap:
+                workspace_root = filesystem_cap.workspace_root
+                config_path = os.path.join(workspace_root, "config.json")
+                if os.path.exists(config_path):
+                    with open(config_path, "r", encoding="utf-8") as f:
+                        config_data = json.load(f)
+                    projects = config_data.get("projects") or []
+                    for p in projects:
+                        if p.get("id") == project_id and p.get("path"):
+                            state.variables["project_path"] = p.get("path")
+                            break
+        except Exception as e:
+            logger = logging.getLogger("gptmoss.api")
+            logger.error(f"Error looking up project custom path: {e}")
+        
+    return {"execution_id": exec_id, "status": "running"}
+
+@app.get("/executions")
+async def list_executions():
+    if not app_state.state_engine:
+        raise HTTPException(status_code=500, detail="State engine not initialized.")
+    
+    results = []
+    for exec_id, state in app_state.state_engine.executions.items():
+        results.append({
+            "execution_id": exec_id,
+            "status": state.status,
+            "current_step": state.current_step,
+            "steps_count": len(state.current_plan.get("steps", [])) if state.current_plan else 0,
+            "parent_execution_id": state.variables.get("parent_execution_id"),
+            "role_name": state.variables.get("role_name"),
+            "project_id": state.variables.get("project_id", "proj-default")
+        })
+    return results
+
+@app.get("/executions/{execution_id}")
+async def get_execution(execution_id: str):
+    if not app_state.state_engine:
+        raise HTTPException(status_code=500, detail="State engine not initialized.")
+    
+    if execution_id not in app_state.state_engine.executions:
+        raise HTTPException(status_code=404, detail="Execution not found.")
+        
+    state = app_state.state_engine.get_execution(execution_id)
+    convo = app_state.state_engine.get_conversation(execution_id)
+    
+    return {
+        "execution_id": execution_id,
+        "status": state.status,
+        "current_step": state.current_step,
+        "plan": state.current_plan,
+        "variables": state.variables,
+        "messages": convo.messages
+    }
+
+@app.get("/executions/{execution_id}/unified-feed")
+async def get_unified_feed(execution_id: str):
+    if not app_state.state_engine:
+        raise HTTPException(status_code=500, detail="State engine not initialized.")
+        
+    if execution_id not in app_state.state_engine.executions:
+        raise HTTPException(status_code=404, detail="Execution not found.")
+        
+    # Gather execution and all descendants (BFS traversal)
+    to_visit = [execution_id]
+    visited = []
+    
+    while to_visit:
+        curr = to_visit.pop(0)
+        visited.append(curr)
+        for child_id, child_state in app_state.state_engine.executions.items():
+            parent_id = child_state.variables.get("parent_execution_id")
+            if parent_id == curr and child_id not in visited and child_id not in to_visit:
+                to_visit.append(child_id)
+                
+    # Gather and annotate all messages
+    unified_messages = []
+    for exec_id in visited:
+        state = app_state.state_engine.get_execution(exec_id)
+        convo = app_state.state_engine.get_conversation(exec_id)
+        
+        role_name = state.variables.get("role_name") or "Coordinateur"
+        for idx, msg in enumerate(convo.messages):
+            # Skip synthetic context injection prompts for sub-agents to avoid duplicating main tasks in the conversation log
+            if exec_id != execution_id and msg.get("role") == "user":
+                continue
+                
+            msg_copy = dict(msg)
+            msg_copy["sender_role"] = role_name
+            msg_copy["execution_id"] = exec_id
+            # Default timestamp to idx offset if not present to keep sequential messages ordered
+            if "timestamp" not in msg_copy:
+                msg_copy["timestamp"] = 0.0 + (idx * 0.000001)
+            unified_messages.append(msg_copy)
+            
+    # Sort chronologically by timestamp
+    unified_messages.sort(key=lambda m: m.get("timestamp", 0.0))
+    return unified_messages
+
+@app.post("/executions/{execution_id}/approve")
+async def approve_execution(execution_id: str, req: DecisionRequest):
+    if not app_state.execution_engine or not app_state.state_engine:
+        raise HTTPException(status_code=500, detail="Engine not initialized.")
+        
+    state = app_state.state_engine.get_execution(execution_id)
+    if state.status != "paused":
+        raise HTTPException(status_code=400, detail="Execution is not in paused state.")
+        
+    # Resume with approval
+    await app_state.execution_engine.resume_with_decision(execution_id, decision="allow", reason=req.reason)
+    return {"status": "resumed", "decision": "allow"}
+
+@app.post("/executions/{execution_id}/reject")
+async def reject_execution(execution_id: str, req: DecisionRequest):
+    if not app_state.execution_engine or not app_state.state_engine:
+        raise HTTPException(status_code=500, detail="Engine not initialized.")
+        
+    state = app_state.state_engine.get_execution(execution_id)
+    if state.status != "paused":
+        raise HTTPException(status_code=400, detail="Execution is not in paused state.")
+        
+    # Resume with rejection
+    await app_state.execution_engine.resume_with_decision(execution_id, decision="reject", reason=req.reason)
+    return {"status": "resumed", "decision": "reject"}
+
+@app.post("/executions/{execution_id}/pause")
+async def pause_execution(execution_id: str):
+    if not app_state.state_engine or not app_state.event_bus:
+        raise HTTPException(status_code=500, detail="Engine not initialized.")
+        
+    state = app_state.state_engine.get_execution(execution_id)
+    if state.status != "running":
+        raise HTTPException(status_code=400, detail=f"Cannot pause execution in status '{state.status}'.")
+        
+    state.status = "paused"
+    await app_state.event_bus.publish(Event(
+        type="ExecutionPaused",
+        payload={"execution_id": execution_id}
+    ))
+    return {"status": "paused"}
+
+@app.post("/executions/{execution_id}/resume")
+async def resume_execution(execution_id: str):
+    if not app_state.state_engine or not app_state.execution_engine or not app_state.event_bus:
+        raise HTTPException(status_code=500, detail="Engine not initialized.")
+        
+    state = app_state.state_engine.get_execution(execution_id)
+    if state.status != "paused":
+        raise HTTPException(status_code=400, detail=f"Cannot resume execution in status '{state.status}'.")
+        
+    # If paused on approval, the user must use /approve or /reject.
+    # Otherwise, if it was manually paused, just set back to running and resume.
+    if "pending_approval" in state.variables:
+        raise HTTPException(
+            status_code=400,
+            detail="Execution is paused waiting for capability approval. Use /approve or /reject endpoint."
+        )
+        
+    state.status = "running"
+    await app_state.event_bus.publish(Event(
+        type="ExecutionResumed",
+        payload={"execution_id": execution_id, "decision": "manual"}
+    ))
+    
+    convo = app_state.state_engine.get_conversation(execution_id)
+    task = convo.messages[0]["content"]
+    if task.startswith("Task: "):
+        task = task[6:]
+        
+    # Rerun loop
+    asyncio.create_task(app_state.execution_engine.execute_task(execution_id, task))
+    return {"status": "running"}
+
+@app.post("/executions/{execution_id}/cancel")
+async def cancel_execution(execution_id: str):
+    if not app_state.state_engine or not app_state.event_bus:
+        raise HTTPException(status_code=500, detail="Engine not initialized.")
+        
+    state = app_state.state_engine.get_execution(execution_id)
+    if state.status not in ("running", "paused", "pending"):
+        raise HTTPException(status_code=400, detail=f"Cannot cancel execution in status '{state.status}'.")
+        
+    state.status = "cancelled"
+    await app_state.event_bus.publish(Event(
+        type="ExecutionCancelled",
+        payload={"execution_id": execution_id}
+    ))
+    return {"status": "cancelled"}
+
+@app.delete("/executions/{execution_id}")
+async def delete_execution(execution_id: str):
+    if not app_state.state_engine or not app_state.event_bus:
+        raise HTTPException(status_code=500, detail="Engine not initialized.")
+        
+    if execution_id not in app_state.state_engine.executions:
+        raise HTTPException(status_code=404, detail="Execution not found.")
+        
+    # Cascade delete all descendants
+    to_delete = [execution_id]
+    deleted = []
+    while to_delete:
+        curr = to_delete.pop(0)
+        deleted.append(curr)
+        for child_id, child_state in list(app_state.state_engine.executions.items()):
+            parent_id = child_state.variables.get("parent_execution_id")
+            if parent_id == curr and child_id not in deleted and child_id not in to_delete:
+                to_delete.append(child_id)
+                
+    for exec_id in deleted:
+        app_state.state_engine.executions.pop(exec_id, None)
+        app_state.state_engine.conversations.pop(exec_id, None)
+        
+    app_state.state_engine.save_to_disk()
+    
+    await app_state.event_bus.publish(Event(
+        type="TaskDeleted",
+        payload={"execution_id": execution_id}
+    ))
+    return {"status": "deleted"}
+
+@app.post("/executions/clear-all")
+async def clear_all_executions():
+    if not app_state.state_engine or not app_state.event_bus:
+        raise HTTPException(status_code=500, detail="Engine not initialized.")
+        
+    app_state.state_engine.executions.clear()
+    app_state.state_engine.conversations.clear()
+    app_state.state_engine.save_to_disk()
+    
+    await app_state.event_bus.publish(Event(
+        type="TasksCleared",
+        payload={}
+    ))
+    return {"status": "all_cleared"}
+
+# WebSocket Endpoints
+@app.websocket("/ws/events")
+async def ws_events(websocket: WebSocket):
+    await manager.connect_global(websocket)
+    try:
+        while True:
+            # Keep-alive loop, discard incoming client messages
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        manager.disconnect_global(websocket)
+
+@app.websocket("/ws/executions/{execution_id}")
+async def ws_execution_events(websocket: WebSocket, execution_id: str):
+    await manager.connect_execution(execution_id, websocket)
+    try:
+        while True:
+            # Keep-alive loop, discard incoming client messages
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        manager.disconnect_execution(execution_id, websocket)
+
+@app.get("/api/settings")
+async def get_settings():
+    if not app_state.execution_engine:
+        raise HTTPException(status_code=500, detail="Engine not initialized.")
+    
+    workspace_root = app_state.execution_engine.get_capability("filesystem").workspace_root
+    config_path = os.path.join(workspace_root, "config.json")
+    
+    if os.path.exists(config_path):
+        with open(config_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+            
+    # Fallback to current memory values
+    llm = app_state.execution_engine.llm_provider
+    policy = app_state.execution_engine.policy_provider
+    fs = app_state.execution_engine.get_capability("filesystem")
+    return {
+        "api_key": getattr(llm, "api_key", ""),
+        "base_url": getattr(llm, "base_url", ""),
+        "model_name": getattr(llm, "default_model", ""),
+        "ssl_verify": False,
+        "ssl_cert_path": "",
+        "denied_capabilities": getattr(policy, "denied", []),
+        "approval_required_capabilities": getattr(policy, "approval_required", []),
+        "workspace_path": getattr(fs, "workspace_root", "."),
+        "restrict_to_workspace": getattr(fs, "restrict_to_workspace", True),
+        "allow_subfolders": getattr(fs, "allow_subfolders", True),
+        "projects": [{"id": "proj-default", "name": "Projet Par Défaut"}],
+        "max_step_iterations": 30
+    }
+
+@app.post("/api/settings")
+async def update_settings(req: SettingsRequest):
+    if not app_state.execution_engine:
+        raise HTTPException(status_code=500, detail="Engine not initialized.")
+        
+    workspace_root = app_state.execution_engine.get_capability("filesystem").workspace_root
+    config_path = os.path.join(workspace_root, "config.json")
+    
+    config_data = {
+        "api_key": req.api_key,
+        "base_url": req.base_url,
+        "model_name": req.model_name,
+        "ssl_verify": req.ssl_verify,
+        "ssl_cert_path": req.ssl_cert_path,
+        "denied_capabilities": req.denied_capabilities,
+        "approval_required_capabilities": req.approval_required_capabilities,
+        "workspace_path": req.workspace_path,
+        "restrict_to_workspace": req.restrict_to_workspace,
+        "allow_subfolders": req.allow_subfolders,
+        "projects": req.projects,
+        "max_step_iterations": req.max_step_iterations or 30
+    }
+    
+    with open(config_path, "w", encoding="utf-8") as f:
+        json.dump(config_data, f, indent=2)
+        
+    llm = app_state.execution_engine.llm_provider
+    policy = app_state.execution_engine.policy_provider
+    
+    if hasattr(llm, "update_config"):
+        llm.update_config(
+            api_key=req.api_key,
+            base_url=req.base_url,
+            ssl_verify=req.ssl_verify,
+            ssl_cert_path=req.ssl_cert_path,
+            model_name=req.model_name
+        )
+    if hasattr(policy, "update_policy"):
+        policy.update_policy(
+            approval_required=req.approval_required_capabilities,
+            denied=req.denied_capabilities
+        )
+        
+    for cap_name in ["filesystem", "shell", "agent", "devteam"]:
+        cap = app_state.execution_engine.get_capability(cap_name)
+        if cap:
+            if cap_name == "filesystem" and hasattr(cap, "update_workspace_config"):
+                cap.update_workspace_config(
+                    workspace_root=req.workspace_path,
+                    restrict_to_workspace=req.restrict_to_workspace,
+                    allow_subfolders=req.allow_subfolders
+                )
+            elif hasattr(cap, "update_workspace_config"):
+                cap.update_workspace_config(req.workspace_path)
+                
+    return {"status": "success", "message": "Settings updated and persisted successfully."}
+
+def init_app(kernel: RuntimeKernel, exec_engine: ExecutionEngine, state_engine: StateEngine, event_bus: EventBus):
+    """Binds runtime dependencies to the FastAPI app state."""
+    app_state.kernel = kernel
+    app_state.execution_engine = exec_engine
+    app_state.state_engine = state_engine
+    app_state.event_bus = event_bus
+    return app
