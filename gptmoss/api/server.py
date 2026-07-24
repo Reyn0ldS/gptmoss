@@ -14,6 +14,7 @@ CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 GUI_FILE_PATH = os.path.join(CURRENT_DIR, "gui.html")
 
 from gptmoss.core import EventBus, Event, StateEngine, RuntimeKernel, ExecutionEngine, DEFAULT_SYSTEM_PROMPT
+from gptmoss.core.artifacts import ArtifactStore
 
 logger = logging.getLogger("gptmoss.api")
 
@@ -22,6 +23,12 @@ class SubmitTaskRequest(BaseModel):
     task: str
     agent_config: Optional[Dict[str, Any]] = None
     project_id: Optional[str] = None
+    attachment_ids: List[str] = []
+
+class UploadArtifactRequest(BaseModel):
+    filename: str
+    content_base64: str
+    content_type: str
 
 class DecisionRequest(BaseModel):
     reason: Optional[str] = None
@@ -148,6 +155,7 @@ async def submit_task(req: SubmitTaskRequest):
     if state:
         project_id = req.project_id or "proj-default"
         state.variables["project_id"] = project_id
+        state.variables["attachment_ids"] = req.attachment_ids
         
         # Resolve and store custom project path from config.json
         try:
@@ -168,6 +176,33 @@ async def submit_task(req: SubmitTaskRequest):
             logger.error(f"Error looking up project custom path: {e}")
         
     return {"execution_id": exec_id, "status": "running"}
+
+@app.post("/artifacts", status_code=201)
+async def upload_artifact(req: UploadArtifactRequest):
+    if not app_state.execution_engine:
+        raise HTTPException(status_code=500, detail="Engine not initialized.")
+    filesystem = app_state.execution_engine.get_capability("filesystem")
+    if not filesystem:
+        raise HTTPException(status_code=500, detail="Filesystem capability not initialized.")
+    try:
+        metadata = ArtifactStore(filesystem.workspace_root).save_base64(
+            req.filename, req.content_base64, req.content_type
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {key: metadata[key] for key in ("id", "filename", "content_type", "size_bytes", "sha256", "created_at")}
+
+@app.get("/skills")
+async def list_skills():
+    if not app_state.execution_engine:
+        raise HTTPException(status_code=500, detail="Engine not initialized.")
+    registry = app_state.execution_engine.skill_registry
+    if not registry:
+        return []
+    return [
+        {"name": skill.name, "description": skill.description, "allowed_capabilities": skill.allowed_capabilities, "digest": skill.digest}
+        for skill in registry.skills.values()
+    ]
 
 @app.get("/executions")
 async def list_executions():

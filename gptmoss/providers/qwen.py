@@ -22,6 +22,7 @@ class QwenProvider(LLMProvider):
         # DashScope OpenAI-compatible endpoint or local host
         self.base_url = base_url or os.getenv("OPENAI_BASE_URL") or "https://dashscope.aliyuncs.com/compatible-mode/v1"
         self.default_model = default_model
+        self.supports_vision = any(marker in default_model.lower() for marker in ("vision", "-vl", "omni"))
         
         logger.info(f"Initializing QwenProvider calling base_url={self.base_url} with default_model={self.default_model}")
         import httpx
@@ -34,6 +35,7 @@ class QwenProvider(LLMProvider):
         self.api_key = api_key
         self.base_url = base_url
         self.default_model = model_name
+        self.supports_vision = any(marker in model_name.lower() for marker in ("vision", "-vl", "omni"))
         
         import httpx
         if ssl_verify:
@@ -169,6 +171,15 @@ class QwenProvider(LLMProvider):
         cleaned_messages = []
         for msg in messages:
             role = msg.get("role")
+            if isinstance(msg.get("content"), list):
+                text_parts = []
+                for part in msg["content"]:
+                    if part.get("type") == "text":
+                        text_parts.append(part.get("text", ""))
+                    elif part.get("type") == "image_url":
+                        text_parts.append("[image attached]")
+                cleaned_messages.append({"role": role, "content": "\\n".join(text_parts)})
+                continue
             if role == "tool":
                 cleaned_messages.append({
                     "role": "user",

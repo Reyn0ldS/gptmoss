@@ -6,6 +6,8 @@ from gptmoss.core.kernel import RuntimeKernel
 from gptmoss.core.scheduler import Scheduler
 from gptmoss.core.constants import DEFAULT_SYSTEM_PROMPT
 from gptmoss.core.observability import TraceRecorder
+from gptmoss.core.skills import SkillRegistry
+from gptmoss.core.artifacts import ArtifactStore
 
 __all__ = [
     "Event",
@@ -20,4 +22,6 @@ __all__ = [
     "Scheduler",
     "DEFAULT_SYSTEM_PROMPT",
     "TraceRecorder",
+    "SkillRegistry",
+    "ArtifactStore",
 ]

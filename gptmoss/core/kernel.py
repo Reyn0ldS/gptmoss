@@ -47,6 +47,8 @@ class RuntimeKernel:
             exec_state.variables["role_name"] = agent_config["role_name"]
         if "parent_execution_id" in agent_config:
             exec_state.variables["parent_execution_id"] = agent_config["parent_execution_id"]
+        if "skills" in agent_config:
+            exec_state.variables["requested_skills"] = agent_config["skills"]
         
         # Emit TaskCreated
         await self.event_bus.publish(Event(

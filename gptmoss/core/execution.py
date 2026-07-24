@@ -12,6 +12,8 @@ from gptmoss.interfaces.planner import PlannerProvider
 from gptmoss.interfaces.policy import PolicyProvider, PolicyDecision
 from gptmoss.interfaces.capability import generate_action_schema, get_actions
 from gptmoss.core.observability import TraceRecorder
+from gptmoss.core.skills import SkillRegistry
+from gptmoss.core.artifacts import ArtifactStore
 
 def parse_step_role(description: str) -> Optional[str]:
     desc_lower = description.lower()
@@ -46,6 +48,8 @@ class ExecutionEngine:
         planner: PlannerProvider,
         policy_provider: PolicyProvider,
         telemetry: Optional[TraceRecorder] = None,
+        skill_registry: Optional[SkillRegistry] = None,
+        artifact_store: Optional[ArtifactStore] = None,
     ):
         self.event_bus = event_bus
         self.state_engine = state_engine
@@ -54,6 +58,8 @@ class ExecutionEngine:
         self.planner = planner
         self.policy_provider = policy_provider
         self.telemetry = telemetry or TraceRecorder()
+        self.skill_registry = skill_registry
+        self.artifact_store = artifact_store
         self._capabilities: Dict[str, Any] = {}  # capability_name -> instance
 
     def register_capability(self, capability_name: str, instance: Any):
@@ -67,15 +73,30 @@ class ExecutionEngine:
         """Retrieve a registered capability by name."""
         return self._capabilities.get(capability_name.lower())
 
-    def get_capabilities_schemas(self, is_sub_agent: bool = False) -> List[Dict[str, Any]]:
+    def get_capabilities_schemas(self, is_sub_agent: bool = False, allowed_capabilities: Optional[set[str]] = None) -> List[Dict[str, Any]]:
         """Generate JSON schemas for all registered capabilities."""
         schemas = []
         for name, inst in self._capabilities.items():
+            if allowed_capabilities is not None and name.lower() not in allowed_capabilities:
+                continue
             if is_sub_agent and name.lower() in ("agent", "devteam"):
                 continue
             for act_name, method in inst.actions.items():
                 schemas.append(generate_action_schema(name, act_name, method))
         return schemas
+
+    def _active_skills(self, state, task: str):
+        if not self.skill_registry:
+            return []
+        requested = state.variables.get("requested_skills")
+        selected = self.skill_registry.select(task, requested=requested)
+        state.variables["active_skills"] = [{"name": skill.name, "digest": skill.digest} for skill in selected]
+        return selected
+
+    @staticmethod
+    def _allowed_capabilities(skills) -> Optional[set[str]]:
+        allowed = set().union(*(set(skill.allowed_capabilities) for skill in skills)) if skills else set()
+        return allowed or None
 
     async def execute_task(self, execution_id: str, task: str):
         """
@@ -84,6 +105,8 @@ class ExecutionEngine:
         state = self.state_engine.get_execution(execution_id)
         convo = self.state_engine.get_conversation(execution_id)
         self.telemetry.record("execution_started", execution_id, task=task)
+        skills = self._active_skills(state, task)
+        allowed_capabilities = self._allowed_capabilities(skills)
 
         # 1. Initialize states if new
         if state.status == "pending":
@@ -118,7 +141,7 @@ class ExecutionEngine:
         # 2. Plan generation (if not already planned)
         if not state.current_plan:
             is_sub_agent = state.variables.get("parent_execution_id") is not None
-            schemas = self.get_capabilities_schemas(is_sub_agent=is_sub_agent)
+            schemas = self.get_capabilities_schemas(is_sub_agent=is_sub_agent, allowed_capabilities=allowed_capabilities)
             context = await self.context_engine.compile_context(
                 execution_id=execution_id,
                 conversation_id=execution_id,
@@ -126,6 +149,7 @@ class ExecutionEngine:
                 capabilities_schemas=schemas,
                 extra_query=task
             )
+            context["skills"] = [{"name": skill.name, "description": skill.description} for skill in skills]
             await self.event_bus.publish(Event(
                 type="ContextBuilt",
                 payload={"execution_id": execution_id, "context_summary": "Initial context compiled."}
@@ -356,6 +380,8 @@ class ExecutionEngine:
         """
         state = self.state_engine.get_execution(execution_id)
         convo = self.state_engine.get_conversation(execution_id)
+        skills = self._active_skills(state, state.variables.get("parent_task") or step.get("description", ""))
+        allowed_capabilities = self._allowed_capabilities(skills)
         
         step_desc = step.get("description", "")
         # Sub-prompt for the step: only append if not resuming from a pending approval to preserve tool call message ordering
@@ -423,7 +449,7 @@ class ExecutionEngine:
 
             # Build tools list
             is_sub_agent = state.variables.get("parent_execution_id") is not None
-            schemas = self.get_capabilities_schemas(is_sub_agent=is_sub_agent)
+            schemas = self.get_capabilities_schemas(is_sub_agent=is_sub_agent, allowed_capabilities=allowed_capabilities)
 
             # Compile context
             context = await self.context_engine.compile_context(
@@ -432,11 +458,19 @@ class ExecutionEngine:
                 agent_id="default_agent",
                 capabilities_schemas=schemas
             )
+            if self.artifact_store and state.variables.get("attachment_ids"):
+                context["attachments"] = self.artifact_store.context_items(
+                    state.variables["attachment_ids"], getattr(self.llm_provider, "supports_vision", False)
+                )
 
             # Request LLM completion
             llm_messages = []
             role_name = state.variables.get("role_name", "Coordinateur")
             base_prompt = context.get("system_instructions", "")
+            if skills:
+                base_prompt += "\\n\\nActive skills:\\n" + "\\n\\n".join(
+                    f"[{skill.name}]\\n{skill.instructions}" for skill in skills
+                )
             
             role_lower = role_name.lower()
             if "architect" in role_lower:
@@ -480,6 +514,16 @@ class ExecutionEngine:
                 role_prompt += ("\\nWhen finished, return a JSON object with keys: summary, artifacts, evidence, risks, next_action. "
                                 "Use empty arrays or strings when a field does not apply.")
             llm_messages.append({"role": "system", "content": role_prompt})
+            for attachment in context.get("attachments", []):
+                if attachment.get("text") is not None:
+                    llm_messages.append({"role": "user", "content": f"Attached file {attachment['filename']}:\\n{attachment['text']}"})
+                elif attachment.get("image_url"):
+                    llm_messages.append({"role": "user", "content": [
+                        {"type": "text", "text": f"Attached image: {attachment['filename']}"},
+                        {"type": "image_url", "image_url": {"url": attachment["image_url"]}},
+                    ]})
+                else:
+                    llm_messages.append({"role": "system", "content": f"Attachment {attachment['filename']}: {attachment['note']}"})
             if context.get("context_summary"):
                 llm_messages.append({"role": "system", "content": context["context_summary"]})
             llm_messages.extend(context["conversation_history"])

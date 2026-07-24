@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 # Ensure local packages are resolvable even in isolated python environments
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from gptmoss.core import EventBus, StateEngine, ContextEngine, ExecutionEngine, RuntimeKernel, Event, DEFAULT_SYSTEM_PROMPT, TraceRecorder
+from gptmoss.core import EventBus, StateEngine, ContextEngine, ExecutionEngine, RuntimeKernel, Event, DEFAULT_SYSTEM_PROMPT, TraceRecorder, SkillRegistry, ArtifactStore
 from gptmoss.providers import QwenProvider
 from gptmoss.memory import JSONMemoryProvider
 from gptmoss.capabilities import FilesystemCapability, ShellCapability, AgentCapability, DeveloperTeamCapability
@@ -39,6 +39,11 @@ def bootstrap_runtime(workspace_root: str):
     event_bus = EventBus()
     state_engine = StateEngine(persist_path=os.path.join(workspace_root, "state_store.json"))
     telemetry = TraceRecorder(os.path.join(workspace_root, "telemetry.jsonl"))
+    artifact_store = ArtifactStore(workspace_root)
+    skill_registry = SkillRegistry([
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "gptmoss", "skills"),
+        os.path.join(workspace_root, "skills"),
+    ])
 
 
 
@@ -121,6 +126,8 @@ def bootstrap_runtime(workspace_root: str):
         planner=planner,
         policy_provider=policy_provider,
         telemetry=telemetry,
+        skill_registry=skill_registry,
+        artifact_store=artifact_store,
     )
 
     # Register capabilities
