@@ -7,7 +7,7 @@ from typing import Dict, Any, List, Optional
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 # GUI HTML path
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -34,7 +34,7 @@ class DecisionRequest(BaseModel):
     reason: Optional[str] = None
 
 class SettingsRequest(BaseModel):
-    api_key: str
+    api_key: str = ""
     base_url: str
     model_name: str
     ssl_verify: bool
@@ -45,7 +45,8 @@ class SettingsRequest(BaseModel):
     restrict_to_workspace: bool
     allow_subfolders: bool
     projects: List[Dict[str, Any]]
-    max_step_iterations: Optional[int] = 30
+    max_step_iterations: int = Field(default=30, ge=1, le=100)
+    max_context_chars: int = Field(default=12_000, ge=2_000, le=100_000)
 
 class AppState:
     kernel: Optional[RuntimeKernel] = None
@@ -480,7 +481,8 @@ async def get_settings():
         "restrict_to_workspace": getattr(fs, "restrict_to_workspace", True),
         "allow_subfolders": getattr(fs, "allow_subfolders", True),
         "projects": [{"id": "proj-default", "name": "Projet Par Défaut"}],
-        "max_step_iterations": 30
+        "max_step_iterations": 30,
+        "max_context_chars": 12_000
     }
 
 @app.post("/api/settings")
@@ -506,7 +508,8 @@ async def update_settings(req: SettingsRequest):
         "restrict_to_workspace": req.restrict_to_workspace,
         "allow_subfolders": req.allow_subfolders,
         "projects": req.projects,
-        "max_step_iterations": req.max_step_iterations or 30
+        "max_step_iterations": req.max_step_iterations,
+        "max_context_chars": req.max_context_chars
     }
     
     with open(config_path, "w", encoding="utf-8") as f:

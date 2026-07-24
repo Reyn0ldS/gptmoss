@@ -78,6 +78,11 @@ def bootstrap_runtime(workspace_root: str):
     except (TypeError, ValueError):
         max_context_chars = 12_000
     max_context_chars = max(2_000, min(max_context_chars, 100_000))
+    try:
+        max_step_iterations = int(config_data.get("max_step_iterations", 30))
+    except (TypeError, ValueError):
+        max_step_iterations = 30
+    max_step_iterations = max(1, min(max_step_iterations, 100))
     projects = config_data.get("projects") or [{"id": "proj-default", "name": "Projet Par Défaut"}]
     context_engine.max_history_chars = max_context_chars
 
@@ -93,6 +98,7 @@ def bootstrap_runtime(workspace_root: str):
         "restrict_to_workspace": restrict_to_workspace,
         "allow_subfolders": allow_subfolders,
         "max_context_chars": max_context_chars,
+        "max_step_iterations": max_step_iterations,
         "projects": projects
     }
     

@@ -278,3 +278,68 @@ def test_api_unified_feed_flow():
     
     assert feed[2]["content"] == "Parent assistant msg"
     assert feed[2]["sender_role"] == "Coordinateur"
+
+def test_api_settings_preserve_secret_and_context_budget(tmp_path):
+    event_bus = EventBus()
+    state_engine = StateEngine()
+    memory = RAMMemoryProvider()
+    context_engine = ContextEngine(state_engine, memory)
+    mock_llm = MockLLMProvider()
+    policy = SimplePolicyProvider()
+    exec_engine = ExecutionEngine(
+        event_bus=event_bus,
+        state_engine=state_engine,
+        context_engine=context_engine,
+        llm_provider=mock_llm,
+        planner=SimplePlanner(mock_llm),
+        policy_provider=policy,
+    )
+    from gptmoss.capabilities.filesystem import FilesystemCapability
+    exec_engine.register_capability("filesystem", FilesystemCapability(str(tmp_path)))
+    kernel = RuntimeKernel(event_bus=event_bus, state_engine=state_engine, execution_engine=exec_engine)
+    init_app(kernel, exec_engine, state_engine, event_bus)
+    client = ASGIClient(app)
+
+    settings = {
+        "api_key": "secret-key",
+        "base_url": "https://example.test/v1",
+        "model_name": "test-model",
+        "ssl_verify": True,
+        "ssl_cert_path": "",
+        "denied_capabilities": [],
+        "approval_required_capabilities": ["shell"],
+        "workspace_path": str(tmp_path),
+        "restrict_to_workspace": True,
+        "allow_subfolders": True,
+        "projects": [{"id": "proj-default", "name": "Default"}],
+        "max_step_iterations": 12,
+        "max_context_chars": 24000,
+    }
+    assert client.post("/api/settings", json=settings).status_code == 200
+
+    public_settings = client.get("/api/settings").json()
+    assert "api_key" not in public_settings
+    assert public_settings["max_context_chars"] == 24000
+
+    # This mirrors the quick-project UI flow: the GET response has no secret.
+    public_settings["projects"].append({"id": "proj-ui", "name": "Created from UI"})
+    response = client.post("/api/settings", json=public_settings)
+    assert response.status_code == 200
+    assert mock_llm.api_key == "secret-key"
+    persisted = (tmp_path / "config.json").read_text(encoding="utf-8")
+    assert '"max_context_chars": 24000' in persisted
+
+    invalid = dict(public_settings)
+    invalid["max_context_chars"] = 100
+    assert client.post("/api/settings", json=invalid).status_code == 422
+
+
+def test_gui_uses_sanitized_markdown_renderer():
+    from pathlib import Path
+
+    gui = (Path(__file__).parents[1] / "gptmoss" / "api" / "gui.html").read_text(encoding="utf-8")
+    assert "function renderSafeMarkdown" in gui
+    assert 'contentHtml = renderSafeMarkdown(msg.content || "");' in gui
+    assert 'contentHtml = marked.parse(msg.content || "");' not in gui
+    assert "--bg-card:" in gui
+    assert "--text-normal:" in gui

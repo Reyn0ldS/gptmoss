@@ -27,6 +27,8 @@
             --text-main: #e5e7eb;
             --text-muted: #9ca3af;
             --text-inverse: #0b0f19;
+            --text-normal: #e5e7eb;
+            --bg-card: #101625;
             
             --status-running: #60a5fa; /* blue */
             --status-completed: #34d399; /* emerald */
@@ -1188,6 +1190,27 @@
             breaks: true
         });
 
+        // LLM output is untrusted. Render only a small, safe HTML subset from Markdown.
+        function renderSafeMarkdown(markdown) {
+            const allowedTags = new Set(["A", "BLOCKQUOTE", "BR", "CODE", "DEL", "EM", "H1", "H2", "H3", "H4", "H5", "H6", "HR", "LI", "OL", "P", "PRE", "STRONG", "TABLE", "TBODY", "TD", "TH", "THEAD", "TR", "UL"]);
+            const documentFragment = new DOMParser().parseFromString(marked.parse(markdown || ""), "text/html");
+            for (const element of Array.from(documentFragment.body.querySelectorAll("*"))) {
+                if (!allowedTags.has(element.tagName)) {
+                    element.replaceWith(...Array.from(element.childNodes));
+                    continue;
+                }
+                for (const attribute of Array.from(element.attributes)) {
+                    const keepLink = element.tagName === "A" && attribute.name.toLowerCase() === "href" && /^(https?:|mailto:|#)/i.test(attribute.value.trim());
+                    if (!keepLink) element.removeAttribute(attribute.name);
+                }
+                if (element.tagName === "A") {
+                    element.setAttribute("target", "_blank");
+                    element.setAttribute("rel", "noopener noreferrer");
+                }
+            }
+            return documentFragment.body.innerHTML;
+        }
+
         // Request desktop notifications permission if supported
         if (window.Notification && Notification.permission === "default") {
             Notification.requestPermission();
@@ -1229,6 +1252,19 @@
                     console.warn("Desktop notification blocked or unsupported by browser:", e);
                 }
             }
+        }
+
+        async function requestApi(url, options = {}) {
+            const response = await fetch(url, options);
+            if (response.ok) return response;
+            let detail = `HTTP ${response.status}`;
+            try {
+                const payload = await response.json();
+                detail = payload.detail || payload.message || detail;
+            } catch (_) {
+                // A non-JSON error still has a useful HTTP status.
+            }
+            throw new Error(detail);
         }
 
         let globalProjects = [];
@@ -1657,7 +1693,7 @@
                             });
                             contentHtml = `<div class="terminal-box">${escaped}</div>`;
                         } else {
-                            contentHtml = marked.parse(msg.content || "");
+                            contentHtml = renderSafeMarkdown(msg.content || "");
                         }
                         
                         // Show tool calls if any
@@ -1666,8 +1702,8 @@
                             msg.tool_calls.forEach(tc => {
                                 toolCallsHtml += `
                                     <div class="terminal-box" style="border-left: 3px solid var(--accent-primary);">
-                                        <strong>[Appel Capacité]</strong> ${tc.function.name}<br>
-                                        <strong>Arguments:</strong> ${JSON.stringify(tc.function.arguments, null, 2)}
+                                        <strong>[Appel Capacité]</strong> ${escapeHTML(String(tc.function.name || ""))}<br>
+                                        <strong>Arguments:</strong> ${escapeHTML(JSON.stringify(tc.function.arguments || {}, null, 2))}
                                     </div>
                                 `;
                             });
@@ -1703,7 +1739,7 @@
                                 color = "var(--accent-primary)";
                             }
                             
-                            roleDisplayName = `<span style="display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 9999px; background-color: ${color}20; color: ${color}; border: 1px solid ${color}40; font-size: 11px;">${icon} ${roleName}</span>`;
+                            roleDisplayName = `<span style="display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 9999px; background-color: ${color}20; color: ${color}; border: 1px solid ${color}40; font-size: 11px;">${icon} ${escapeHTML(String(roleName))}</span>`;
                         } else if (msg.role === "tool") {
                             roleDisplayName = `<span style="display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 9999px; background-color: rgba(255,255,255,0.05); color: #d1d5db; border: 1px solid rgba(255,255,255,0.15); font-family: monospace; font-size: 11px;">📟 OUTIL : ${msg.name || 'exécuté'}</span>`;
                         } else if (msg.role === "user") {
@@ -1832,7 +1868,7 @@
         async function pauseActiveExecution() {
             if (!activeExecutionId) return;
             try {
-                await fetch(`/executions/${activeExecutionId}/pause`, { method: "POST" });
+                await requestApi(`/executions/${activeExecutionId}/pause`, { method: "POST" });
                 fetchExecutionDetails(activeExecutionId);
             } catch (err) {
                 console.error("Error pausing:", err);
@@ -1843,7 +1879,7 @@
         async function resumeActiveExecution() {
             if (!activeExecutionId) return;
             try {
-                await fetch(`/executions/${activeExecutionId}/resume`, { method: "POST" });
+                await requestApi(`/executions/${activeExecutionId}/resume`, { method: "POST" });
                 fetchExecutionDetails(activeExecutionId);
             } catch (err) {
                 console.error("Error resuming:", err);
@@ -1855,7 +1891,7 @@
             if (!activeExecutionId) return;
             if (!confirm("Voulez-vous vraiment arrêter cette tâche ?")) return;
             try {
-                await fetch(`/executions/${activeExecutionId}/cancel`, { method: "POST" });
+                await requestApi(`/executions/${activeExecutionId}/cancel`, { method: "POST" });
                 fetchExecutionDetails(activeExecutionId);
                 fetchExecutions();
             } catch (err) {
@@ -1868,7 +1904,7 @@
             if (!activeExecutionId) return;
             if (!confirm("Voulez-vous vraiment supprimer définitivement cette tâche de l'historique ?")) return;
             try {
-                await fetch(`/executions/${activeExecutionId}`, { method: "DELETE" });
+                await requestApi(`/executions/${activeExecutionId}`, { method: "DELETE" });
                 showLandingView();
                 fetchExecutions();
             } catch (err) {
@@ -1880,7 +1916,7 @@
         async function clearAllExecutions() {
             if (!confirm("Voulez-vous vraiment vider tout l'historique des tâches ? Cette opération est irréversible.")) return;
             try {
-                await fetch("/executions/clear-all", { method: "POST" });
+                await requestApi("/executions/clear-all", { method: "POST" });
                 showLandingView();
                 fetchExecutions();
             } catch (err) {
@@ -2074,6 +2110,7 @@
                 document.getElementById("settings-restrict-to-workspace").checked = data.restrict_to_workspace !== false;
                 document.getElementById("settings-allow-subfolders").checked = data.allow_subfolders !== false;
                 document.getElementById("settings-max-step-iterations").value = data.max_step_iterations || 30;
+                document.getElementById("settings-max-context-chars").value = data.max_context_chars || 12000;
 
                 // Projects list
                 localProjects = data.projects || [{"id": "proj-default", "name": "Projet Par Défaut"}];
@@ -2100,6 +2137,7 @@
                 const restrict_to_workspace = document.getElementById("settings-restrict-to-workspace").checked;
                 const allow_subfolders = document.getElementById("settings-allow-subfolders").checked;
                 const max_step_iterations = parseInt(document.getElementById("settings-max-step-iterations").value, 10) || 30;
+                const max_context_chars = parseInt(document.getElementById("settings-max-context-chars").value, 10) || 12000;
                 
                 const approval_required_capabilities = [];
                 document.querySelectorAll("input[name='settings-approval']:checked").forEach(cb => {
@@ -2126,7 +2164,8 @@
                         restrict_to_workspace,
                         allow_subfolders,
                         projects: localProjects,
-                        max_step_iterations
+                        max_step_iterations,
+                        max_context_chars
                     })
                 });
                 
@@ -2200,7 +2239,11 @@
                 
                 <div style="display: flex; flex-direction: column; gap: 4px; margin-top: 6px;">
                     <label style="font-size: 11px; color: var(--text-normal);">Nombre maximum d'itérations par étape (ReAct)</label>
-                    <input type="number" id="settings-max-step-iterations" class="approval-reason-input" style="margin: 0;" placeholder="30" min="1">
+                    <input type="number" id="settings-max-step-iterations" class="approval-reason-input" style="margin: 0;" placeholder="30" min="1" max="100">
+                </div>
+                <div style="display: flex; flex-direction: column; gap: 4px; margin-top: 6px;">
+                    <label style="font-size: 11px; color: var(--text-normal);">Budget de contexte (caractères)</label>
+                    <input type="number" id="settings-max-context-chars" class="approval-reason-input" style="margin: 0;" placeholder="12000" min="2000" max="100000">
                 </div>
 
                 <div style="display: flex; flex-direction: column; gap: 8px; margin-top: 8px;">
