@@ -9,12 +9,32 @@ class ShellCapability:
     """
     Capability to execute local CLI shell commands.
     """
-    def __init__(self, workspace_root: str = ".", state_engine = None):
+    def __init__(self, workspace_root: str = ".", state_engine = None, safe_mode: bool = True, timeout_seconds: int = 60, max_output_chars: int = 12_000):
         self.workspace_root = os.path.abspath(workspace_root)
         self.state_engine = state_engine
+        self.safe_mode = safe_mode
+        self.timeout_seconds = timeout_seconds
+        self.max_output_chars = max_output_chars
 
     def update_workspace_config(self, workspace_root: str):
         self.workspace_root = os.path.abspath(workspace_root)
+
+    def update_safety_config(self, safe_mode: bool = True, timeout_seconds: int = 60, max_output_chars: int = 12_000):
+        self.safe_mode = safe_mode
+        self.timeout_seconds = max(1, min(timeout_seconds, 600))
+        self.max_output_chars = max(1_000, min(max_output_chars, 100_000))
+
+    def _blocked_command_reason(self, command: str) -> Optional[str]:
+        if not self.safe_mode:
+            return None
+        normalized = command.lower().replace("\\", "/")
+        destructive_patterns = (
+            "rm -rf /", "del /s", "format ", "diskpart", "shutdown ",
+            "reboot", "reg delete", "remove-item -recurse", "clear-disk",
+        )
+        if any(pattern in normalized for pattern in destructive_patterns):
+            return "Command blocked by shell safe mode because it is destructive."
+        return None
 
     def _get_workspace_for_execution(self, execution_id: Optional[str]) -> str:
         if not self.state_engine or not execution_id:
@@ -56,6 +76,9 @@ class ShellCapability:
         try:
             # Resolve generic python command to current active python binary
             cleaned_cmd = command.strip()
+            blocked_reason = self._blocked_command_reason(cleaned_cmd)
+            if blocked_reason:
+                return f"Error: {blocked_reason}"
             if sys.platform == "win32":
                 # Translate unix-style mkdir -p to windows mkdir and fix separators
                 if "mkdir -p " in cleaned_cmd:
@@ -75,7 +98,7 @@ class ShellCapability:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
-                timeout=60
+                timeout=self.timeout_seconds
             )
             
             output = ""
@@ -86,8 +109,10 @@ class ShellCapability:
             if not output:
                 output = f"Command finished with exit code {result.returncode} (no output)."
                 
+            if len(output) > self.max_output_chars:
+                output = output[:self.max_output_chars] + "\\n… [output truncated by shell safety limit]"
             return output
         except subprocess.TimeoutExpired:
-            return "Error: Command execution timed out (60s)."
+            return f"Error: Command execution timed out ({self.timeout_seconds}s)."
         except Exception as e:
             return f"Error executing command: {e}"

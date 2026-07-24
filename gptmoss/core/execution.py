@@ -1,4 +1,5 @@
 import asyncio
+import json
 import time
 import logging
 import inspect
@@ -10,6 +11,7 @@ from gptmoss.interfaces.llm import LLMProvider
 from gptmoss.interfaces.planner import PlannerProvider
 from gptmoss.interfaces.policy import PolicyProvider, PolicyDecision
 from gptmoss.interfaces.capability import generate_action_schema, get_actions
+from gptmoss.core.observability import TraceRecorder
 
 def parse_step_role(description: str) -> Optional[str]:
     desc_lower = description.lower()
@@ -43,6 +45,7 @@ class ExecutionEngine:
         llm_provider: LLMProvider,
         planner: PlannerProvider,
         policy_provider: PolicyProvider,
+        telemetry: Optional[TraceRecorder] = None,
     ):
         self.event_bus = event_bus
         self.state_engine = state_engine
@@ -50,6 +53,7 @@ class ExecutionEngine:
         self.llm_provider = llm_provider
         self.planner = planner
         self.policy_provider = policy_provider
+        self.telemetry = telemetry or TraceRecorder()
         self._capabilities: Dict[str, Any] = {}  # capability_name -> instance
 
     def register_capability(self, capability_name: str, instance: Any):
@@ -79,6 +83,7 @@ class ExecutionEngine:
         """
         state = self.state_engine.get_execution(execution_id)
         convo = self.state_engine.get_conversation(execution_id)
+        self.telemetry.record("execution_started", execution_id, task=task)
 
         # 1. Initialize states if new
         if state.status == "pending":
@@ -126,7 +131,9 @@ class ExecutionEngine:
                 payload={"execution_id": execution_id, "context_summary": "Initial context compiled."}
             ))
 
+            planning_started = time.perf_counter()
             plan_result = await self.planner.plan(task, context, schemas)
+            self.telemetry.record("plan_generated", execution_id, duration_ms=round((time.perf_counter() - planning_started) * 1000, 2), steps=len(plan_result.get("steps", [])))
             state.current_plan = plan_result
             state.current_step = 0
             await self.event_bus.publish(Event(
@@ -219,7 +226,9 @@ class ExecutionEngine:
                             if msg.get("role") == "assistant" and msg.get("content"):
                                 last_response = msg["content"]
                                 break
-                        result = last_response
+                        delivery = self._structured_delivery(last_response)
+                        sub_exec.variables["delivery"] = delivery
+                        result = json.dumps(delivery, ensure_ascii=False)
                     else:
                         raise RuntimeError(f"Sub-agent {role_name} stopped with status: {sub_state.status}")
                 else:
@@ -278,6 +287,8 @@ class ExecutionEngine:
                 all_completed = all(s.get("status") == "completed" for s in steps)
                 if all_completed:
                     state.status = "completed"
+                    state.results["telemetry"] = self.telemetry.metrics(execution_id)
+                    self.telemetry.record("execution_completed", execution_id, completed_steps=len(steps))
                     await self.event_bus.publish(Event(
                         type="ExecutionCompleted",
                         payload={"execution_id": execution_id, "results": state.results}
@@ -322,6 +333,7 @@ class ExecutionEngine:
                     
                 if step_failure:
                     state.status = "failed"
+                    self.telemetry.record("execution_failed", execution_id, error=str(step_failure))
                     for t in running_tasks.values():
                         t.cancel()
                     await self.event_bus.publish(Event(
@@ -464,18 +476,25 @@ class ExecutionEngine:
             else:
                 role_prompt = base_prompt
                 
+            if role_name != "Coordinateur":
+                role_prompt += ("\\nWhen finished, return a JSON object with keys: summary, artifacts, evidence, risks, next_action. "
+                                "Use empty arrays or strings when a field does not apply.")
             llm_messages.append({"role": "system", "content": role_prompt})
-            llm_messages.extend(convo.messages)
+            if context.get("context_summary"):
+                llm_messages.append({"role": "system", "content": context["context_summary"]})
+            llm_messages.extend(context["conversation_history"])
 
             await self.event_bus.publish(Event(
                 type="LLMRequest",
                 payload={"execution_id": execution_id, "messages": llm_messages}
             ))
 
+            llm_started = time.perf_counter()
             llm_response = await self.llm_provider.completion(
                 messages=llm_messages,
                 tools=schemas if schemas else None
             )
+            self.telemetry.record("llm_completed", execution_id, duration_ms=round((time.perf_counter() - llm_started) * 1000, 2), message_count=len(llm_messages), tool_calls=len(llm_response.get("tool_calls") or []))
 
             await self.event_bus.publish(Event(
                 type="LLMResponse",
@@ -628,13 +647,35 @@ class ExecutionEngine:
                 )
                 kwargs["context"] = context
 
+            started = time.perf_counter()
             res = bound_method(**kwargs)
             if inspect.isawaitable(res):
                 res = await res
-            return str(res)
+            result = str(res)
+            self.telemetry.record("tool_completed", execution_id, capability=capability, action=action, duration_ms=round((time.perf_counter() - started) * 1000, 2), result=result)
+            return result
         except Exception as e:
+            self.telemetry.record("tool_failed", execution_id, capability=capability, action=action, error=str(e))
             logger.error(f"Error executing action {capability}.{action}: {e}", exc_info=True)
             return f"Error executing tool: {e}"
+
+    @staticmethod
+    def _structured_delivery(response: str) -> Dict[str, Any]:
+        """Normalize a sub-agent response into a stable parent-agent contract."""
+        try:
+            import json
+            parsed = json.loads(response)
+            if isinstance(parsed, dict):
+                return {
+                    "summary": str(parsed.get("summary", "")),
+                    "artifacts": parsed.get("artifacts", []),
+                    "evidence": parsed.get("evidence", []),
+                    "risks": parsed.get("risks", []),
+                    "next_action": str(parsed.get("next_action", "")),
+                }
+        except (TypeError, ValueError):
+            pass
+        return {"summary": response, "artifacts": [], "evidence": [], "risks": [], "next_action": ""}
 
     async def resume_with_decision(self, execution_id: str, decision: str, reason: Optional[str] = None):
         """

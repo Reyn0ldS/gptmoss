@@ -12,6 +12,7 @@
   "workspace_path": "./workspace",
   "restrict_to_workspace": true,
   "allow_subfolders": true,
+  "max_context_chars": 12000,
   "projects": [
     {
       "id": "proj-default",

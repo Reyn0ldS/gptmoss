@@ -5,6 +5,7 @@ from gptmoss.core.execution import ExecutionEngine
 from gptmoss.core.kernel import RuntimeKernel
 from gptmoss.core.scheduler import Scheduler
 from gptmoss.core.constants import DEFAULT_SYSTEM_PROMPT
+from gptmoss.core.observability import TraceRecorder
 
 __all__ = [
     "Event",
@@ -18,4 +19,5 @@ __all__ = [
     "RuntimeKernel",
     "Scheduler",
     "DEFAULT_SYSTEM_PROMPT",
+    "TraceRecorder",
 ]

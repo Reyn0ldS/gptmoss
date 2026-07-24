@@ -7,9 +7,31 @@ class ContextEngine:
     Context Engine compiles information from multiple independent sources
     to build optimized prompts and state descriptions for the planner/executor.
     """
-    def __init__(self, state_engine: StateEngine, memory_provider: MemoryProvider):
+    def __init__(self, state_engine: StateEngine, memory_provider: MemoryProvider, max_history_chars: int = 12_000, max_tool_output_chars: int = 3_000):
         self.state_engine = state_engine
         self.memory_provider = memory_provider
+        self.max_history_chars = max_history_chars
+        self.max_tool_output_chars = max_tool_output_chars
+
+    def _compact_history(self, messages: List[Dict[str, Any]]) -> tuple[List[Dict[str, Any]], str]:
+        """Keep the most relevant recent context without mutating saved history."""
+        compacted: List[Dict[str, Any]] = []
+        used = 0
+        omitted = 0
+        for message in reversed(messages):
+            item = dict(message)
+            content = str(item.get("content") or "")
+            if item.get("role") == "tool" and len(content) > self.max_tool_output_chars:
+                item["content"] = content[:self.max_tool_output_chars] + "\\n… [tool output compacted]"
+            size = len(str(item.get("content") or ""))
+            if used + size > self.max_history_chars:
+                omitted += 1
+                continue
+            compacted.append(item)
+            used += size
+        compacted.reverse()
+        summary = f"{omitted} earlier messages omitted to respect the context budget." if omitted else ""
+        return compacted, summary
 
     async def compile_context(
         self,
@@ -39,9 +61,11 @@ class ContextEngine:
         os_name = "Windows" if sys.platform == "win32" else "Linux/macOS"
         path_sep = os.sep
 
+        history, history_summary = self._compact_history(convo_state.messages)
         context = {
             "execution_id": execution_id,
-            "conversation_history": convo_state.messages,
+            "conversation_history": history,
+            "context_summary": history_summary,
             "current_plan": exec_state.current_plan,
             "current_step": exec_state.current_step,
             "variables": exec_state.variables,

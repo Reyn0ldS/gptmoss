@@ -81,6 +81,10 @@ def test_api_submit_and_query_flow():
     body_get = response_get.json()
     assert body_get["execution_id"] == exec_id
 
+    response_metrics = client.get(f"/executions/{exec_id}/metrics")
+    assert response_metrics.status_code == 200
+    assert "counts" in response_metrics.json()
+
     # List all executions
     response_list = client.get("/executions")
     assert response_list.status_code == 200

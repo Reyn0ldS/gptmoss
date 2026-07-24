@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 # Ensure local packages are resolvable even in isolated python environments
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from gptmoss.core import EventBus, StateEngine, ContextEngine, ExecutionEngine, RuntimeKernel, Event, DEFAULT_SYSTEM_PROMPT
+from gptmoss.core import EventBus, StateEngine, ContextEngine, ExecutionEngine, RuntimeKernel, Event, DEFAULT_SYSTEM_PROMPT, TraceRecorder
 from gptmoss.providers import QwenProvider
 from gptmoss.memory import JSONMemoryProvider
 from gptmoss.capabilities import FilesystemCapability, ShellCapability, AgentCapability, DeveloperTeamCapability
@@ -38,6 +38,7 @@ def bootstrap_runtime(workspace_root: str):
     # 1. Core Engines
     event_bus = EventBus()
     state_engine = StateEngine(persist_path=os.path.join(workspace_root, "state_store.json"))
+    telemetry = TraceRecorder(os.path.join(workspace_root, "telemetry.jsonl"))
 
 
 
@@ -67,7 +68,13 @@ def bootstrap_runtime(workspace_root: str):
     workspace_path = config_data.get("workspace_path") or os.path.abspath(workspace_root)
     restrict_to_workspace = config_data.get("restrict_to_workspace", True)
     allow_subfolders = config_data.get("allow_subfolders", True)
+    try:
+        max_context_chars = int(config_data.get("max_context_chars", 12_000))
+    except (TypeError, ValueError):
+        max_context_chars = 12_000
+    max_context_chars = max(2_000, min(max_context_chars, 100_000))
     projects = config_data.get("projects") or [{"id": "proj-default", "name": "Projet Par Défaut"}]
+    context_engine.max_history_chars = max_context_chars
 
     config_data = {
         "api_key": api_key,
@@ -80,6 +87,7 @@ def bootstrap_runtime(workspace_root: str):
         "workspace_path": workspace_path,
         "restrict_to_workspace": restrict_to_workspace,
         "allow_subfolders": allow_subfolders,
+        "max_context_chars": max_context_chars,
         "projects": projects
     }
     
@@ -111,7 +119,8 @@ def bootstrap_runtime(workspace_root: str):
         context_engine=context_engine,
         llm_provider=llm_provider,
         planner=planner,
-        policy_provider=policy_provider
+        policy_provider=policy_provider,
+        telemetry=telemetry,
     )
 
     # Register capabilities

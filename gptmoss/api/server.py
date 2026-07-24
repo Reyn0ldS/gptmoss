@@ -207,6 +207,14 @@ async def get_execution(execution_id: str):
         "messages": convo.messages
     }
 
+@app.get("/executions/{execution_id}/metrics")
+async def get_execution_metrics(execution_id: str):
+    if not app_state.execution_engine or not app_state.state_engine:
+        raise HTTPException(status_code=500, detail="Engine not initialized.")
+    if execution_id not in app_state.state_engine.executions:
+        raise HTTPException(status_code=404, detail="Execution not found.")
+    return app_state.execution_engine.telemetry.metrics(execution_id)
+
 @app.get("/executions/{execution_id}/unified-feed")
 async def get_unified_feed(execution_id: str):
     if not app_state.state_engine:
