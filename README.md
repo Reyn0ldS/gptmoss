@@ -80,6 +80,11 @@ La configuration active est `workspace/config.json`. Au démarrage, GPTMOSS la n
   "restrict_to_workspace": true,
   "allow_subfolders": true,
   "max_context_chars": 12000,
+  "max_step_iterations": 30,
+  "safe_shell_mode": true,
+  "shell_timeout_seconds": 60,
+  "shell_max_output_chars": 12000,
+  "default_skills": [],
   "projects": [
     { "id": "proj-default", "name": "Projet par défaut" }
   ]
@@ -136,6 +141,46 @@ Invoke-RestMethod http://127.0.0.1:8000/api/settings
 ```
 
 `POST /api/settings` attend tous les champs de configuration. La clé peut être laissée vide pour conserver la clé déjà chargée, mais évitez de journaliser sa valeur. Les changements de fournisseur, de politique et de répertoire sont appliqués sans redémarrage ; redémarrez toutefois le service si vous voulez une configuration simple et reproductible.
+
+### Configurer GPTMOSS depuis la GUI
+
+1. Ouvrez <http://127.0.0.1:8000> puis cliquez sur **Paramètres** dans le bas de la barre latérale.
+2. Utilisez les boutons **Modèle**, **Sécurité shell**, **Skills** et **Projets** pour atteindre le panneau concerné.
+3. Modifiez les valeurs, puis cliquez sur **Enregistrer**. Les valeurs sont appliquées au runtime et enregistrées dans `workspace/config.json`.
+4. Si vous changez le dossier de travail, vérifiez les projets et les droits avant de soumettre une nouvelle tâche. Un redémarrage est conseillé après ce changement pour repartir d'un état simple.
+
+#### Panneau Modèle
+
+| Réglage GUI | Effet | Recommandation |
+|---|---|---|
+| Adresse API | URL compatible OpenAI du fournisseur. | Inclure `/v1` si le fournisseur l’exige. |
+| Clé API | Secret du fournisseur. Le champ reste vide à la réouverture pour ne pas l’exposer. | Laisser vide si la clé actuelle doit être conservée. |
+| Modèle par défaut | Modèle utilisé pour les nouvelles étapes. | Utiliser le nom exact fourni par l’API. |
+| Vérifier le certificat SSL | Active la validation TLS ; le chemin de certificat apparaît si nécessaire. | Laisser activé. |
+| Budget de contexte | Nombre de caractères de conversation donnés au modèle. | 12 000 est un bon départ ; augmenter si les tâches longues perdent du contexte. |
+| Itérations ReAct | Nombre maximal de tours outil/modèle pour une étape. | 20 à 40 ; une valeur élevée augmente coût et durée. |
+
+#### Panneau Sécurité shell
+
+| Réglage GUI | Effet | Recommandation |
+|---|---|---|
+| Mode shell sécurisé | Bloque des motifs de commandes destructrices connus. | Toujours activé. |
+| Délai shell | Interrompt une commande trop longue (1 à 600 secondes). | 60 secondes. |
+| Sortie shell maximale | Tronque les sorties trop volumineuses (1 000 à 100 000 caractères). | 12 000 caractères. |
+| Validation humaine | Demande une confirmation avant les capacités cochées. | Conserver `shell` et le quality gate. |
+| Capacités interdites | Refuse la capacité, même si le modèle la demande. | Bloquer `filesystem` ou `shell` pour un agent d’analyse seule. |
+| Restriction du workspace | Empêche les accès hors du dossier de travail. | Toujours activée. |
+| Sous-dossiers | Autorise la création et lecture dans les sous-dossiers. | Activé pour le développement ; désactiver pour limiter strictement l’agent. |
+
+#### Panneau Skills
+
+La liste affiche les skills détectés localement. Cocher un ou plusieurs skills les applique par défaut aux nouvelles exécutions et limite les capacités disponibles à celles qu’ils déclarent. Ne rien cocher conserve la sélection automatique selon le texte de la tâche.
+
+Exemple : cochez `code-review` pour les revues, `test-and-debug` pour corriger une suite de tests, ou `documentation` pour générer une documentation. Utilisez **Enregistrer**, puis soumettez une nouvelle tâche : les exécutions déjà démarrées ne changent pas de skill.
+
+#### Panneau Projets
+
+Vous pouvez ajouter, renommer ou supprimer un projet, puis lui associer un dossier. Sans dossier personnalisé, les fichiers sont créés sous `<workspace>/projects/<id>/`. Un dossier personnalisé donne à l’agent accès à ce répertoire : sélectionnez uniquement un emplacement de confiance et conservez la restriction du workspace active lorsque possible.
 
 ## Utiliser l'interface Web
 
