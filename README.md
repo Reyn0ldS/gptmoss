@@ -18,6 +18,8 @@ Ce document est le mode d'emploi complet. Les exemples utilisent PowerShell et l
 - [Mémoire, contexte et traces](#mémoire-contexte-et-traces)
 - [Sécurité](#sécurité)
 - [Dépannage](#dépannage)
+- [Tests du projet GPTMOSS](#tests-du-projet-gptmoss)
+- [Centre de contrôle GUI : mode d'emploi complet](#centre-de-contrôle-gui--mode-demploi-complet)
 
 ## Démarrage rapide
 
