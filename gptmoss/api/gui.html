@@ -1088,7 +1088,7 @@
         </div>
         <div class="sidebar-footer" style="padding: 12px 20px; border-top: 1px solid var(--border-color); display: flex; gap: 10px; justify-content: center;">
             <button class="btn-control delete" onclick="clearAllExecutions()" style="flex: 1; border-color: rgba(248, 113, 113, 0.3); color: #f87171; background-color: rgba(248, 113, 113, 0.01);">Effacer</button>
-            <button class="btn-control pause" onclick="openSettingsModal()" style="flex: 1; border-color: var(--accent-primary); color: var(--accent-primary); background-color: rgba(129, 140, 248, 0.01); display: block;">Paramètres</button>
+            <button class="btn-control pause" onclick="openLibraryModal()" style="flex: 1;">Bibliothèque</button><button class="btn-control pause" onclick="openSettingsModal()" style="flex: 1; border-color: var(--accent-primary); color: var(--accent-primary); background-color: rgba(129, 140, 248, 0.01); display: block;">Paramètres</button>
         </div>
     </div>
 
@@ -1111,7 +1111,7 @@
                     </div>
                 </div>
                 <label class="form-label" for="task-input">Décrivez la tâche à accomplir</label>
-                <textarea class="task-textarea" id="task-input" placeholder="Ex: Crée un fichier de salutations, ou analyse le dossier actuel..."></textarea>
+                <input type="file" id="task-attachments" multiple accept=".txt,.md,.json,.csv,.png,.jpg,.jpeg,.webp" style="margin-bottom: 10px; width: 100%; color: var(--text-muted);"><textarea class="task-textarea" id="task-input" placeholder="Ex: Crée un fichier de salutations, ou analyse le dossier actuel..."></textarea>
                 <button class="task-submit-btn" onclick="submitNewTask()">Démarrer l'exécution</button>
             </div>
         </div>
@@ -1872,7 +1872,7 @@
                 const res = await fetch("/executions", {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ task: task, project_id: project_id })
+                    body: JSON.stringify({ task: task, project_id: project_id, attachment_ids: await uploadSelectedAttachments() })
                 });
                 
                 if (!res.ok) throw new Error("Could not submit task.");
@@ -2255,6 +2255,42 @@
                 showToast("Erreur lors de l'enregistrement: " + err.message, "error");
             }
         }
+        async function uploadSelectedAttachments() {
+            const files = Array.from(document.getElementById("task-attachments")?.files || []);
+            const allowed = {"text/plain":"text/plain","text/markdown":"text/markdown","application/json":"application/json","text/csv":"text/csv","image/png":"image/png","image/jpeg":"image/jpeg","image/webp":"image/webp"};
+            const ids = [];
+            for (const file of files) {
+                const type = allowed[file.type] || (file.name.endsWith(".md") ? "text/markdown" : "");
+                if (!type) throw new Error(`Format non pris en charge : ${file.name}`);
+                const data = await file.arrayBuffer();
+                const bytes = new Uint8Array(data); let binary = "";
+                bytes.forEach(byte => binary += String.fromCharCode(byte));
+                const response = await requestApi("/artifacts", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({filename:file.name, content_type:type, content_base64:btoa(binary)})});
+                ids.push((await response.json()).id);
+            }
+            return ids;
+        }
+
+        async function openLibraryModal() {
+            document.getElementById("library-modal").style.display = "flex";
+            await refreshLibrary();
+        }
+        function closeLibraryModal() { document.getElementById("library-modal").style.display = "none"; }
+        async function refreshLibrary() {
+            const [artifacts, skills, memories] = await Promise.all([requestApi("/artifacts").then(r=>r.json()), requestApi("/skills").then(r=>r.json()), requestApi("/memory").then(r=>r.json())]);
+            document.getElementById("library-artifacts").innerHTML = artifacts.map(a=>`<div>${escapeHTML(a.filename)} <button onclick="deleteArtifact('${a.id}')">Supprimer</button></div>`).join("") || "Aucun fichier.";
+            document.getElementById("library-skills").innerHTML = skills.map(s=>`<div><b>${escapeHTML(s.name)}</b> — ${escapeHTML(s.description || "")} ${s.source_path ? "" : ""}</div>`).join("") || "Aucun skill.";
+            document.getElementById("library-memory").innerHTML = memories.map(m=>`<div>${escapeHTML(String(m.value))} ${m.validated ? "validée" : `<button onclick="validateMemory('${m.id}')">Valider</button>`} <button onclick="deleteMemory('${m.id}')">Supprimer</button></div>`).join("") || "Aucune mémoire.";
+        }
+        async function deleteArtifact(id) { await requestApi(`/artifacts/${id}`, {method:"DELETE"}); refreshLibrary(); }
+        async function validateMemory(id) { await requestApi(`/memory/${id}/validate`, {method:"POST"}); refreshLibrary(); }
+        async function deleteMemory(id) { await requestApi(`/memory/${id}`, {method:"DELETE"}); refreshLibrary(); }
+        async function createLibrarySkill() {
+            const name=document.getElementById("library-skill-name").value.trim(); const instructions=document.getElementById("library-skill-instructions").value.trim();
+            if(!name || !instructions) return showToast("Nom et instructions requis.", "warning");
+            await requestApi("/skills", {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name, description:document.getElementById("library-skill-description").value, instructions, allowed_capabilities:Array.from(document.querySelectorAll("input[name='library-cap']:checked"), e=>e.value)})});
+            showToast("Skill enregistré.", "success"); refreshLibrary();
+        }
     </script>
 
     <!-- Settings Modal -->
@@ -2382,6 +2418,16 @@
                 <button class="btn-control resume" onclick="saveSettings()" style="border-color: var(--accent-secondary); color: var(--bg-card); background: var(--accent-secondary);">Enregistrer</button>
             </div>
         </div>
+    </div>
+    <div id="library-modal" class="modal-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.8);z-index:1100;justify-content:center;align-items:center;">
+      <div class="settings-container" style="background:var(--bg-card);width:min(900px,94vw);max-height:90vh;overflow:auto;padding:22px;">
+        <div style="display:flex;justify-content:space-between"><h3>Bibliothèque GPTMOSS</h3><button class="btn-control" onclick="closeLibraryModal()">Fermer</button></div>
+        <h4>Pièces jointes</h4><div id="library-artifacts"></div>
+        <h4>Skills</h4><div id="library-skills"></div>
+        <input id="library-skill-name" placeholder="nom-du-skill"><input id="library-skill-description" placeholder="Description"><textarea id="library-skill-instructions" placeholder="Instructions du skill"></textarea>
+        <label><input type="checkbox" name="library-cap" value="filesystem"> Fichiers</label><label><input type="checkbox" name="library-cap" value="shell"> Shell</label><label><input type="checkbox" name="library-cap" value="agent"> Agents</label><label><input type="checkbox" name="library-cap" value="devteam"> Équipe</label><button class="btn-control resume" onclick="createLibrarySkill()">Créer / mettre à jour</button>
+        <h4>Mémoire persistante</h4><div id="library-memory"></div>
+      </div>
     </div>
 </body>
 </html>

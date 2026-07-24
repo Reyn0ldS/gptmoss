@@ -428,3 +428,8 @@ python -m pytest -q
 ```
 
 Les tests vérifient notamment l'API, le moteur d'exécution, les politiques, la mémoire, les skills et les artefacts.
+### Bibliothèque GUI : skills, fichiers et mémoire
+
+Le bouton **Bibliothèque** ouvre un panneau unique permettant de déposer des documents ou images lors de la création d'une tâche, puis de consulter ou supprimer les artefacts stockés. Les formats acceptés sont texte, Markdown, JSON, CSV, PNG, JPEG et WebP (10 Mio maximum). Les pièces jointes sélectionnées sont téléversées et rattachées automatiquement à la nouvelle exécution.
+
+Le même panneau permet de créer ou mettre à jour un skill local : indiquez son nom, sa description, ses instructions et les capacités à lui accorder. Les skills créés sont enregistrés dans `workspace/skills/` et sont immédiatement détectés. Enfin, les mémoires persistantes y sont visibles ; une mémoire en attente peut être validée ou supprimée.

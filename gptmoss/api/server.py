@@ -2,7 +2,9 @@ import asyncio
 import json
 import logging
 import os
+import re
 from contextlib import asynccontextmanager, suppress
+from pathlib import Path
 from typing import Dict, Any, List, Optional
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
@@ -32,6 +34,12 @@ class UploadArtifactRequest(BaseModel):
 
 class DecisionRequest(BaseModel):
     reason: Optional[str] = None
+
+class SkillRequest(BaseModel):
+    name: str
+    description: str = ""
+    instructions: str
+    allowed_capabilities: List[str] = Field(default_factory=list)
 
 class SettingsRequest(BaseModel):
     api_key: str = ""
@@ -196,6 +204,79 @@ async def upload_artifact(req: UploadArtifactRequest):
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {key: metadata[key] for key in ("id", "filename", "content_type", "size_bytes", "sha256", "created_at")}
+
+
+@app.get("/artifacts")
+async def list_artifacts():
+    filesystem = app_state.execution_engine.get_capability("filesystem")
+    store = ArtifactStore(filesystem.workspace_root)
+    items = []
+    for path in store.root.glob("*.json"):
+        try:
+            metadata = json.loads(path.read_text(encoding="utf-8"))
+            items.append({key: metadata[key] for key in ("id", "filename", "content_type", "size_bytes", "sha256", "created_at")})
+        except (OSError, KeyError, json.JSONDecodeError):
+            continue
+    return sorted(items, key=lambda item: item["created_at"], reverse=True)
+
+@app.delete("/artifacts/{artifact_id}")
+async def delete_artifact(artifact_id: str):
+    filesystem = app_state.execution_engine.get_capability("filesystem")
+    store = ArtifactStore(filesystem.workspace_root)
+    try:
+        metadata = store.get(artifact_id)
+        Path(metadata["path"]).unlink(missing_ok=True)
+        (store.root / f"{artifact_id}.json").unlink(missing_ok=True)
+    except (ValueError, FileNotFoundError) as exc:
+        raise HTTPException(status_code=404, detail="Artifact not found.") from exc
+    return {"status": "deleted"}
+
+@app.post("/skills", status_code=201)
+async def save_skill(req: SkillRequest):
+    if not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", req.name.lower()):
+        raise HTTPException(status_code=400, detail="Invalid skill name.")
+    registry = app_state.execution_engine.skill_registry
+    filesystem = app_state.execution_engine.get_capability("filesystem")
+    skill_dir = Path(filesystem.workspace_root) / "skills" / req.name.lower()
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    allowed = [cap.lower() for cap in req.allowed_capabilities if cap.lower() in {"filesystem", "shell", "agent", "devteam"}]
+    content = "---\nname: %s\ndescription: %s\nallowed_capabilities: [%s]\n---\n\n%s\n" % (req.name.lower(), req.description.strip(), ", ".join(allowed), req.instructions.strip())
+    (skill_dir / "SKILL.md").write_text(content, encoding="utf-8")
+    registry.discover(str(Path(filesystem.workspace_root) / "skills"))
+    skill = registry.skills[req.name.lower()]
+    return {"name": skill.name, "description": skill.description, "allowed_capabilities": skill.allowed_capabilities, "digest": skill.digest}
+
+@app.delete("/skills/{name}")
+async def delete_skill(name: str):
+    registry = app_state.execution_engine.skill_registry
+    skill = registry.skills.get(name.lower()) if registry else None
+    filesystem = app_state.execution_engine.get_capability("filesystem")
+    workspace_skills = (Path(filesystem.workspace_root) / "skills").resolve()
+    if not skill or workspace_skills not in Path(skill.source_path).resolve().parents:
+        raise HTTPException(status_code=404, detail="Only workspace skills can be deleted.")
+    Path(skill.source_path).unlink(missing_ok=True)
+    Path(skill.source_path).parent.rmdir()
+    registry.skills.pop(name.lower(), None)
+    return {"status": "deleted"}
+
+@app.get("/memory")
+async def list_memory():
+    provider = app_state.execution_engine.context_engine.memory_provider
+    return getattr(provider, "memories", [])
+
+@app.post("/memory/{memory_id}/validate")
+async def validate_memory(memory_id: str):
+    provider = app_state.execution_engine.context_engine.memory_provider
+    if not await provider.validate(memory_id, validated_by="gui"):
+        raise HTTPException(status_code=404, detail="Memory not found.")
+    return {"status": "validated"}
+
+@app.delete("/memory/{memory_id}")
+async def delete_memory(memory_id: str):
+    provider = app_state.execution_engine.context_engine.memory_provider
+    if not await provider.delete(memory_id):
+        raise HTTPException(status_code=404, detail="Memory not found.")
+    return {"status": "deleted"}
 
 @app.get("/skills")
 async def list_skills():
