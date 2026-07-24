@@ -51,7 +51,7 @@ class ContextEngine:
         # Search memory if there is a query, or summarize
         memory_summary = ""
         if extra_query:
-            memories = await self.memory_provider.search(extra_query, limit=3)
+            memories = await self.memory_provider.search(extra_query, limit=3, session_id=execution_id)
             memory_summary = "\n".join([str(m) for m in memories])
         else:
             memory_summary = await self.memory_provider.summarize()

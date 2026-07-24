@@ -26,7 +26,7 @@ async def test_json_memory_persistence():
     
     # 1. Instantiate and store memory
     provider = JSONMemoryProvider(file_path=file_path)
-    mem_id = await provider.store("Testing persistent storage of facts.")
+    mem_id = await provider.store("Testing persistent storage of facts.", validated=True)
     assert mem_id is not None
     
     # Verify it saved to disk
@@ -37,6 +37,31 @@ async def test_json_memory_persistence():
     results = await provider2.search("Testing persistent")
     assert len(results) >= 1
     assert results[0]["value"] == "Testing persistent storage of facts."
+
+@pytest.mark.asyncio
+async def test_hybrid_memory_requires_validation_and_tracks_provenance():
+    provider = JSONMemoryProvider(file_path=os.path.join(TEMP_DIR, "hybrid_memories.json"))
+    memory_id = await provider.store(
+        "Use the project convention for release notes.",
+        provenance={"source": "review", "execution_id": "exec-1"},
+    )
+
+    assert await provider.search("release notes") == []
+    assert await provider.validate(memory_id, validated_by="reviewer")
+    results = await provider.search("release notes")
+    assert results[0]["provenance"]["source"] == "review"
+    assert results[0]["validated_by"] == "reviewer"
+
+@pytest.mark.asyncio
+async def test_hybrid_memory_session_and_expiration():
+    provider = JSONMemoryProvider(file_path=os.path.join(TEMP_DIR, "hybrid_memories.json"))
+    await provider.store_session("exec-session", "The current task uses a blue theme.")
+    assert (await provider.search("blue theme", session_id="exec-session"))[0]["value"].startswith("The current")
+    await provider.clear_session("exec-session")
+    assert await provider.search("blue theme", session_id="exec-session") == []
+
+    await provider.store("Expired memory", validated=True, ttl_seconds=-1)
+    assert await provider.search("expired") == []
 
 @pytest.mark.asyncio
 async def test_agent_capability_delegation():
