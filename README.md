@@ -100,6 +100,10 @@ La configuration active est `workspace/config.json`. Au démarrage, GPTMOSS la n
 | `allow_subfolders` | Autorise les opérations dans les sous-dossiers. | `true`. |
 | `max_context_chars` | Budget du contexte conversationnel. Borné entre 2 000 et 100 000. | `12000`. |
 | `projects` | Projets proposés dans l'interface. | Voir ci-dessous. |
+| `safe_shell_mode` | Active le blocage des commandes destructrices connues. | `true`. |
+| `shell_timeout_seconds` | Délai maximal d'une commande shell. | `60` (1 à 600). |
+| `shell_max_output_chars` | Taille maximale de sortie shell conservée. | `12000` (1 000 à 100 000). |
+| `default_skills` | Skills appliqués par défaut. | `[]` pour la sélection automatique. |
 
 Les variables d'environnement `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `OPENAI_MODEL_NAME` et `DASHSCOPE_API_KEY` servent de valeurs de secours quand le champ équivalent n'est pas renseigné. `main.py` charge `.env` au démarrage.
 
@@ -125,7 +129,7 @@ Un `path` personnalisé sort potentiellement du workspace : n'utilisez cette opt
 
 ### Modifier les réglages à chaud
 
-L'interface Web contient les réglages. Via API, lisez d'abord les valeurs actuelles :
+L'interface Web contient les réglages, organisés en panneaux Modèle, Sécurité shell, Skills et Projets. Elle permet aussi d'adapter les limites shell et les skills par défaut sans modifier les fichiers. Via API, lisez d'abord les valeurs actuelles :
 
 ```powershell
 Invoke-RestMethod http://127.0.0.1:8000/api/settings

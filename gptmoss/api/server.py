@@ -47,6 +47,10 @@ class SettingsRequest(BaseModel):
     projects: List[Dict[str, Any]]
     max_step_iterations: int = Field(default=30, ge=1, le=100)
     max_context_chars: int = Field(default=12_000, ge=2_000, le=100_000)
+    safe_shell_mode: bool = True
+    shell_timeout_seconds: int = Field(default=60, ge=1, le=600)
+    shell_max_output_chars: int = Field(default=12_000, ge=1_000, le=100_000)
+    default_skills: List[str] = Field(default_factory=list)
 
 class AppState:
     kernel: Optional[RuntimeKernel] = None
@@ -464,6 +468,12 @@ async def get_settings():
         with open(config_path, "r", encoding="utf-8") as f:
             config = json.load(f)
         config.pop("api_key", None)
+        config.setdefault("max_step_iterations", 30)
+        config.setdefault("max_context_chars", 12_000)
+        config.setdefault("safe_shell_mode", True)
+        config.setdefault("shell_timeout_seconds", 60)
+        config.setdefault("shell_max_output_chars", 12_000)
+        config.setdefault("default_skills", [])
         return config
             
     # Fallback to current memory values
@@ -482,7 +492,11 @@ async def get_settings():
         "allow_subfolders": getattr(fs, "allow_subfolders", True),
         "projects": [{"id": "proj-default", "name": "Projet Par Défaut"}],
         "max_step_iterations": 30,
-        "max_context_chars": 12_000
+        "max_context_chars": 12_000,
+        "safe_shell_mode": True,
+        "shell_timeout_seconds": 60,
+        "shell_max_output_chars": 12_000,
+        "default_skills": []
     }
 
 @app.post("/api/settings")
@@ -509,7 +523,11 @@ async def update_settings(req: SettingsRequest):
         "allow_subfolders": req.allow_subfolders,
         "projects": req.projects,
         "max_step_iterations": req.max_step_iterations,
-        "max_context_chars": req.max_context_chars
+        "max_context_chars": req.max_context_chars,
+        "safe_shell_mode": req.safe_shell_mode,
+        "shell_timeout_seconds": req.shell_timeout_seconds,
+        "shell_max_output_chars": req.shell_max_output_chars,
+        "default_skills": [skill.lower() for skill in req.default_skills]
     }
     
     with open(config_path, "w", encoding="utf-8") as f:
@@ -530,6 +548,14 @@ async def update_settings(req: SettingsRequest):
             approval_required=req.approval_required_capabilities,
             denied=req.denied_capabilities
         )
+    shell = app_state.execution_engine.get_capability("shell")
+    if shell and hasattr(shell, "update_safety_config"):
+        shell.update_safety_config(
+            safe_mode=req.safe_shell_mode,
+            timeout_seconds=req.shell_timeout_seconds,
+            max_output_chars=req.shell_max_output_chars,
+        )
+    app_state.execution_engine.default_skills = [skill.lower() for skill in req.default_skills]
         
     for cap_name in ["filesystem", "shell", "agent", "devteam"]:
         cap = app_state.execution_engine.get_capability(cap_name)

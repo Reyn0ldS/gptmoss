@@ -984,6 +984,21 @@
             overflow-wrap: break-word;
         }
 
+        /* Use a grid so both the conversation and the plan keep a usable width. */
+        .detail-body {
+            display: grid;
+            grid-template-columns: minmax(420px, 3fr) minmax(300px, 2fr);
+        }
+        .feed-column, .plan-column { min-width: 0; }
+        .settings-nav { display: flex; flex-wrap: wrap; gap: 6px; padding-bottom: 4px; }
+        .settings-nav button { flex: 1 1 120px; }
+        .settings-section { scroll-margin-top: 12px; }
+
+        @media (max-width: 1280px) {
+            .sidebar { width: 260px; }
+            .detail-body { grid-template-columns: minmax(360px, 3fr) minmax(280px, 2fr); }
+        }
+
         @media (max-width: 1200px) {
             .detail-header {
                 flex-direction: column;
@@ -1003,6 +1018,8 @@
         }
 
         @media (max-width: 1024px) {
+            .sidebar { width: 230px; }
+            .detail-body { display: flex; }
             .detail-body {
                 flex-direction: column;
                 overflow-y: auto;
@@ -1032,9 +1049,17 @@
                 border-right: none;
                 border-bottom: 1px solid var(--border-color);
             }
-            .detail-view {
-                height: auto;
-            }
+            .main-content { min-height: 60vh; }
+            .detail-view { height: auto; min-height: 60vh; }
+            .detail-header { padding: 14px 16px; }
+            .detail-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+            .detail-actions .badge { grid-column: 1 / -1; justify-self: start; }
+            .task-form-container { padding: 16px; }
+            .task-form-container > div:first-child { flex-wrap: wrap; gap: 10px; }
+            #task-project-select { width: min(100%, 180px) !important; }
+            .toast-container { left: 12px; right: 12px; bottom: 12px; }
+            .toast { min-width: 0; max-width: none; width: 100%; }
+            .settings-container { width: calc(100% - 24px) !important; padding: 16px !important; }
             .feed-column {
                 height: 45vh;
             }
@@ -1964,6 +1989,46 @@
         }
 
         let localProjects = [];
+        let availableSkills = [];
+
+        function scrollSettingsSection(id) {
+            document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" });
+        }
+
+        function renderSettingsSkills(selectedSkills = []) {
+            const container = document.getElementById("settings-skills-list");
+            if (!container) return;
+            const selected = new Set(selectedSkills.map(skill => String(skill).toLowerCase()));
+            container.innerHTML = "";
+            if (!availableSkills.length) {
+                container.textContent = "Aucun skill local détecté.";
+                return;
+            }
+            availableSkills.forEach(skill => {
+                const label = document.createElement("label");
+                label.style.cssText = "font-size: 11px; padding: 8px; border: 1px solid var(--border-color); border-radius: 6px; display: flex; gap: 6px; align-items: flex-start; cursor: pointer;";
+                const checkbox = document.createElement("input");
+                checkbox.type = "checkbox";
+                checkbox.name = "settings-default-skill";
+                checkbox.value = skill.name;
+                checkbox.checked = selected.has(String(skill.name).toLowerCase());
+                const text = document.createElement("span");
+                text.textContent = `${skill.name} — ${skill.description || "Sans description"}`;
+                label.append(checkbox, text);
+                container.appendChild(label);
+            });
+        }
+
+        async function loadSettingsSkills(selectedSkills = []) {
+            try {
+                const response = await requestApi("/skills");
+                availableSkills = await response.json();
+            } catch (err) {
+                availableSkills = [];
+                showToast("Impossible de charger les skills : " + err.message, "warning");
+            }
+            renderSettingsSkills(selectedSkills);
+        }
 
         function renderSettingsProjectsList() {
             const container = document.getElementById("settings-projects-list");
@@ -2111,10 +2176,14 @@
                 document.getElementById("settings-allow-subfolders").checked = data.allow_subfolders !== false;
                 document.getElementById("settings-max-step-iterations").value = data.max_step_iterations || 30;
                 document.getElementById("settings-max-context-chars").value = data.max_context_chars || 12000;
+                document.getElementById("settings-safe-shell-mode").checked = data.safe_shell_mode !== false;
+                document.getElementById("settings-shell-timeout").value = data.shell_timeout_seconds || 60;
+                document.getElementById("settings-shell-output").value = data.shell_max_output_chars || 12000;
 
                 // Projects list
                 localProjects = data.projects || [{"id": "proj-default", "name": "Projet Par Défaut"}];
                 renderSettingsProjectsList();
+                await loadSettingsSkills(data.default_skills || []);
                 
                 document.getElementById("settings-modal").style.display = "flex";
             } catch (err) {
@@ -2138,6 +2207,10 @@
                 const allow_subfolders = document.getElementById("settings-allow-subfolders").checked;
                 const max_step_iterations = parseInt(document.getElementById("settings-max-step-iterations").value, 10) || 30;
                 const max_context_chars = parseInt(document.getElementById("settings-max-context-chars").value, 10) || 12000;
+                const safe_shell_mode = document.getElementById("settings-safe-shell-mode").checked;
+                const shell_timeout_seconds = parseInt(document.getElementById("settings-shell-timeout").value, 10) || 60;
+                const shell_max_output_chars = parseInt(document.getElementById("settings-shell-output").value, 10) || 12000;
+                const default_skills = Array.from(document.querySelectorAll("input[name='settings-default-skill']:checked"), checkbox => checkbox.value);
                 
                 const approval_required_capabilities = [];
                 document.querySelectorAll("input[name='settings-approval']:checked").forEach(cb => {
@@ -2165,7 +2238,11 @@
                         allow_subfolders,
                         projects: localProjects,
                         max_step_iterations,
-                        max_context_chars
+                        max_context_chars,
+                        safe_shell_mode,
+                        shell_timeout_seconds,
+                        shell_max_output_chars,
+                        default_skills
                     })
                 });
                 
@@ -2188,9 +2265,15 @@
                 <span onclick="closeSettingsModal()" style="cursor: pointer; font-size: 18px; color: var(--text-muted);">&times;</span>
             </div>
             
+            <div class="settings-nav" aria-label="Sections des paramètres">
+                <button class="btn-control" type="button" onclick="scrollSettingsSection('settings-model-section')">Modèle</button>
+                <button class="btn-control" type="button" onclick="scrollSettingsSection('settings-security-section')">Sécurité shell</button>
+                <button class="btn-control" type="button" onclick="scrollSettingsSection('settings-skills-section')">Skills</button>
+                <button class="btn-control" type="button" onclick="scrollSettingsSection('settings-projects-section')">Projets</button>
+            </div>
             <div style="display: flex; flex-direction: column; gap: 12px; overflow-y: auto; max-height: 70vh; padding-right: 4px;">
                 <!-- LLM Connection Section -->
-                <div style="font-weight: 600; font-size: 12px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 4px;">Connexion au LLM (Qwen)</div>
+                <div id="settings-model-section" class="settings-section" style="font-weight: 600; font-size: 12px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 4px;">Modèle, contexte et exécution</div>
                 
                 <div style="display: flex; flex-direction: column; gap: 4px;">
                     <label style="font-size: 11px; color: var(--text-normal);">Adresse API (Base URL)</label>
@@ -2221,7 +2304,7 @@
                 <hr style="border: 0; border-top: 1px solid var(--border-color); margin: 8px 0;">
 
                 <!-- Workspace and Capabilities Restrictions -->
-                <div style="font-weight: 600; font-size: 12px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 4px;">Gestion de l'espace de travail (Droits)</div>
+                <div id="settings-security-section" class="settings-section" style="font-weight: 600; font-size: 12px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 4px;">Sécurité, shell et espace de travail</div>
                 
                 <div style="display: flex; flex-direction: column; gap: 4px;">
                     <label style="font-size: 11px; color: var(--text-normal);">Répertoire de travail (Workspace Path)</label>
@@ -2246,6 +2329,11 @@
                     <input type="number" id="settings-max-context-chars" class="approval-reason-input" style="margin: 0;" placeholder="12000" min="2000" max="100000">
                 </div>
 
+                <div style="display: flex; gap: 12px; flex-wrap: wrap; margin-top: 8px;">
+                    <label style="font-size: 11px; display: inline-flex; align-items: center; gap: 4px; cursor: pointer;"><input type="checkbox" id="settings-safe-shell-mode"> Mode shell sécurisé</label>
+                    <label style="font-size: 11px; flex: 1 1 120px;">Délai shell (s)<input type="number" id="settings-shell-timeout" class="approval-reason-input" min="1" max="600" style="margin: 4px 0 0; width: 100%;"></label>
+                    <label style="font-size: 11px; flex: 1 1 150px;">Sortie shell max.<input type="number" id="settings-shell-output" class="approval-reason-input" min="1000" max="100000" style="margin: 4px 0 0; width: 100%;"></label>
+                </div>
                 <div style="display: flex; flex-direction: column; gap: 8px; margin-top: 8px;">
                     <div style="font-size: 12px; color: var(--text-normal); font-weight: 500;">Capacités nécessitant une validation humaine :</div>
                     <div style="display: flex; flex-wrap: wrap; gap: 12px;">
@@ -2274,9 +2362,12 @@
                 </div>
 
                 <hr style="border: 0; border-top: 1px solid var(--border-color); margin: 8px 0;">
+                <div id="settings-skills-section" class="settings-section" style="font-weight: 600; font-size: 12px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px;">Skills activés par défaut</div>
+                <div style="font-size: 11px; color: var(--text-muted);">Les skills cochés limitent les capacités exposées à l'agent. Aucun choix laisse la sélection automatique active.</div>
+                <div id="settings-skills-list" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 8px;"></div>
 
                 <!-- Projects Configuration -->
-                <div style="font-weight: 600; font-size: 12px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 4px;">Gestion des Projets</div>
+                <div id="settings-projects-section" class="settings-section" style="font-weight: 600; font-size: 12px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 4px;">Gestion des projets</div>
                 <div id="settings-projects-list" style="display: flex; flex-direction: column; gap: 4px; max-height: 150px; overflow-y: auto; padding-right: 4px;">
                     <!-- Projects injected here -->
                 </div>

@@ -83,6 +83,18 @@ def bootstrap_runtime(workspace_root: str):
     except (TypeError, ValueError):
         max_step_iterations = 30
     max_step_iterations = max(1, min(max_step_iterations, 100))
+    safe_shell_mode = bool(config_data.get("safe_shell_mode", True))
+    try:
+        shell_timeout_seconds = int(config_data.get("shell_timeout_seconds", 60))
+    except (TypeError, ValueError):
+        shell_timeout_seconds = 60
+    shell_timeout_seconds = max(1, min(shell_timeout_seconds, 600))
+    try:
+        shell_max_output_chars = int(config_data.get("shell_max_output_chars", 12_000))
+    except (TypeError, ValueError):
+        shell_max_output_chars = 12_000
+    shell_max_output_chars = max(1_000, min(shell_max_output_chars, 100_000))
+    default_skills = [str(skill).lower() for skill in config_data.get("default_skills", []) if isinstance(skill, str)]
     projects = config_data.get("projects") or [{"id": "proj-default", "name": "Projet Par Défaut"}]
     context_engine.max_history_chars = max_context_chars
 
@@ -99,6 +111,10 @@ def bootstrap_runtime(workspace_root: str):
         "allow_subfolders": allow_subfolders,
         "max_context_chars": max_context_chars,
         "max_step_iterations": max_step_iterations,
+        "safe_shell_mode": safe_shell_mode,
+        "shell_timeout_seconds": shell_timeout_seconds,
+        "shell_max_output_chars": shell_max_output_chars,
+        "default_skills": default_skills,
         "projects": projects
     }
     
@@ -134,6 +150,7 @@ def bootstrap_runtime(workspace_root: str):
         telemetry=telemetry,
         skill_registry=skill_registry,
         artifact_store=artifact_store,
+        default_skills=default_skills,
     )
 
     # Register capabilities
@@ -141,7 +158,7 @@ def bootstrap_runtime(workspace_root: str):
     filesystem_cap.update_workspace_config(workspace_path, restrict_to_workspace, allow_subfolders)
     exec_engine.register_capability("filesystem", filesystem_cap)
     
-    shell_cap = ShellCapability(workspace_path, state_engine)
+    shell_cap = ShellCapability(workspace_path, state_engine, safe_mode=safe_shell_mode, timeout_seconds=shell_timeout_seconds, max_output_chars=shell_max_output_chars)
     exec_engine.register_capability("shell", shell_cap)
     
     agent_capability = AgentCapability(kernel=None, workspace_root=workspace_path)

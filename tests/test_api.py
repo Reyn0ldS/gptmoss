@@ -314,18 +314,26 @@ def test_api_settings_preserve_secret_and_context_budget(tmp_path):
         "projects": [{"id": "proj-default", "name": "Default"}],
         "max_step_iterations": 12,
         "max_context_chars": 24000,
+        "safe_shell_mode": False,
+        "shell_timeout_seconds": 45,
+        "shell_max_output_chars": 20000,
+        "default_skills": ["code-review"],
     }
     assert client.post("/api/settings", json=settings).status_code == 200
 
     public_settings = client.get("/api/settings").json()
     assert "api_key" not in public_settings
     assert public_settings["max_context_chars"] == 24000
+    assert public_settings["safe_shell_mode"] is False
+    assert public_settings["shell_timeout_seconds"] == 45
+    assert public_settings["default_skills"] == ["code-review"]
 
     # This mirrors the quick-project UI flow: the GET response has no secret.
     public_settings["projects"].append({"id": "proj-ui", "name": "Created from UI"})
     response = client.post("/api/settings", json=public_settings)
     assert response.status_code == 200
     assert mock_llm.api_key == "secret-key"
+    assert exec_engine.default_skills == ["code-review"]
     persisted = (tmp_path / "config.json").read_text(encoding="utf-8")
     assert '"max_context_chars": 24000' in persisted
 

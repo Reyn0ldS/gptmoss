@@ -50,6 +50,7 @@ class ExecutionEngine:
         telemetry: Optional[TraceRecorder] = None,
         skill_registry: Optional[SkillRegistry] = None,
         artifact_store: Optional[ArtifactStore] = None,
+        default_skills: Optional[List[str]] = None,
     ):
         self.event_bus = event_bus
         self.state_engine = state_engine
@@ -60,6 +61,7 @@ class ExecutionEngine:
         self.telemetry = telemetry or TraceRecorder()
         self.skill_registry = skill_registry
         self.artifact_store = artifact_store
+        self.default_skills = [str(skill).lower() for skill in (default_skills or [])]
         self._capabilities: Dict[str, Any] = {}  # capability_name -> instance
 
     def register_capability(self, capability_name: str, instance: Any):
@@ -88,7 +90,7 @@ class ExecutionEngine:
     def _active_skills(self, state, task: str):
         if not self.skill_registry:
             return []
-        requested = state.variables.get("requested_skills")
+        requested = state.variables.get("requested_skills") or self.default_skills
         selected = self.skill_registry.select(task, requested=requested)
         state.variables["active_skills"] = [{"name": skill.name, "digest": skill.digest} for skill in selected]
         return selected
