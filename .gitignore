@@ -17,6 +17,8 @@ app.log
 workspace/config.json
 workspace/state_store.json
 workspace/memories.json
+settings_audit.jsonl
+workspace/settings_audit.jsonl
 workspace/projects/
 
 # Distribution artifacts

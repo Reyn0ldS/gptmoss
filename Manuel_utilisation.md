@@ -56,3 +56,20 @@ source venv/bin/activate  # ou call venv\Scripts\activate.bat sous Windows
 python main.py --task "Crée un projet calculator en python avec tests unitaires pytest"
 ```
 En mode CLI, les requêtes d'approbations humaines s'affichent directement dans le terminal sous forme de prompt interactif `Approve action? (y/n)`.
+
+---
+
+## 6. Centre de contrôle Web
+
+Le bouton **Bibliothèque** ouvre le centre d'administration complet :
+
+* **Documents et images** : aperçu local, rattachement à la prochaine tâche et suppression confirmée ;
+* **Skills** : création, import `SKILL.md`, modification, validation de compatibilité, activation et suppression des skills du workspace ;
+* **Mémoire** : création, recherche, modification, provenance, expiration, validation et suppression ;
+* **Sous-agents** : création sous l'exécution sélectionnée, pause, reprise et annulation ;
+* **Diagnostics** : modèle, vision, capacités/actions, états, métriques, traces et erreurs ;
+* **Audit** : historique local expurgé des changements sensibles.
+
+Dans **Paramètres**, la clé API peut être affichée volontairement pendant 15 secondes, uniquement depuis la machine locale. L'action est auditée mais le secret ne l'est jamais. **Tester la connexion** contacte réellement l'endpoint `/models` du fournisseur après avertissement. Avant toute sauvegarde, la GUI résume les champs modifiés ; les protections affaiblies nécessitent de saisir `CONFIRMER`.
+
+Pour les procédures détaillées, limites de formats, routes API et règles de sécurité, consultez la section **Centre de contrôle GUI : mode d'emploi complet** du [README](README.md#centre-de-contrôle-gui--mode-demploi-complet).

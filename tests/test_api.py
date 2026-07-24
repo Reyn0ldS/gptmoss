@@ -1,4 +1,6 @@
 import asyncio
+import base64
+import json
 
 import httpx
 import pytest
@@ -92,8 +94,7 @@ def test_api_submit_and_query_flow():
     assert len(body_list) >= 1
     assert any(x["execution_id"] == exec_id for x in body_list)
 
-def test_api_settings_flow():
-    import os
+def test_api_settings_flow(tmp_path):
     # Setup test dependencies
     event_bus = EventBus()
     state_engine = StateEngine()
@@ -113,7 +114,7 @@ def test_api_settings_flow():
         policy_provider=policy
     )
     from gptmoss.capabilities.filesystem import FilesystemCapability
-    exec_engine.register_capability("filesystem", FilesystemCapability("."))
+    exec_engine.register_capability("filesystem", FilesystemCapability(str(tmp_path)))
 
     kernel = RuntimeKernel(
         event_bus=event_bus,
@@ -140,7 +141,7 @@ def test_api_settings_flow():
         "ssl_cert_path": "test_path.pem",
         "denied_capabilities": ["shell"],
         "approval_required_capabilities": ["filesystem"],
-        "workspace_path": ".",
+        "workspace_path": str(tmp_path),
         "restrict_to_workspace": True,
         "allow_subfolders": True,
         "projects": [{"id": "proj-default", "name": "Projet Par Défaut"}],
@@ -160,9 +161,6 @@ def test_api_settings_flow():
     response_get_after_save = client.get("/api/settings")
     assert "api_key" not in response_get_after_save.json()
 
-    # Clean up test config.json file
-    if os.path.exists("./config.json"):
-        os.remove("./config.json")
 
 def test_api_delete_cascade_flow():
     # Setup test dependencies
@@ -354,3 +352,133 @@ def test_gui_uses_sanitized_markdown_renderer():
     assert 'contentHtml = marked.parse(msg.content || "");' not in gui
     assert "--bg-card:" in gui
     assert "--text-normal:" in gui
+
+
+def test_gui_management_api_complete_flow(tmp_path):
+    """The GUI management endpoints work together and never expose secrets in audit data."""
+    from gptmoss.capabilities.filesystem import FilesystemCapability
+    from gptmoss.core.skills import SkillRegistry
+
+    event_bus = EventBus()
+    state_engine = StateEngine()
+    memory = RAMMemoryProvider()
+    context_engine = ContextEngine(state_engine, memory)
+    mock_llm = MockLLMProvider()
+    policy = SimplePolicyProvider()
+    exec_engine = ExecutionEngine(
+        event_bus=event_bus,
+        state_engine=state_engine,
+        context_engine=context_engine,
+        llm_provider=mock_llm,
+        planner=SimplePlanner(mock_llm),
+        policy_provider=policy,
+        skill_registry=SkillRegistry(),
+    )
+    exec_engine.register_capability("filesystem", FilesystemCapability(str(tmp_path)))
+    kernel = RuntimeKernel(event_bus=event_bus, state_engine=state_engine, execution_engine=exec_engine)
+    init_app(kernel, exec_engine, state_engine, event_bus)
+    client = ASGIClient(app)
+
+    uploaded = client.post("/artifacts", json={
+        "filename": "notes.md", "content_type": "text/markdown",
+        "content_base64": base64.b64encode("Bonjour GPTMOSS".encode()).decode(),
+    })
+    assert uploaded.status_code == 201
+    artifact_id = uploaded.json()["id"]
+    preview = client.get(f"/artifacts/{artifact_id}/preview")
+    assert preview.status_code == 200
+    assert preview.json()["text"] == "Bonjour GPTMOSS"
+
+    skill = {"name": "gui-review", "description": "Review", "instructions": "Review carefully.", "allowed_capabilities": ["filesystem"]}
+    assert client.post("/skills", json=skill).status_code == 201
+    listed_skill = next(item for item in client.get("/skills").json() if item["name"] == "gui-review")
+    assert listed_skill["editable"] is True
+    assert listed_skill["instructions"] == "Review carefully."
+    assert client.post("/skills/gui-review/validate").json()["valid"] is True
+    imported = "---\nname: imported-skill\ndescription: Imported\nallowed_capabilities: [shell]\n---\n\nUse safe commands.\n"
+    assert client.post("/skills/import", json={"content": imported}).status_code == 201
+
+    created_memory = client.post("/memory", json={
+        "value": "Préférence GUI", "metadata": {"kind": "preference"},
+        "provenance": {"source": "test-gui"}, "validated": False,
+    })
+    assert created_memory.status_code == 201
+    memory_id = created_memory.json()["id"]
+    assert len(client.get("/memory?q=gui").json()) == 1
+    updated = client.request("PUT", f"/memory/{memory_id}", json={
+        "value": "Préférence GUI mise à jour", "metadata": {},
+        "provenance": {"source": "test-gui"}, "validated": False,
+    })
+    assert updated.status_code == 200
+    assert client.post(f"/memory/{memory_id}/validate").status_code == 200
+
+    parent_id = "parent-for-gui"
+    state_engine.get_execution(parent_id)
+    state_engine.get_conversation(parent_id)
+    child = client.post(f"/executions/{parent_id}/subagents", json={"task": "Inspect", "role_name": "Reviewer", "system_prompt": "Review."})
+    assert child.status_code == 201
+    assert len(client.get(f"/executions/{parent_id}/subagents").json()) == 1
+    diagnostics = client.get("/api/diagnostics").json()
+    assert diagnostics["supports_vision"] is False
+    assert any(cap["name"] == "filesystem" for cap in diagnostics["capabilities"])
+
+    settings = {
+        "api_key": "audit-secret", "base_url": "https://example.test/v1", "model_name": "model",
+        "ssl_verify": True, "ssl_cert_path": "", "denied_capabilities": [],
+        "approval_required_capabilities": ["shell"], "workspace_path": str(tmp_path),
+        "restrict_to_workspace": True, "allow_subfolders": True,
+        "projects": [{"id": "proj-default", "name": "Défaut"}], "confirm_sensitive": False,
+    }
+    assert client.post("/api/settings", json=settings).status_code == 200
+    audit = client.get("/api/audit").json()
+    assert audit and audit[-1]["secret_changed"] is True
+    assert "audit-secret" not in json.dumps(audit)
+    assert client.post("/api/settings/reveal-secret", json={"confirm": False}).status_code == 409
+    assert client.post("/api/settings/reveal-secret", json={"confirm": True}).json()["api_key"] == "audit-secret"
+    assert client.post("/api/settings/test-connection", json={**settings, "base_url": "ftp://invalid"}).status_code == 400
+
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from threading import Thread
+
+    class ModelsHandler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            payload = json.dumps({"data": [{"id": "model"}]}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, *_args):
+            pass
+
+    provider = ThreadingHTTPServer(("127.0.0.1", 0), ModelsHandler)
+    provider_thread = Thread(target=provider.serve_forever, daemon=True)
+    provider_thread.start()
+    try:
+        connection = client.post("/api/settings/test-connection", json={
+            **settings, "base_url": f"http://127.0.0.1:{provider.server_port}/v1"
+        })
+        assert connection.status_code == 200
+        assert connection.json() == {"status": "connected", "model_available": True, "models_count": 1}
+    finally:
+        provider.shutdown()
+        provider.server_close()
+        provider_thread.join(timeout=2)
+
+    assert client.delete(f"/memory/{memory_id}").status_code == 200
+    assert client.delete("/skills/gui-review").status_code == 200
+    assert client.delete("/skills/imported-skill").status_code == 200
+    assert client.delete(f"/artifacts/{artifact_id}").status_code == 200
+
+
+def test_gui_contains_complete_management_controls():
+    from pathlib import Path
+
+    gui = (Path(__file__).parents[1] / "gptmoss" / "api" / "gui.html").read_text(encoding="utf-8")
+    for marker in (
+        "previewArtifact", "importLibrarySkill", "validateLibrarySkill", "saveMemory",
+        "createSubagent", "library-diagnostics", "library-audit", "revealApiKey",
+        "testLlmConnection", "collectSettingsPayload",
+    ):
+        assert marker in gui

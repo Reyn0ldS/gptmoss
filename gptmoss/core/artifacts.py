@@ -59,7 +59,11 @@ class ArtifactStore:
         path = self.root / f"{artifact_id}.json"
         if not path.exists():
             raise FileNotFoundError("Artifact not found.")
-        return json.loads(path.read_text(encoding="utf-8"))
+        metadata = json.loads(path.read_text(encoding="utf-8"))
+        data_path = Path(metadata.get("path", "")).resolve()
+        if self.root != data_path.parent or not data_path.exists():
+            raise FileNotFoundError("Artifact data not found.")
+        return metadata
 
     def context_items(self, artifact_ids: List[str], supports_vision: bool = False) -> List[Dict[str, Any]]:
         items = []

@@ -993,6 +993,13 @@
         .settings-nav { display: flex; flex-wrap: wrap; gap: 6px; padding-bottom: 4px; }
         .settings-nav button { flex: 1 1 120px; }
         .settings-section { scroll-margin-top: 12px; }
+        .library-row { display:grid; grid-template-columns:minmax(180px,2fr) minmax(100px,1fr) auto; gap:10px; align-items:center; padding:9px; border-bottom:1px solid var(--border-color); font-size:12px; }
+        .library-row small { display:block; color:var(--text-muted); overflow-wrap:anywhere; }
+        .library-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(240px,1fr)); gap:10px; }
+        .library-panel { border:1px solid var(--border-color); border-radius:8px; padding:12px; background:rgba(255,255,255,.015); }
+        .library-panel input:not([type=checkbox]), .library-panel textarea { width:100%; box-sizing:border-box; margin:4px 0; padding:8px; color:var(--text-normal); background:var(--bg-input); border:1px solid var(--border-color); border-radius:5px; }
+        .library-panel textarea { min-height:90px; resize:vertical; }
+        .diagnostic-output { max-height:300px; overflow:auto; white-space:pre-wrap; overflow-wrap:anywhere; font-size:11px; color:var(--text-muted); }
 
         @media (max-width: 1280px) {
             .sidebar { width: 260px; }
@@ -1060,6 +1067,7 @@
             .toast-container { left: 12px; right: 12px; bottom: 12px; }
             .toast { min-width: 0; max-width: none; width: 100%; }
             .settings-container { width: calc(100% - 24px) !important; padding: 16px !important; }
+            .library-row { grid-template-columns:1fr; }
             .feed-column {
                 height: 45vh;
             }
@@ -1879,6 +1887,9 @@
                 
                 const data = await res.json();
                 const newId = data.execution_id;
+                selectedLibraryArtifacts.clear();
+                const attachmentInput = document.getElementById("task-attachments");
+                if (attachmentInput) attachmentInput.value = "";
                 
                 // Instantly select new task
                 activeExecutionId = newId;
@@ -1990,6 +2001,11 @@
 
         let localProjects = [];
         let availableSkills = [];
+        let loadedSettings = {};
+        const selectedLibraryArtifacts = new Set();
+        let librarySkills = [];
+        let libraryMemories = [];
+        let editingMemoryId = null;
 
         function scrollSettingsSection(id) {
             document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -2131,6 +2147,8 @@
                 const projects = data.projects || [];
                 projects.push({ id, name });
                 data.projects = projects;
+                data.api_key = "";
+                data.confirm_sensitive = true;
                 
                 await fetch("/api/settings", {
                     method: "POST",
@@ -2149,6 +2167,7 @@
                 const res = await fetch("/api/settings");
                 if (!res.ok) throw new Error("Could not load settings.");
                 const data = await res.json();
+                loadedSettings = JSON.parse(JSON.stringify(data));
                 
                 document.getElementById("settings-base-url").value = data.base_url || "";
                 document.getElementById("settings-api-key").value = data.api_key || "";
@@ -2195,71 +2214,78 @@
             document.getElementById("settings-modal").style.display = "none";
         }
 
+        function collectSettingsPayload() {
+            return {
+                api_key: document.getElementById("settings-api-key").value,
+                base_url: document.getElementById("settings-base-url").value.trim(),
+                model_name: document.getElementById("settings-model-name").value.trim(),
+                ssl_verify: document.getElementById("settings-ssl-verify").checked,
+                ssl_cert_path: document.getElementById("settings-ssl-cert-path").value.trim(),
+                denied_capabilities: Array.from(document.querySelectorAll("input[name='settings-deny']:checked"), cb => cb.value),
+                approval_required_capabilities: Array.from(document.querySelectorAll("input[name='settings-approval']:checked"), cb => cb.value),
+                workspace_path: document.getElementById("settings-workspace-path").value.trim(),
+                restrict_to_workspace: document.getElementById("settings-restrict-to-workspace").checked,
+                allow_subfolders: document.getElementById("settings-allow-subfolders").checked,
+                projects: localProjects,
+                max_step_iterations: parseInt(document.getElementById("settings-max-step-iterations").value, 10) || 30,
+                max_context_chars: parseInt(document.getElementById("settings-max-context-chars").value, 10) || 12000,
+                safe_shell_mode: document.getElementById("settings-safe-shell-mode").checked,
+                shell_timeout_seconds: parseInt(document.getElementById("settings-shell-timeout").value, 10) || 60,
+                shell_max_output_chars: parseInt(document.getElementById("settings-shell-output").value, 10) || 12000,
+                default_skills: Array.from(document.querySelectorAll("input[name='settings-default-skill']:checked"), cb => cb.value),
+                confirm_sensitive: false,
+            };
+        }
+
+        async function revealApiKey() {
+            if (!confirm("Afficher temporairement la clé API enregistrée ? Cette action sera auditée localement.")) return;
+            try {
+                const response = await requestApi("/api/settings/reveal-secret", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({confirm:true})});
+                const input = document.getElementById("settings-api-key");
+                input.value = (await response.json()).api_key || "";
+                input.type = "text";
+                document.getElementById("settings-secret-toggle").textContent = "Masquer";
+                setTimeout(() => { input.type = "password"; document.getElementById("settings-secret-toggle").textContent = "Afficher 15 s"; }, 15000);
+            } catch (err) { showToast(err.message, "error"); }
+        }
+
+        async function testLlmConnection() {
+            const button = document.getElementById("settings-test-connection");
+            if (!confirm("Le test enverra la clé API au fournisseur indiqué dans Adresse API. Continuer ?")) return;
+            button.disabled = true; button.textContent = "Test en cours…";
+            try {
+                const response = await requestApi("/api/settings/test-connection", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(collectSettingsPayload())});
+                const result = await response.json();
+                showToast(`Connexion réussie (${result.models_count} modèles, modèle ${result.model_available ? "disponible" : "non listé"}).`, result.model_available ? "success" : "warning");
+            } catch (err) { showToast("Test LLM échoué : " + err.message, "error"); }
+            finally { button.disabled = false; button.textContent = "Tester la connexion"; }
+        }
+
         async function saveSettings() {
             try {
-                const api_key = document.getElementById("settings-api-key").value;
-                const base_url = document.getElementById("settings-base-url").value;
-                const model_name = document.getElementById("settings-model-name").value;
-                const ssl_verify = document.getElementById("settings-ssl-verify").checked;
-                const ssl_cert_path = document.getElementById("settings-ssl-cert-path").value;
-                const workspace_path = document.getElementById("settings-workspace-path").value;
-                const restrict_to_workspace = document.getElementById("settings-restrict-to-workspace").checked;
-                const allow_subfolders = document.getElementById("settings-allow-subfolders").checked;
-                const max_step_iterations = parseInt(document.getElementById("settings-max-step-iterations").value, 10) || 30;
-                const max_context_chars = parseInt(document.getElementById("settings-max-context-chars").value, 10) || 12000;
-                const safe_shell_mode = document.getElementById("settings-safe-shell-mode").checked;
-                const shell_timeout_seconds = parseInt(document.getElementById("settings-shell-timeout").value, 10) || 60;
-                const shell_max_output_chars = parseInt(document.getElementById("settings-shell-output").value, 10) || 12000;
-                const default_skills = Array.from(document.querySelectorAll("input[name='settings-default-skill']:checked"), checkbox => checkbox.value);
-                
-                const approval_required_capabilities = [];
-                document.querySelectorAll("input[name='settings-approval']:checked").forEach(cb => {
-                    approval_required_capabilities.push(cb.value);
-                });
-                
-                const denied_capabilities = [];
-                document.querySelectorAll("input[name='settings-deny']:checked").forEach(cb => {
-                    denied_capabilities.push(cb.value);
-                });
-                
-                const res = await fetch("/api/settings", {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({
-                        api_key,
-                        base_url,
-                        model_name,
-                        ssl_verify,
-                        ssl_cert_path,
-                        denied_capabilities,
-                        approval_required_capabilities,
-                        workspace_path,
-                        restrict_to_workspace,
-                        allow_subfolders,
-                        projects: localProjects,
-                        max_step_iterations,
-                        max_context_chars,
-                        safe_shell_mode,
-                        shell_timeout_seconds,
-                        shell_max_output_chars,
-                        default_skills,
-                        confirm_sensitive: (!ssl_verify || !restrict_to_workspace || !safe_shell_mode || !approval_required_capabilities.includes("shell")) ? confirm("Ce changement réduit les protections. Confirmer ?") : false
-                    })
-                });
-                
-                if (!res.ok) throw new Error("Could not save settings.");
-                showToast("Paramètres enregistrés et appliqués !", "success");
-                closeSettingsModal();
-                loadProjectOptions();
-                fetchExecutions();
-            } catch (err) {
-                showToast("Erreur lors de l'enregistrement: " + err.message, "error");
-            }
+                const payload = collectSettingsPayload();
+                const changed = Object.keys(payload).filter(key => key !== "confirm_sensitive" && key !== "api_key" && JSON.stringify(payload[key]) !== JSON.stringify(loadedSettings[key]));
+                if (payload.api_key) changed.push("clé API (valeur masquée)");
+                if (!changed.length) return showToast("Aucune modification à enregistrer.", "info");
+                if (!confirm("Modifications prévues :\n- " + changed.join("\n- ") + "\n\nEnregistrer ces réglages ?")) return;
+                const previousApprovals = new Set(loadedSettings.approval_required_capabilities || []);
+                const approvalsRemoved = Array.from(previousApprovals).some(item => !payload.approval_required_capabilities.includes(item));
+                const sensitive = !payload.ssl_verify || !payload.restrict_to_workspace || !payload.safe_shell_mode || !payload.approval_required_capabilities.includes("shell") || approvalsRemoved || payload.workspace_path !== loadedSettings.workspace_path || payload.projects.some(project => project.path);
+                if (sensitive) {
+                    const typed = prompt("AVERTISSEMENT : ces réglages réduisent les protections TLS, workspace, shell ou validations humaines. Tapez CONFIRMER pour continuer.");
+                    if (typed !== "CONFIRMER") return showToast("Modification sensible annulée.", "warning");
+                    payload.confirm_sensitive = true;
+                }
+                const response = await requestApi("/api/settings", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(payload)});
+                const result = await response.json();
+                showToast(`Paramètres appliqués (${result.changed_fields.length} champs, secret ${result.secret_changed ? "modifié" : "inchangé"}).`, "success");
+                closeSettingsModal(); loadProjectOptions(); fetchExecutions();
+            } catch (err) { showToast("Erreur lors de l'enregistrement : " + err.message, "error"); }
         }
         async function uploadSelectedAttachments() {
             const files = Array.from(document.getElementById("task-attachments")?.files || []);
             const allowed = {"text/plain":"text/plain","text/markdown":"text/markdown","application/json":"application/json","text/csv":"text/csv","image/png":"image/png","image/jpeg":"image/jpeg","image/webp":"image/webp"};
-            const ids = [];
+            const ids = Array.from(selectedLibraryArtifacts);
             for (const file of files) {
                 const type = allowed[file.type] || (file.name.endsWith(".md") ? "text/markdown" : "");
                 if (!type) throw new Error(`Format non pris en charge : ${file.name}`);
@@ -2278,20 +2304,48 @@
         }
         function closeLibraryModal() { document.getElementById("library-modal").style.display = "none"; }
         async function refreshLibrary() {
-            const [artifacts, skills, memories] = await Promise.all([requestApi("/artifacts").then(r=>r.json()), requestApi("/skills").then(r=>r.json()), requestApi("/memory").then(r=>r.json())]);
-            document.getElementById("library-artifacts").innerHTML = artifacts.map(a=>`<div>${escapeHTML(a.filename)} <button onclick="deleteArtifact('${a.id}')">Supprimer</button></div>`).join("") || "Aucun fichier.";
-            document.getElementById("library-skills").innerHTML = skills.map(s=>`<div><b>${escapeHTML(s.name)}</b> — ${escapeHTML(s.description || "")} ${s.source_path ? "" : ""}</div>`).join("") || "Aucun skill.";
-            document.getElementById("library-memory").innerHTML = memories.map(m=>`<div>${escapeHTML(String(m.value))} ${m.validated ? "validée" : `<button onclick="validateMemory('${m.id}')">Valider</button>`} <button onclick="deleteMemory('${m.id}')">Supprimer</button></div>`).join("") || "Aucune mémoire.";
+            const query = document.getElementById("library-memory-search")?.value.trim() || "";
+            const calls = [requestApi("/artifacts").then(r=>r.json()), requestApi("/skills").then(r=>r.json()), requestApi(`/memory?q=${encodeURIComponent(query)}`).then(r=>r.json()), requestApi("/api/diagnostics").then(r=>r.json()), requestApi("/api/audit").then(r=>r.json())];
+            if (activeExecutionId) calls.push(requestApi(`/executions/${activeExecutionId}/subagents`).then(r=>r.json()));
+            const [artifacts, skills, memories, diagnostics, audit, subagents=[]] = await Promise.all(calls);
+            librarySkills = skills; libraryMemories = memories;
+            document.getElementById("library-artifacts").innerHTML = artifacts.map(a=>`<div class="library-row"><label><input type="checkbox" ${selectedLibraryArtifacts.has(a.id) ? "checked" : ""} onchange="toggleArtifactAttachment('${a.id}',this.checked)"> ${escapeHTML(a.filename)}</label><span>${Math.ceil(a.size_bytes/1024)} Ko</span><span><button onclick="previewArtifact('${a.id}')">Aperçu</button> <button onclick="deleteArtifact('${a.id}')">Supprimer</button></span></div>`).join("") || "Aucun fichier.";
+            document.getElementById("library-skills").innerHTML = skills.map(s=>`<div class="library-row"><span><b>${escapeHTML(s.name)}</b> — ${escapeHTML(s.description || "")}</span><span>${s.allowed_capabilities.map(escapeHTML).join(", ") || "sans capacité"}</span><span><button onclick="validateLibrarySkill('${s.name}')">Valider</button> ${s.editable ? `<button onclick="editLibrarySkill('${s.name}')">Modifier</button> <button onclick="deleteLibrarySkill('${s.name}')">Supprimer</button>` : "intégré"} <button onclick="toggleSkillActivation('${s.name}')">Activer/désactiver</button></span></div>`).join("") || "Aucun skill.";
+            document.getElementById("library-memory").innerHTML = memories.map(m=>`<div class="library-row"><span>${escapeHTML(String(m.value))}<small>source : ${escapeHTML(String((m.provenance||{}).source||"inconnue"))}</small></span><span>${m.validated ? "validée" : "en attente"}</span><span>${m.validated ? "" : `<button onclick="validateMemory('${m.id}')">Valider</button>`} <button onclick="editMemory('${m.id}')">Modifier</button> <button onclick="deleteMemory('${m.id}')">Supprimer</button></span></div>`).join("") || "Aucune mémoire.";
+            document.getElementById("library-diagnostics").textContent = JSON.stringify({model:diagnostics.model, vision:diagnostics.supports_vision, capabilities:diagnostics.capabilities, executions:diagnostics.execution_statuses, metrics:diagnostics.metrics, errors:diagnostics.errors, traces:diagnostics.recent_events}, null, 2);
+            document.getElementById("library-audit").textContent = audit.slice(-30).reverse().map(e=>`${new Date(e.timestamp*1000).toLocaleString()} — ${e.action} — ${e.changed_fields.join(", ")}${e.secret_changed ? " — secret modifié" : ""}`).join("\n") || "Aucun changement sensible audité.";
+            document.getElementById("library-subagents").innerHTML = subagents.map(s=>`<div class="library-row"><span><b>${escapeHTML(s.role_name)}</b><small>${s.execution_id}</small></span><span>${escapeHTML(s.status)}</span><span><button onclick="controlSubagent('${s.execution_id}','pause')">Pause</button> <button onclick="controlSubagent('${s.execution_id}','resume')">Reprendre</button> <button onclick="controlSubagent('${s.execution_id}','cancel')">Annuler</button></span></div>`).join("") || (activeExecutionId ? "Aucun sous-agent." : "Sélectionnez une exécution parente.");
         }
-        async function deleteArtifact(id) { await requestApi(`/artifacts/${id}`, {method:"DELETE"}); refreshLibrary(); }
+        function toggleArtifactAttachment(id, checked) { checked ? selectedLibraryArtifacts.add(id) : selectedLibraryArtifacts.delete(id); showToast(`${selectedLibraryArtifacts.size} fichier(s) rattaché(s) à la prochaine tâche.`, "info"); }
+        async function previewArtifact(id) {
+            try {
+                const data = await requestApi(`/artifacts/${id}/preview`).then(r=>r.json());
+                const box = document.getElementById("library-preview"); box.innerHTML = "";
+                const title = document.createElement("b"); title.textContent = data.filename; box.appendChild(title);
+                if (data.preview_type === "image") { const img=document.createElement("img"); img.src=data.data_url; img.alt=data.filename; img.style.cssText="display:block;max-width:100%;max-height:420px;margin-top:8px"; box.appendChild(img); }
+                else { const pre=document.createElement("pre"); pre.textContent=data.text; pre.style.whiteSpace="pre-wrap"; box.appendChild(pre); }
+            } catch (err) { showToast(err.message, "error"); }
+        }
+        async function deleteArtifact(id) { if (!confirm("Supprimer définitivement ce fichier ?")) return; await requestApi(`/artifacts/${id}`, {method:"DELETE"}); selectedLibraryArtifacts.delete(id); refreshLibrary(); }
         async function validateMemory(id) { await requestApi(`/memory/${id}/validate`, {method:"POST"}); refreshLibrary(); }
-        async function deleteMemory(id) { await requestApi(`/memory/${id}`, {method:"DELETE"}); refreshLibrary(); }
+        async function deleteMemory(id) { if (!confirm("Supprimer définitivement cette mémoire ?")) return; await requestApi(`/memory/${id}`, {method:"DELETE"}); refreshLibrary(); }
+        function editMemory(id) { const m=libraryMemories.find(item=>item.id===id); if(!m)return; editingMemoryId=id; document.getElementById("library-memory-value").value=String(m.value); document.getElementById("library-memory-source").value=String((m.provenance||{}).source||"gui"); document.getElementById("library-memory-validated").checked=!!m.validated; document.getElementById("library-memory-save").textContent="Mettre à jour"; }
+        function resetMemoryForm() { editingMemoryId=null; document.getElementById("library-memory-value").value=""; document.getElementById("library-memory-source").value="gui"; document.getElementById("library-memory-ttl").value=""; document.getElementById("library-memory-validated").checked=false; document.getElementById("library-memory-save").textContent="Créer"; }
+        async function saveMemory() { const value=document.getElementById("library-memory-value").value.trim(); if(!value)return showToast("Contenu mémoire requis.","warning"); const ttl=parseFloat(document.getElementById("library-memory-ttl").value); const body={value,metadata:{created_from:"gui"},provenance:{source:document.getElementById("library-memory-source").value.trim()||"gui"},validated:document.getElementById("library-memory-validated").checked,ttl_seconds:Number.isFinite(ttl)?ttl*86400:null}; await requestApi(editingMemoryId?`/memory/${editingMemoryId}`:"/memory",{method:editingMemoryId?"PUT":"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)}); resetMemoryForm(); refreshLibrary(); }
         async function createLibrarySkill() {
             const name=document.getElementById("library-skill-name").value.trim(); const instructions=document.getElementById("library-skill-instructions").value.trim();
             if(!name || !instructions) return showToast("Nom et instructions requis.", "warning");
             await requestApi("/skills", {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name, description:document.getElementById("library-skill-description").value, instructions, allowed_capabilities:Array.from(document.querySelectorAll("input[name='library-cap']:checked"), e=>e.value)})});
-            showToast("Skill enregistré.", "success"); refreshLibrary();
+            showToast("Skill enregistré.", "success"); resetSkillForm(); refreshLibrary();
         }
+        function resetSkillForm(){document.getElementById("library-skill-name").value="";document.getElementById("library-skill-name").disabled=false;document.getElementById("library-skill-description").value="";document.getElementById("library-skill-instructions").value="";document.querySelectorAll("input[name='library-cap']").forEach(e=>e.checked=false);}
+        function editLibrarySkill(name){const s=librarySkills.find(item=>item.name===name);if(!s)return;document.getElementById("library-skill-name").value=s.name;document.getElementById("library-skill-name").disabled=true;document.getElementById("library-skill-description").value=s.description||"";document.getElementById("library-skill-instructions").value=s.instructions||"";document.querySelectorAll("input[name='library-cap']").forEach(e=>e.checked=s.allowed_capabilities.includes(e.value));}
+        async function importLibrarySkill(input){const file=input.files[0];if(!file)return;try{await requestApi("/skills/import",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({content:await file.text()})});showToast("Skill importé et validé.","success");refreshLibrary();}catch(err){showToast("Import refusé : "+err.message,"error");}finally{input.value="";}}
+        async function validateLibrarySkill(name){try{const r=await requestApi(`/skills/${name}/validate`).then(x=>x.json());showToast(r.valid?`Skill valide (${r.digest.slice(0,8)}).`:`Skill incompatible : ${r.unsupported.join(", ")}`,r.valid?"success":"warning");}catch(err){showToast(err.message,"error");}}
+        async function deleteLibrarySkill(name){if(!confirm(`Supprimer définitivement le skill ${name} ?`))return;await requestApi(`/skills/${name}`,{method:"DELETE"});resetSkillForm();refreshLibrary();}
+        async function toggleSkillActivation(name){const settings=await requestApi("/api/settings").then(r=>r.json());const active=new Set(settings.default_skills||[]);active.has(name)?active.delete(name):active.add(name);settings.default_skills=Array.from(active);settings.api_key="";settings.confirm_sensitive=true;await requestApi("/api/settings",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(settings)});showToast(active.has(name)?"Skill activé par défaut.":"Skill désactivé.","success");}
+        async function createSubagent(){if(!activeExecutionId)return showToast("Sélectionnez une exécution parente.","warning");const task=document.getElementById("subagent-task").value.trim();if(!task)return;await requestApi(`/executions/${activeExecutionId}/subagents`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({task,role_name:document.getElementById("subagent-role").value.trim()||"Sous-agent",system_prompt:document.getElementById("subagent-prompt").value.trim()||"You are a helpful MOSS sub-agent assisting a parent agent."})});document.getElementById("subagent-task").value="";showToast("Sous-agent lancé.","success");refreshLibrary();fetchExecutions();}
+        async function controlSubagent(id,action){try{await requestApi(`/executions/${id}/${action}`,{method:"POST"});refreshLibrary();fetchExecutions();}catch(err){showToast(err.message,"warning");}}
     </script>
 
     <!-- Settings Modal -->
@@ -2319,7 +2373,8 @@
                 
                 <div style="display: flex; flex-direction: column; gap: 4px;">
                     <label style="font-size: 11px; color: var(--text-normal);">Clé API</label>
-                    <input type="password" id="settings-api-key" class="approval-reason-input" style="margin: 0;" placeholder="Saisir la clé API">
+                    <div style="display:flex;gap:6px"><input type="password" id="settings-api-key" class="approval-reason-input" style="margin:0;flex:1" autocomplete="new-password" placeholder="Laisser vide pour conserver la clé"><button id="settings-secret-toggle" class="btn-control" type="button" onclick="revealApiKey()">Afficher 15 s</button></div>
+                    <small style="color:var(--text-muted)">Le secret n'est jamais renvoyé par la lecture des paramètres. Son affichage volontaire est temporaire et audité.</small>
                 </div>
 
                 <div style="display: flex; flex-direction: column; gap: 4px;">
@@ -2337,6 +2392,7 @@
                     <label style="font-size: 11px; color: var(--text-normal);">Chemin du certificat custom (Optionnel)</label>
                     <input type="text" id="settings-ssl-cert-path" class="approval-reason-input" style="margin: 0;" placeholder="C:\chemin\vers\certificat.pem">
                 </div>
+                <button id="settings-test-connection" class="btn-control resume" type="button" onclick="testLlmConnection()">Tester la connexion</button>
 
                 <hr style="border: 0; border-top: 1px solid var(--border-color); margin: 8px 0;">
 
@@ -2421,13 +2477,14 @@
         </div>
     </div>
     <div id="library-modal" class="modal-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.8);z-index:1100;justify-content:center;align-items:center;">
-      <div class="settings-container" style="background:var(--bg-card);width:min(900px,94vw);max-height:90vh;overflow:auto;padding:22px;">
-        <div style="display:flex;justify-content:space-between"><h3>Bibliothèque GPTMOSS</h3><button class="btn-control" onclick="closeLibraryModal()">Fermer</button></div>
-        <h4>Pièces jointes</h4><div id="library-artifacts"></div>
-        <h4>Skills</h4><div id="library-skills"></div>
-        <input id="library-skill-name" placeholder="nom-du-skill"><input id="library-skill-description" placeholder="Description"><textarea id="library-skill-instructions" placeholder="Instructions du skill"></textarea>
-        <label><input type="checkbox" name="library-cap" value="filesystem"> Fichiers</label><label><input type="checkbox" name="library-cap" value="shell"> Shell</label><label><input type="checkbox" name="library-cap" value="agent"> Agents</label><label><input type="checkbox" name="library-cap" value="devteam"> Équipe</label><button class="btn-control resume" onclick="createLibrarySkill()">Créer / mettre à jour</button>
-        <h4>Mémoire persistante</h4><div id="library-memory"></div>
+      <div class="settings-container" style="background:var(--bg-card);width:min(1100px,96vw);max-height:94vh;overflow:auto;padding:22px;">
+        <div style="display:flex;justify-content:space-between;position:sticky;top:0;background:var(--bg-card);z-index:2"><h3>Centre de contrôle GPTMOSS</h3><button class="btn-control" onclick="closeLibraryModal()">Fermer</button></div>
+        <section class="library-panel"><h4>Documents et images</h4><p style="font-size:11px;color:var(--text-muted)">Cochez un fichier pour le rattacher à la prochaine tâche. Les aperçus restent locaux.</p><div id="library-artifacts"></div><div id="library-preview" style="margin-top:10px;max-height:480px;overflow:auto"></div></section>
+        <section class="library-panel"><h4>Skills</h4><div id="library-skills"></div><div class="library-grid"><div><input type="file" accept=".md,text/markdown" onchange="importLibrarySkill(this)"><small>Importer un fichier SKILL.md (262 Ko maximum).</small></div><div><input id="library-skill-name" placeholder="nom-du-skill"><input id="library-skill-description" placeholder="Description"><textarea id="library-skill-instructions" placeholder="Instructions du skill"></textarea><div><label><input type="checkbox" name="library-cap" value="filesystem"> Fichiers</label> <label><input type="checkbox" name="library-cap" value="shell"> Shell</label> <label><input type="checkbox" name="library-cap" value="agent"> Agents</label> <label><input type="checkbox" name="library-cap" value="devteam"> Équipe</label></div><button class="btn-control resume" onclick="createLibrarySkill()">Créer / mettre à jour</button> <button class="btn-control" onclick="resetSkillForm()">Réinitialiser</button></div></div></section>
+        <section class="library-panel"><h4>Mémoire persistante</h4><input id="library-memory-search" placeholder="Filtrer les mémoires" oninput="clearTimeout(this._timer);this._timer=setTimeout(refreshLibrary,250)"><div id="library-memory"></div><div class="library-grid"><textarea id="library-memory-value" placeholder="Information à mémoriser"></textarea><div><input id="library-memory-source" value="gui" placeholder="Provenance"><input id="library-memory-ttl" type="number" min="1" max="365" placeholder="Expiration en jours (facultatif)"><label><input id="library-memory-validated" type="checkbox"> Valider immédiatement</label><br><button id="library-memory-save" class="btn-control resume" onclick="saveMemory()">Créer</button> <button class="btn-control" onclick="resetMemoryForm()">Réinitialiser</button></div></div></section>
+        <section class="library-panel"><h4>Sous-agents</h4><p style="font-size:11px;color:var(--text-muted)">Le parent est l'exécution actuellement sélectionnée.</p><div id="library-subagents"></div><div class="library-grid"><input id="subagent-role" placeholder="Rôle (ex. Relecteur sécurité)"><textarea id="subagent-task" placeholder="Tâche du sous-agent"></textarea><textarea id="subagent-prompt" placeholder="Instruction système facultative"></textarea></div><button class="btn-control resume" onclick="createSubagent()">Créer le sous-agent</button></section>
+        <section class="library-panel"><h4>Diagnostics, capacités et vision</h4><pre id="library-diagnostics" class="diagnostic-output"></pre></section>
+        <section class="library-panel"><h4>Journal d'audit des réglages sensibles</h4><pre id="library-audit" class="diagnostic-output"></pre></section>
       </div>
     </div>
 </body>

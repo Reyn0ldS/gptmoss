@@ -1,4 +1,5 @@
 import uuid
+import time
 from typing import List, Dict, Any, Optional
 from gptmoss.interfaces.memory import MemoryProvider
 
@@ -32,9 +33,34 @@ class RAMMemoryProvider(MemoryProvider):
         self.memories.append({
             "id": key,
             "value": value,
-            "metadata": metadata or {}
+            "metadata": metadata or {},
+            "provenance": kwargs.get("provenance") or {"source": "runtime"},
+            "validated": bool(kwargs.get("validated", False)),
+            "created_at": time.time(),
+            "expires_at": time.time() + kwargs["ttl_seconds"] if kwargs.get("ttl_seconds") else None,
         })
         return key
+
+    async def update(self, key: str, value: Any, metadata: Optional[Dict[str, Any]] = None, **kwargs) -> bool:
+        for item in self.memories:
+            if item["id"] == key:
+                item.update({
+                    "value": value, "metadata": metadata or {},
+                    "provenance": kwargs.get("provenance") or item.get("provenance", {"source": "gui"}),
+                    "validated": bool(kwargs.get("validated", item.get("validated", False))),
+                    "expires_at": time.time() + kwargs["ttl_seconds"] if kwargs.get("ttl_seconds") else None,
+                })
+                return True
+        return False
+
+    async def validate(self, key: str, validated_by: str = "system") -> bool:
+        for item in self.memories:
+            if item["id"] == key:
+                item["validated"] = True
+                item["validated_by"] = validated_by
+                item["validated_at"] = time.time()
+                return True
+        return False
 
     async def delete(self, key: str, **kwargs) -> bool:
         """Delete matching memory item."""

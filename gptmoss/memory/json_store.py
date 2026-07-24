@@ -139,6 +139,19 @@ class JSONMemoryProvider(MemoryProvider):
                 return True
         return False
 
+    async def update(self, key: str, value: Any, metadata: Optional[Dict[str, Any]] = None, provenance: Optional[Dict[str, Any]] = None, validated: bool = False, ttl_seconds: Optional[float] = None, **kwargs) -> bool:
+        for item in self.memories:
+            if item["id"] == key:
+                item["value"] = value
+                item["metadata"] = metadata or {}
+                item["provenance"] = provenance or item.get("provenance") or {"source": "gui"}
+                item["validated"] = validated
+                item["expires_at"] = time.time() + ttl_seconds if ttl_seconds is not None else None
+                self._rebuild_index()
+                self._save_to_disk()
+                return True
+        return False
+
     async def clear_session(self, session_id: str) -> None:
         self.session_memories.pop(session_id, None)
 

@@ -262,11 +262,23 @@ Routes principales :
 | `GET /executions/{id}/unified-feed` | Fil des messages, sous-agents compris. |
 | `GET /executions/{id}/metrics` | Compteurs et durées de télémétrie. |
 | `POST /executions` | Crée une exécution. |
+| `GET` / `POST /executions/{id}/subagents` | Liste ou crée les sous-agents d'une exécution parente. |
 | `DELETE /executions/{id}` | Supprime une exécution et ses descendants de l'état persistant. |
 | `POST /executions/clear-all` | Supprime tout l'historique d'exécution. |
 | `GET /skills` | Liste les skills détectés. |
+| `POST /skills` | Crée ou met à jour un skill local. |
+| `POST /skills/import` | Importe le contenu d'un fichier `SKILL.md`. |
+| `POST /skills/{name}/validate` | Vérifie le format, l'empreinte et la compatibilité d'un skill. |
+| `DELETE /skills/{name}` | Supprime un skill du workspace ; les skills intégrés sont protégés. |
 | `POST /artifacts` | Dépose un fichier. |
+| `GET /artifacts/{id}/preview` | Renvoie un aperçu texte ou image local. |
+| `GET` / `POST /memory` | Filtre les mémoires ou crée une entrée. |
+| `PUT /memory/{id}` | Modifie valeur, provenance, validation et expiration. |
+| `GET /api/diagnostics` | Capacités, compatibilité vision, métriques, traces et erreurs. |
+| `GET /api/audit` | Journal local expurgé des changements de réglages. |
 | `GET` / `POST /api/settings` | Lit ou modifie les réglages. |
+| `POST /api/settings/test-connection` | Teste réellement l'endpoint OpenAI-compatible `/models`. |
+| `POST /api/settings/reveal-secret` | Révèle temporairement la clé, uniquement en local et après confirmation. |
 
 ### Contrôler une exécution
 
@@ -428,8 +440,68 @@ python -m pytest -q
 ```
 
 Les tests vérifient notamment l'API, le moteur d'exécution, les politiques, la mémoire, les skills et les artefacts.
-### Bibliothèque GUI : skills, fichiers et mémoire
+## Centre de contrôle GUI : mode d'emploi complet
 
-Le bouton **Bibliothèque** ouvre un panneau unique permettant de déposer des documents ou images lors de la création d'une tâche, puis de consulter ou supprimer les artefacts stockés. Les formats acceptés sont texte, Markdown, JSON, CSV, PNG, JPEG et WebP (10 Mio maximum). Les pièces jointes sélectionnées sont téléversées et rattachées automatiquement à la nouvelle exécution.
+Le bouton **Bibliothèque** ouvre désormais le **Centre de contrôle GPTMOSS**. Il rassemble les fonctions qui ne doivent plus nécessiter de modifier directement un script ou un fichier Markdown.
 
-Le même panneau permet de créer ou mettre à jour un skill local : indiquez son nom, sa description, ses instructions et les capacités à lui accorder. Les skills créés sont enregistrés dans `workspace/skills/` et sont immédiatement détectés. Enfin, les mémoires persistantes y sont visibles ; une mémoire en attente peut être validée ou supprimée.
+### Documents et images
+
+1. Pour un nouveau fichier, utilisez le sélecteur situé sous le texte de la tâche. Le fichier est téléversé au moment où vous cliquez sur **Démarrer l'exécution**.
+2. Pour réutiliser un fichier déjà stocké, ouvrez **Bibliothèque**, section **Documents et images**, puis cochez-le. Le compteur confirme son rattachement à la prochaine tâche.
+3. Cliquez sur **Aperçu** pour afficher localement le texte ou l'image. Le texte est limité à 50 000 caractères dans l'aperçu et le contexte.
+4. Cliquez sur **Supprimer** puis confirmez. Le contenu et ses métadonnées sont retirés ensemble.
+5. Après soumission réussie, la sélection de pièces jointes est remise à zéro pour éviter une réutilisation accidentelle.
+
+Une image n'est réellement transmise au modèle que si le panneau **Diagnostics** indique `vision: true`. Dans le cas contraire, GPTMOSS transmet seulement une note et les métadonnées. Les formats et limites sont détaillés dans [Fichiers, images et artefacts](#fichiers-images-et-artefacts).
+
+### Créer, importer, modifier, valider et activer un skill
+
+- **Créer** : renseignez un nom conforme à `[a-z0-9_-]`, une description, des instructions et le minimum de capacités nécessaires, puis cliquez sur **Créer / mettre à jour**.
+- **Importer** : choisissez un fichier `SKILL.md` de 262 Ko maximum. Son frontmatter est analysé côté serveur et les capacités inconnues sont refusées.
+- **Modifier** : utilisez **Modifier** sur un skill du workspace, corrigez le formulaire, puis enregistrez. Les skills intégrés sont consultables et validables, mais protégés contre la modification et la suppression.
+- **Valider** : **Valider** calcule l'empreinte et signale les outils non compatibles. Un skill vide ou utilisant un outil non mappé n'est pas considéré valide.
+- **Activer/désactiver** : le bouton correspondant ajoute ou retire le skill des choix par défaut. Le panneau **Paramètres > Skills** montre la même sélection. Une exécution déjà lancée garde sa configuration initiale.
+- **Supprimer** : la confirmation efface le dossier du skill local, y compris ses ressources associées, après vérification qu'il se trouve bien sous `<workspace>/skills/`.
+
+### Créer, rechercher, modifier et valider une mémoire
+
+La section **Mémoire persistante** permet de saisir le contenu, sa provenance, une expiration facultative en jours et son état de validation. Une mémoire non validée est conservée mais n'est pas réutilisée automatiquement par l'agent.
+
+- utilisez le champ de filtre pour rechercher sans recharger la page ;
+- **Modifier** recharge l'entrée dans le formulaire ;
+- **Valider** autorise sa réutilisation future et enregistre l'auteur/date de validation ;
+- **Supprimer** demande une confirmation et retire aussi l'entrée de l'index ;
+- l'expiration est comprise entre 1 jour et 365 jours dans la GUI.
+
+La mémoire de session reste éphémère et gérée automatiquement par le moteur. La GUI administre ici la mémoire persistante indexée.
+
+### Créer et piloter des sous-agents
+
+1. Sélectionnez d'abord une exécution dans la barre latérale : elle devient le parent.
+2. Ouvrez **Bibliothèque > Sous-agents**, donnez un rôle, une tâche et éventuellement une instruction système.
+3. Cliquez sur **Créer le sous-agent**. Il apparaît dans l'arbre des exécutions et dans ce panneau.
+4. Utilisez **Pause**, **Reprendre** ou **Annuler**. Une pause provoquée par une validation humaine doit toujours être traitée avec **Autoriser/Refuser** dans le panneau d'exécution, pas avec **Reprendre**.
+
+Les sous-agents créés explicitement héritent des politiques runtime et ne peuvent pas déléguer à leur tour les capacités `agent` ou `devteam` pendant leur exécution.
+
+### Diagnostics, traces, erreurs, capacités et vision
+
+La section **Diagnostics** affiche : le modèle et sa compatibilité vision annoncée, les capacités enregistrées et leurs actions, le nombre d'exécutions par état, les compteurs de télémétrie, les 100 dernières traces assainies et les événements d'échec. Actualisez le Centre de contrôle en le fermant puis en le rouvrant, ou après une action.
+
+Les champs connus comme secrets sont expurgés par le collecteur de télémétrie. Les traces peuvent néanmoins contenir le texte de tâches : conservez le workspace local et hors de Git.
+
+### Secrets, authentification et réglages sensibles
+
+Dans **Paramètres > Modèle** :
+
+1. le champ de clé reste vide à la réouverture ; vide signifie « conserver le secret chargé » ;
+2. **Afficher 15 s** demande une confirmation, fonctionne uniquement depuis la machine locale, interdit la mise en cache HTTP et journalise l'action sans la valeur ;
+3. **Tester la connexion** avertit avant d'envoyer la clé au `base_url`, appelle réellement `<base_url>/models`, contrôle le statut HTTP et indique si le modèle configuré est listé ;
+4. **Enregistrer** présente d'abord la liste des champs modifiés sans afficher le secret ;
+5. si TLS, la restriction workspace, le shell sûr ou la validation humaine du shell sont affaiblis, il faut saisir exactement `CONFIRMER`.
+
+Ne testez jamais une clé contre une URL que vous ne contrôlez pas. GPTMOSS est lié à `127.0.0.1` par défaut ; n'utilisez pas `--host 0.0.0.0` sans authentification inverse, pare-feu et TLS.
+
+### Journal d'audit local
+
+Le journal `settings_audit.jsonl` est placé dans le workspace et ignoré par Git. Le panneau **Journal d'audit** montre jusqu'aux 200 dernières entrées : date, action, noms des champs modifiés, présence éventuelle d'un changement de secret et caractère sensible. Il ne contient ni ancienne valeur, ni nouvelle valeur, ni clé en clair. Les révélations volontaires de secret sont également enregistrées.

@@ -1,12 +1,17 @@
 import asyncio
+import base64
 import json
 import logging
 import os
 import re
+import shutil
+import time
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from typing import Dict, Any, List, Optional
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, BackgroundTasks
+from urllib.parse import urlsplit
+import httpx
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, BackgroundTasks, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
@@ -40,6 +45,24 @@ class SkillRequest(BaseModel):
     description: str = ""
     instructions: str
     allowed_capabilities: List[str] = Field(default_factory=list)
+
+class SkillImportRequest(BaseModel):
+    content: str = Field(min_length=1, max_length=262_144)
+
+class MemoryRequest(BaseModel):
+    value: Any
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+    provenance: Dict[str, Any] = Field(default_factory=lambda: {"source": "gui"})
+    validated: bool = False
+    ttl_seconds: Optional[float] = Field(default=None, ge=1, le=31_536_000)
+
+class SubAgentRequest(BaseModel):
+    task: str = Field(min_length=1, max_length=50_000)
+    role_name: str = Field(default="Sous-agent", min_length=1, max_length=100)
+    system_prompt: str = Field(default="You are a helpful MOSS sub-agent assisting a parent agent.", min_length=1, max_length=20_000)
+
+class ConfirmationRequest(BaseModel):
+    confirm: bool = False
 
 class SettingsRequest(BaseModel):
     api_key: str = ""
@@ -220,6 +243,24 @@ async def list_artifacts():
             continue
     return sorted(items, key=lambda item: item["created_at"], reverse=True)
 
+@app.get("/artifacts/{artifact_id}/preview")
+async def preview_artifact(artifact_id: str):
+    if not app_state.execution_engine:
+        raise HTTPException(status_code=500, detail="Engine not initialized.")
+    filesystem = app_state.execution_engine.get_capability("filesystem")
+    if not filesystem:
+        raise HTTPException(status_code=500, detail="Filesystem capability not initialized.")
+    store = ArtifactStore(filesystem.workspace_root)
+    try:
+        metadata = store.get(artifact_id)
+        path = Path(metadata["path"])
+        if metadata["content_type"] in ArtifactStore.TEXT_TYPES:
+            return {"id": metadata["id"], "filename": metadata["filename"], "preview_type": "text", "content_type": metadata["content_type"], "text": path.read_text(encoding="utf-8", errors="replace")[:50_000]}
+        encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+        return {"id": metadata["id"], "filename": metadata["filename"], "preview_type": "image", "content_type": metadata["content_type"], "data_url": f"data:{metadata['content_type']};base64,{encoded}"}
+    except (ValueError, FileNotFoundError, OSError, KeyError) as exc:
+        raise HTTPException(status_code=404, detail="Artifact not found.") from exc
+
 @app.delete("/artifacts/{artifact_id}")
 async def delete_artifact(artifact_id: str):
     filesystem = app_state.execution_engine.get_capability("filesystem")
@@ -238,14 +279,48 @@ async def save_skill(req: SkillRequest):
         raise HTTPException(status_code=400, detail="Invalid skill name.")
     registry = app_state.execution_engine.skill_registry
     filesystem = app_state.execution_engine.get_capability("filesystem")
+    if not registry or not filesystem:
+        raise HTTPException(status_code=500, detail="Skill registry not initialized.")
     skill_dir = Path(filesystem.workspace_root) / "skills" / req.name.lower()
     skill_dir.mkdir(parents=True, exist_ok=True)
-    allowed = [cap.lower() for cap in req.allowed_capabilities if cap.lower() in {"filesystem", "shell", "agent", "devteam"}]
-    content = "---\nname: %s\ndescription: %s\nallowed_capabilities: [%s]\n---\n\n%s\n" % (req.name.lower(), req.description.strip(), ", ".join(allowed), req.instructions.strip())
+    supported = {"filesystem", "shell", "agent", "devteam"}
+    requested = {cap.lower() for cap in req.allowed_capabilities}
+    unsupported = sorted(requested - supported)
+    if unsupported:
+        raise HTTPException(status_code=400, detail=f"Unsupported capabilities: {', '.join(unsupported)}")
+    if not req.instructions.strip():
+        raise HTTPException(status_code=400, detail="Skill instructions are required.")
+    content = "---\nname: %s\ndescription: %s\nallowed_capabilities: [%s]\n---\n\n%s\n" % (
+        req.name.lower(), json.dumps(req.description.strip(), ensure_ascii=False),
+        ", ".join(sorted(requested)), req.instructions.strip(),
+    )
     (skill_dir / "SKILL.md").write_text(content, encoding="utf-8")
     registry.discover(str(Path(filesystem.workspace_root) / "skills"))
     skill = registry.skills[req.name.lower()]
-    return {"name": skill.name, "description": skill.description, "allowed_capabilities": skill.allowed_capabilities, "digest": skill.digest}
+    return _skill_payload(skill, filesystem.workspace_root)
+
+@app.post("/skills/import", status_code=201)
+async def import_skill(req: SkillImportRequest):
+    if not app_state.execution_engine or not app_state.execution_engine.skill_registry:
+        raise HTTPException(status_code=500, detail="Skill registry not initialized.")
+    fields, instructions = app_state.execution_engine.skill_registry._frontmatter(req.content)
+    try:
+        parsed = SkillRequest(name=str(fields.get("name") or ""), description=str(fields.get("description") or ""), instructions=instructions, allowed_capabilities=list(fields.get("allowed_capabilities") or []))
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail="Invalid SKILL.md frontmatter.") from exc
+    return await save_skill(parsed)
+
+@app.post("/skills/{name}/validate")
+async def validate_skill(name: str):
+    if not app_state.execution_engine or not app_state.execution_engine.skill_registry:
+        raise HTTPException(status_code=500, detail="Skill registry not initialized.")
+    registry = app_state.execution_engine.skill_registry
+    skill = registry.skills.get(name.lower())
+    if not skill:
+        raise HTTPException(status_code=404, detail="Skill not found.")
+    report = registry.compatibility_report(skill.source_path)
+    report.update({"name": skill.name, "valid": bool(skill.instructions.strip()) and not report["unsupported"], "digest": skill.digest, "allowed_capabilities": skill.allowed_capabilities})
+    return report
 
 @app.delete("/skills/{name}")
 async def delete_skill(name: str):
@@ -255,15 +330,34 @@ async def delete_skill(name: str):
     workspace_skills = (Path(filesystem.workspace_root) / "skills").resolve()
     if not skill or workspace_skills not in Path(skill.source_path).resolve().parents:
         raise HTTPException(status_code=404, detail="Only workspace skills can be deleted.")
-    Path(skill.source_path).unlink(missing_ok=True)
-    Path(skill.source_path).parent.rmdir()
+    skill_directory = Path(skill.source_path).resolve().parent
+    shutil.rmtree(skill_directory)
     registry.skills.pop(name.lower(), None)
     return {"status": "deleted"}
 
 @app.get("/memory")
-async def list_memory():
+async def list_memory(q: str = "", validated: Optional[bool] = None):
     provider = app_state.execution_engine.context_engine.memory_provider
-    return getattr(provider, "memories", [])
+    items = list(getattr(provider, "memories", []))
+    if q:
+        query = q.casefold()
+        items = [item for item in items if query in str(item.get("value", "")).casefold()]
+    if validated is not None:
+        items = [item for item in items if bool(item.get("validated", False)) is validated]
+    return items
+
+@app.post("/memory", status_code=201)
+async def create_memory(req: MemoryRequest):
+    provider = app_state.execution_engine.context_engine.memory_provider
+    memory_id = await provider.store(req.value, metadata=req.metadata, provenance=req.provenance, validated=req.validated, ttl_seconds=req.ttl_seconds)
+    return {"id": memory_id, "status": "created"}
+
+@app.put("/memory/{memory_id}")
+async def update_memory(memory_id: str, req: MemoryRequest):
+    provider = app_state.execution_engine.context_engine.memory_provider
+    if not hasattr(provider, "update") or not await provider.update(memory_id, value=req.value, metadata=req.metadata, provenance=req.provenance, validated=req.validated, ttl_seconds=req.ttl_seconds):
+        raise HTTPException(status_code=404, detail="Memory not found.")
+    return {"status": "updated"}
 
 @app.post("/memory/{memory_id}/validate")
 async def validate_memory(memory_id: str):
@@ -286,10 +380,14 @@ async def list_skills():
     registry = app_state.execution_engine.skill_registry
     if not registry:
         return []
-    return [
-        {"name": skill.name, "description": skill.description, "allowed_capabilities": skill.allowed_capabilities, "digest": skill.digest}
-        for skill in registry.skills.values()
-    ]
+    filesystem = app_state.execution_engine.get_capability("filesystem")
+    return sorted([_skill_payload(skill, filesystem.workspace_root) for skill in registry.skills.values()], key=lambda item: item["name"])
+
+def _skill_payload(skill, workspace_root: str) -> Dict[str, Any]:
+    workspace_skills = (Path(workspace_root) / "skills").resolve()
+    source = Path(skill.source_path).resolve()
+    editable = workspace_skills == source.parent or workspace_skills in source.parents
+    return {"name": skill.name, "description": skill.description, "instructions": skill.instructions, "allowed_capabilities": skill.allowed_capabilities, "digest": skill.digest, "editable": editable}
 
 @app.get("/executions")
 async def list_executions():
@@ -327,6 +425,59 @@ async def get_execution(execution_id: str):
         "plan": state.current_plan,
         "variables": state.variables,
         "messages": convo.messages
+    }
+
+@app.get("/executions/{execution_id}/subagents")
+async def list_subagents(execution_id: str):
+    if not app_state.state_engine or execution_id not in app_state.state_engine.executions:
+        raise HTTPException(status_code=404, detail="Parent execution not found.")
+    return [
+        {
+            "execution_id": child_id, "status": state.status,
+            "current_step": state.current_step,
+            "role_name": state.variables.get("role_name", "Sous-agent"),
+        }
+        for child_id, state in app_state.state_engine.executions.items()
+        if state.variables.get("parent_execution_id") == execution_id
+    ]
+
+@app.post("/executions/{execution_id}/subagents", status_code=201)
+async def create_subagent(execution_id: str, req: SubAgentRequest):
+    if not app_state.kernel or not app_state.state_engine:
+        raise HTTPException(status_code=500, detail="Runtime kernel not initialized.")
+    if execution_id not in app_state.state_engine.executions:
+        raise HTTPException(status_code=404, detail="Parent execution not found.")
+    child_id = await app_state.kernel.submit_task(req.task.strip(), {
+        "system_prompt": req.system_prompt.strip(), "role_name": req.role_name.strip(),
+        "parent_execution_id": execution_id,
+    })
+    return {"execution_id": child_id, "parent_execution_id": execution_id, "status": "running"}
+
+@app.get("/api/diagnostics")
+async def get_diagnostics():
+    if not app_state.execution_engine or not app_state.state_engine:
+        raise HTTPException(status_code=500, detail="Engine not initialized.")
+    engine = app_state.execution_engine
+    capabilities = []
+    for name, instance in sorted(engine._capabilities.items()):
+        capabilities.append({
+            "name": name,
+            "description": getattr(instance.__class__, "__capability_description__", ""),
+            "actions": sorted(getattr(instance, "actions", {}).keys()),
+        })
+    statuses: Dict[str, int] = {}
+    for state in app_state.state_engine.executions.values():
+        statuses[state.status] = statuses.get(state.status, 0) + 1
+    events = list(engine.telemetry.events[-100:])
+    return {
+        "model": getattr(engine.llm_provider, "default_model", ""),
+        "base_url": getattr(engine.llm_provider, "base_url", ""),
+        "supports_vision": bool(getattr(engine.llm_provider, "supports_vision", False)),
+        "capabilities": capabilities,
+        "execution_statuses": statuses,
+        "metrics": engine.telemetry.metrics(),
+        "recent_events": events,
+        "errors": [event for event in events if "fail" in event.get("event_type", "").lower() or "error" in event.get("event_type", "").lower()],
     }
 
 @app.get("/executions/{execution_id}/metrics")
@@ -538,6 +689,59 @@ async def ws_execution_events(websocket: WebSocket, execution_id: str):
     except WebSocketDisconnect:
         manager.disconnect_execution(execution_id, websocket)
 
+def _audit_path() -> Path:
+    filesystem = app_state.execution_engine.get_capability("filesystem")
+    return Path(filesystem.workspace_root).resolve() / "settings_audit.jsonl"
+
+def _append_audit(action: str, changed_fields: Optional[List[str]] = None, sensitive: bool = False) -> None:
+    event = {
+        "timestamp": time.time(), "action": action,
+        "changed_fields": sorted(field for field in (changed_fields or []) if field != "api_key"),
+        "secret_changed": "api_key" in (changed_fields or []), "sensitive": sensitive,
+    }
+    try:
+        path = _audit_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(event, ensure_ascii=False) + "\n")
+    except OSError:
+        logger.warning("Unable to write the local settings audit log.")
+
+def _validate_provider_url(base_url: str) -> None:
+    parsed = urlsplit(base_url)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment:
+        raise HTTPException(status_code=400, detail="Base URL must be a plain HTTP(S) provider URL without credentials, query, or fragment.")
+
+@app.get("/api/audit")
+async def get_audit():
+    try:
+        path = _audit_path()
+        if not path.exists():
+            return []
+        events = []
+        for line in path.read_text(encoding="utf-8").splitlines()[-200:]:
+            try:
+                events.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+        return events
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail="Unable to read audit log.") from exc
+
+@app.post("/api/settings/reveal-secret")
+async def reveal_secret(req: ConfirmationRequest, request: Request, response: Response):
+    if not req.confirm:
+        raise HTTPException(status_code=409, detail="Explicit confirmation is required.")
+    if not app_state.execution_engine:
+        raise HTTPException(status_code=500, detail="Engine not initialized.")
+    client_host = request.client.host if request.client else ""
+    if client_host not in {"127.0.0.1", "::1", "testclient"}:
+        raise HTTPException(status_code=403, detail="Secrets can only be revealed from the local machine.")
+    response.headers["Cache-Control"] = "no-store, max-age=0"
+    response.headers["Pragma"] = "no-cache"
+    _append_audit("secret_revealed", sensitive=True)
+    return {"api_key": getattr(app_state.execution_engine.llm_provider, "api_key", "")}
+
 @app.get("/api/settings")
 async def get_settings():
     if not app_state.execution_engine:
@@ -583,9 +787,26 @@ async def get_settings():
 
 @app.post("/api/settings/test-connection")
 async def test_connection(req: SettingsRequest):
-    if not req.base_url.startswith(("https://", "http://")) or not req.model_name.strip():
+    _validate_provider_url(req.base_url)
+    if not req.model_name.strip():
         raise HTTPException(status_code=400, detail="Base URL and model are required.")
-    return {"status": "format_valid"}
+    if not app_state.execution_engine:
+        raise HTTPException(status_code=500, detail="Engine not initialized.")
+    api_key = req.api_key or getattr(app_state.execution_engine.llm_provider, "api_key", "")
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+    verify: Any = req.ssl_cert_path.strip() if req.ssl_verify and req.ssl_cert_path.strip() else req.ssl_verify
+    url = req.base_url.rstrip("/") + "/models"
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(10.0), verify=verify, follow_redirects=False) as client:
+            response = await client.get(url, headers=headers)
+            response.raise_for_status()
+            payload = response.json()
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(status_code=502, detail=f"Provider rejected the connection (HTTP {exc.response.status_code}).") from exc
+    except (httpx.HTTPError, ValueError, OSError) as exc:
+        raise HTTPException(status_code=502, detail=f"Unable to connect to the provider: {exc}") from exc
+    models = [str(item.get("id")) for item in payload.get("data", []) if isinstance(item, dict) and item.get("id")]
+    return {"status": "connected", "model_available": req.model_name in models, "models_count": len(models)}
 
 @app.post("/api/settings")
 async def update_settings(req: SettingsRequest):
@@ -594,14 +815,35 @@ async def update_settings(req: SettingsRequest):
         
     workspace_root = app_state.execution_engine.get_capability("filesystem").workspace_root
     config_path = os.path.join(workspace_root, "config.json")
+    _validate_provider_url(req.base_url)
     
-    sensitive = (not req.ssl_verify or not req.restrict_to_workspace or not req.safe_shell_mode or "shell" not in [item.lower() for item in req.approval_required_capabilities])
+    policy = app_state.execution_engine.policy_provider
+    current_approvals = {str(item).lower() for item in getattr(policy, "approval_required", [])}
+    requested_approvals = {item.lower() for item in req.approval_required_capabilities}
+    requested_workspace = Path(req.workspace_path).resolve()
+    current_workspace = Path(workspace_root).resolve()
+    outside_project = any(
+        project.get("path") and requested_workspace != Path(str(project["path"])).resolve() and requested_workspace not in Path(str(project["path"])).resolve().parents
+        for project in req.projects
+    )
+    sensitive = (
+        not req.ssl_verify or not req.restrict_to_workspace or not req.safe_shell_mode
+        or "shell" not in requested_approvals or bool(current_approvals - requested_approvals)
+        or requested_workspace != current_workspace or outside_project
+    )
     if sensitive and not req.confirm_sensitive:
         raise HTTPException(status_code=409, detail="Sensitive configuration requires explicit confirmation.")
 
     llm = app_state.execution_engine.llm_provider
     # A blank settings form must not erase an existing secret.
     api_key = req.api_key or getattr(llm, "api_key", "")
+    previous: Dict[str, Any] = {}
+    if os.path.exists(config_path):
+        try:
+            with open(config_path, "r", encoding="utf-8") as handle:
+                previous = json.load(handle)
+        except (OSError, json.JSONDecodeError):
+            previous = {}
     config_data = {
         "api_key": api_key,
         "base_url": req.base_url,
@@ -625,8 +867,6 @@ async def update_settings(req: SettingsRequest):
     with open(config_path, "w", encoding="utf-8") as f:
         json.dump(config_data, f, indent=2)
         
-    policy = app_state.execution_engine.policy_provider
-    
     if hasattr(llm, "update_config"):
         llm.update_config(
             api_key=api_key,
@@ -661,7 +901,9 @@ async def update_settings(req: SettingsRequest):
             elif hasattr(cap, "update_workspace_config"):
                 cap.update_workspace_config(req.workspace_path)
                 
-    return {"status": "success", "message": "Settings updated and persisted successfully."}
+    changed_fields = [key for key, value in config_data.items() if previous.get(key) != value]
+    _append_audit("settings_updated", changed_fields=changed_fields, sensitive=sensitive)
+    return {"status": "success", "message": "Settings updated and persisted successfully.", "changed_fields": [field for field in changed_fields if field != "api_key"], "secret_changed": "api_key" in changed_fields}
 
 def init_app(kernel: RuntimeKernel, exec_engine: ExecutionEngine, state_engine: StateEngine, event_bus: EventBus):
     """Binds runtime dependencies to the FastAPI app state."""
