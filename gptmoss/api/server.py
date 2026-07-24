@@ -59,6 +59,7 @@ class SettingsRequest(BaseModel):
     shell_timeout_seconds: int = Field(default=60, ge=1, le=600)
     shell_max_output_chars: int = Field(default=12_000, ge=1_000, le=100_000)
     default_skills: List[str] = Field(default_factory=list)
+    confirm_sensitive: bool = False
 
 class AppState:
     kernel: Optional[RuntimeKernel] = None
@@ -580,6 +581,12 @@ async def get_settings():
         "default_skills": []
     }
 
+@app.post("/api/settings/test-connection")
+async def test_connection(req: SettingsRequest):
+    if not req.base_url.startswith(("https://", "http://")) or not req.model_name.strip():
+        raise HTTPException(status_code=400, detail="Base URL and model are required.")
+    return {"status": "format_valid"}
+
 @app.post("/api/settings")
 async def update_settings(req: SettingsRequest):
     if not app_state.execution_engine:
@@ -588,6 +595,10 @@ async def update_settings(req: SettingsRequest):
     workspace_root = app_state.execution_engine.get_capability("filesystem").workspace_root
     config_path = os.path.join(workspace_root, "config.json")
     
+    sensitive = (not req.ssl_verify or not req.restrict_to_workspace or not req.safe_shell_mode or "shell" not in [item.lower() for item in req.approval_required_capabilities])
+    if sensitive and not req.confirm_sensitive:
+        raise HTTPException(status_code=409, detail="Sensitive configuration requires explicit confirmation.")
+
     llm = app_state.execution_engine.llm_provider
     # A blank settings form must not erase an existing secret.
     api_key = req.api_key or getattr(llm, "api_key", "")

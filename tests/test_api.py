@@ -143,7 +143,8 @@ def test_api_settings_flow():
         "workspace_path": ".",
         "restrict_to_workspace": True,
         "allow_subfolders": True,
-        "projects": [{"id": "proj-default", "name": "Projet Par Défaut"}]
+        "projects": [{"id": "proj-default", "name": "Projet Par Défaut"}],
+        "confirm_sensitive": True
     }
     response_post = client.post("/api/settings", json=new_settings)
     assert response_post.status_code == 200
@@ -318,6 +319,7 @@ def test_api_settings_preserve_secret_and_context_budget(tmp_path):
         "shell_timeout_seconds": 45,
         "shell_max_output_chars": 20000,
         "default_skills": ["code-review"],
+        "confirm_sensitive": True,
     }
     assert client.post("/api/settings", json=settings).status_code == 200
 
@@ -330,6 +332,7 @@ def test_api_settings_preserve_secret_and_context_budget(tmp_path):
 
     # This mirrors the quick-project UI flow: the GET response has no secret.
     public_settings["projects"].append({"id": "proj-ui", "name": "Created from UI"})
+    public_settings["confirm_sensitive"] = True
     response = client.post("/api/settings", json=public_settings)
     assert response.status_code == 200
     assert mock_llm.api_key == "secret-key"

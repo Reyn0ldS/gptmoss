@@ -2242,7 +2242,8 @@
                         safe_shell_mode,
                         shell_timeout_seconds,
                         shell_max_output_chars,
-                        default_skills
+                        default_skills,
+                        confirm_sensitive: (!ssl_verify || !restrict_to_workspace || !safe_shell_mode || !approval_required_capabilities.includes("shell")) ? confirm("Ce changement réduit les protections. Confirmer ?") : false
                     })
                 });
                 
