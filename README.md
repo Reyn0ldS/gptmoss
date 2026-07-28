@@ -39,7 +39,41 @@ Depuis la racine du projet :
 .\start.bat
 ```
 
-`install.bat` crée `venv`, installe `requirements.txt`, puis initialise `.env` et `workspace/config.json` s'ils n'existent pas. `start.bat` démarre ensuite le serveur sur le port 8000.
+`install.bat` crée un `venv` avec un Python complet ou configure directement le runtime portable, vérifie les dépendances, puis initialise `.env` et `workspace/config.json` s'ils n'existent pas. `start.bat` démarre ensuite le serveur sur le port 8000.
+
+Les scripts Windows détectent automatiquement, dans cet ordre : un `venv` existant, un Python portable `python-*-embed-amd64` placé à la racine, puis le Python installé sur le système. La distribution Python *embeddable* ne contient ni `venv` ni `pip` ; GPTMOSS l'utilise donc directement comme runtime privé au lieu d'essayer de créer un environnement virtuel.
+
+### Installation Windows portable hors-ligne
+
+La préparation des dépendances doit être effectuée avant le transfert, sur un ordinateur Windows connecté disposant d'une installation Python complète de même version majeure/mineure et de même architecture que le Python portable :
+
+```powershell
+# Exemple : python-3.14.6-embed-amd64 est déjà extrait à la racine.
+python .\scripts\prepare_portable_python.py
+```
+
+Si le Python complet correspondant n'est pas la commande `python`, invoquez directement son exécutable :
+
+```powershell
+C:\Python314\python.exe .\scripts\prepare_portable_python.py
+```
+
+Ce script configure `python*._pth`, crée `Lib\site-packages`, y installe toutes les dépendances sous forme de roues binaires, puis teste les imports essentiels. Copiez ensuite le dossier GPTMOSS complet sur la machine isolée et lancez :
+
+```powershell
+.\install.bat
+.\start.bat
+```
+
+Le dossier Python portable et ses dépendances sont volontairement ignorés par Git. Ne copiez pas un `venv` entre deux machines : les environnements virtuels ne sont pas portables.
+
+Avec une installation Python complète, une autre solution hors-ligne consiste à créer un dossier `wheelhouse` sur la machine connectée :
+
+```powershell
+python -m pip download --only-binary=:all: -d wheelhouse -r requirements.txt
+```
+
+Après transfert, `install.bat` détecte ce dossier et impose `--no-index`, ce qui interdit tout accès involontaire à Internet.
 
 ### Installation Linux/macOS
 
@@ -431,6 +465,8 @@ Le contexte conversationnel est compacté au-delà de `max_context_chars`; les s
 | Commande shell expirée | Simplifier la commande ou la découper ; la limite par défaut est 60 secondes. |
 | Image non analysée | Choisir un modèle vision dont le nom contient `vision`, `-vl` ou `omni`, ou fournir une transcription texte. |
 | Skill absent | Vérifier le nom, le frontmatter, l'encodage UTF-8 et redémarrer le serveur. |
+| `No module named venv` | Le Python sélectionné est incomplet ou *embeddable*. Placer le runtime sous `python-*-embed-amd64`, puis exécuter `scripts\prepare_portable_python.py` sur une machine connectée avec le Python complet correspondant. Le mode portable n'utilise pas `venv`. |
+| Dépendances absentes sur la machine hors-ligne | Pour le Python portable, préparer et transférer tout le dossier avec `prepare_portable_python.py`. Pour un Python complet, transférer un `wheelhouse` contenant les dépendances transitives. |
 | État ou mémoire à remettre à zéro | Arrêter le serveur, sauvegarder puis supprimer explicitement les fichiers concernés du workspace. |
 
 ## Tests du projet GPTMOSS
