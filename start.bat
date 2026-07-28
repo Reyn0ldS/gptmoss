@@ -1,17 +1,33 @@
 @echo off
+setlocal EnableExtensions EnableDelayedExpansion
+cd /d "%~dp0"
+
 echo ===================================================
 echo   Starting GPT-Moss Agentic Client Server
 echo ===================================================
 
-if not exist "venv" (
-    echo [WARNING] Virtual environment 'venv' was not found. Running setup first...
-    call install.bat
+call "%~dp0scripts\find_python.bat"
+if !errorlevel! neq 0 (
+    echo [WARNING] No configured Python runtime was found. Running setup...
+    call "%~dp0install.bat"
+    if !errorlevel! neq 0 exit /b 1
+    call "%~dp0scripts\find_python.bat"
+    if !errorlevel! neq 0 exit /b 1
 )
 
-echo [INFO] Activating virtual environment...
-call venv\Scripts\activate.bat
+echo [INFO] Using !GPTMOSS_RUNTIME_KIND! Python: !GPTMOSS_PYTHON!
+"!GPTMOSS_PYTHON!" -c "import fastapi, httpx, openai, pydantic, uvicorn, websockets"
+if !errorlevel! neq 0 (
+    echo [WARNING] Python dependencies are missing. Running setup...
+    call "%~dp0install.bat"
+    if !errorlevel! neq 0 exit /b 1
+    call "%~dp0scripts\find_python.bat"
+    if !errorlevel! neq 0 exit /b 1
+)
 
 echo [INFO] Launching server on default port (http://127.0.0.1:8000)...
-python main.py
+"!GPTMOSS_PYTHON!" "%~dp0main.py" %*
+set "exit_code=!errorlevel!"
 
 pause
+exit /b !exit_code!
