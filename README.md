@@ -43,29 +43,28 @@ Depuis la racine du projet :
 
 Les scripts Windows détectent automatiquement, dans cet ordre : un `venv` existant, un Python portable `python-*-embed-amd64` placé à la racine, puis le Python installé sur le système. La distribution Python *embeddable* ne contient ni `venv` ni `pip` ; GPTMOSS l'utilise donc directement comme runtime privé au lieu d'essayer de créer un environnement virtuel.
 
-### Installation Windows portable hors-ligne
+### Paquet Windows autonome hors-ligne
 
-La préparation des dépendances doit être effectuée avant le transfert, sur un ordinateur Windows connecté disposant d'une installation Python complète de même version majeure/mineure et de même architecture que le Python portable :
-
-```powershell
-# Exemple : python-3.14.6-embed-amd64 est déjà extrait à la racine.
-python .\scripts\prepare_portable_python.py
-```
-
-Si le Python complet correspondant n'est pas la commande `python`, invoquez directement son exécutable :
-
-```powershell
-C:\Python314\python.exe .\scripts\prepare_portable_python.py
-```
-
-Ce script configure `python*._pth`, crée `Lib\site-packages`, y installe toutes les dépendances sous forme de roues binaires, puis teste les imports essentiels. Copiez ensuite le dossier GPTMOSS complet sur la machine isolée et lancez :
+Le dépôt contient déjà Python 3.13 Win64 et toutes les dépendances dans `python-3.13.14-embed-amd64`. Téléchargez ou clonez le dépôt sur une machine connectée, puis transférez le dossier complet vers la machine isolée. Sur celle-ci, aucune préparation ni installation Python supplémentaire n'est nécessaire :
 
 ```powershell
 .\install.bat
 .\start.bat
 ```
 
-Le dossier Python portable et ses dépendances sont volontairement ignorés par Git. Ne copiez pas un `venv` entre deux machines : les environnements virtuels ne sont pas portables.
+`install.bat` configure le runtime embarqué, vérifie localement les imports et initialise les fichiers de configuration. Il ne télécharge rien en mode portable. `start.bat` sélectionne ensuite automatiquement ce runtime.
+
+### Régénérer le paquet autonome sur une machine connectée
+
+Après une modification de `requirements-runtime.txt` ou pour actualiser Python, exécutez sur Windows 64 bits avec une installation Python complète disposant de `pip` :
+
+```powershell
+.\prepare-offline-source.bat
+```
+
+Le constructeur télécharge CPython embeddable depuis Python.org, vérifie son SHA-256, résout uniquement les wheels d'exécution compatibles CPython 3.13/Windows amd64, les installe dans `Lib\site-packages`, teste le runtime et écrit `offline-runtime-manifest.json`. Le runtime préparé et le manifeste sont versionnés dans Git afin que les utilisateurs hors-ligne n'aient pas à répéter cette opération. Les outils de test restent séparés dans `requirements.txt` et ne gonflent pas le paquet distribué.
+
+Ne copiez pas un `venv` entre deux machines : les environnements virtuels ne sont pas portables.
 
 Avec une installation Python complète, une autre solution hors-ligne consiste à créer un dossier `wheelhouse` sur la machine connectée :
 
@@ -465,8 +464,8 @@ Le contexte conversationnel est compacté au-delà de `max_context_chars`; les s
 | Commande shell expirée | Simplifier la commande ou la découper ; la limite par défaut est 60 secondes. |
 | Image non analysée | Choisir un modèle vision dont le nom contient `vision`, `-vl` ou `omni`, ou fournir une transcription texte. |
 | Skill absent | Vérifier le nom, le frontmatter, l'encodage UTF-8 et redémarrer le serveur. |
-| `No module named venv` | Le Python sélectionné est incomplet ou *embeddable*. Placer le runtime sous `python-*-embed-amd64`, puis exécuter `scripts\prepare_portable_python.py` sur une machine connectée avec le Python complet correspondant. Le mode portable n'utilise pas `venv`. |
-| Dépendances absentes sur la machine hors-ligne | Pour le Python portable, préparer et transférer tout le dossier avec `prepare_portable_python.py`. Pour un Python complet, transférer un `wheelhouse` contenant les dépendances transitives. |
+| `No module named venv` | Utiliser la dernière version complète du dépôt, qui contient le runtime préparé `python-3.13.14-embed-amd64`. Ne pas le remplacer par une archive embeddable nue. Le mode portable n'utilise pas `venv`. |
+| Dépendances absentes sur la machine hors-ligne | Le runtime n'a pas été transféré complètement. Reprendre le paquet autonome depuis Git ou exécuter `prepare-offline-source.bat` sur la machine connectée avant de transférer tout le dossier. |
 | État ou mémoire à remettre à zéro | Arrêter le serveur, sauvegarder puis supprimer explicitement les fichiers concernés du workspace. |
 
 ## Tests du projet GPTMOSS

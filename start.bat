@@ -1,5 +1,6 @@
 @echo off
 setlocal EnableExtensions EnableDelayedExpansion
+set "PYTHONDONTWRITEBYTECODE=1"
 cd /d "%~dp0"
 
 echo ===================================================
@@ -16,7 +17,7 @@ if !errorlevel! neq 0 (
 )
 
 echo [INFO] Using !GPTMOSS_RUNTIME_KIND! Python: !GPTMOSS_PYTHON!
-"!GPTMOSS_PYTHON!" -c "import fastapi, httpx, openai, pydantic, uvicorn, websockets"
+"!GPTMOSS_PYTHON!" -B -c "import fastapi, httpx, openai, pydantic, uvicorn, websockets"
 if !errorlevel! neq 0 (
     echo [WARNING] Python dependencies are missing. Running setup...
     call "%~dp0install.bat"
@@ -26,7 +27,7 @@ if !errorlevel! neq 0 (
 )
 
 echo [INFO] Launching server on default port (http://127.0.0.1:8000)...
-"!GPTMOSS_PYTHON!" "%~dp0main.py" %*
+"!GPTMOSS_PYTHON!" -B "%~dp0main.py" %*
 set "exit_code=!errorlevel!"
 
 pause

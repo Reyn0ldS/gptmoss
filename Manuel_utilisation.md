@@ -57,7 +57,7 @@ python main.py --task "Crée un projet calculator en python avec tests unitaires
 ```
 En mode CLI, les requêtes d'approbations humaines s'affichent directement dans le terminal sous forme de prompt interactif `Approve action? (y/n)`.
 
-Sous Windows, `start.bat --task "..."` sélectionne automatiquement le `venv`, le Python portable embarqué ou le Python système. Un runtime `python-*-embed-amd64` doit avoir été préparé avec `scripts/prepare_portable_python.py` avant son transfert vers une machine hors-ligne.
+Sous Windows, `start.bat --task "..."` sélectionne automatiquement le `venv`, le Python portable embarqué ou le Python système. Le paquet Git autonome contient déjà le runtime Windows préparé ; transférez l'intégralité du dépôt vers la machine hors-ligne.
 
 ---
 
