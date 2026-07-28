@@ -6,7 +6,7 @@ class ConversationState(BaseModel):
 
 class ExecutionState(BaseModel):
     execution_id: str
-    status: str = "pending"  # pending, running, paused, cancelled, completed, failed
+    status: str = "pending"  # pending, running, paused, waiting_provider, cancelled, completed, failed
     current_step: Optional[int] = None
     current_plan: Optional[Dict[str, Any]] = None
     variables: Dict[str, Any] = Field(default_factory=dict)

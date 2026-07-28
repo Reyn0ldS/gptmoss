@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "prompts": [
+    {
+      "id": "avatar-garment-3d",
+      "prompt": "Créer un logiciel local qui reconstruit un avatar 3D corps entier à partir d'une image de visage, reconstruit des vêtements 3D depuis leurs images, puis ajuste les mêmes vêtements sur plusieurs avatars avec export et interface utilisateur."
+    },
+    {
+      "id": "offline-warehouse",
+      "prompt": "Construire une application d'inventaire entièrement hors ligne avec import code-barres, gestion multi-entrepôts, rôles, historique auditable, synchronisation différée, API locale, interface desktop, rapports et paquet Windows portable."
+    },
+    {
+      "id": "private-document-platform",
+      "prompt": "Développer une plateforme privée d'ingestion de PDF et d'images, OCR optionnel, recherche, citations de provenance, contrôle d'accès par dossier, API, interface web sans CDN, sauvegarde, restauration et tests d'acceptation hors ligne."
+    },
+    {
+      "id": "data-quality-pipeline",
+      "prompt": "Créer un pipeline de données configurable qui ingère CSV et JSON, valide des schémas versionnés, met en quarantaine les erreurs, déduplique, produit des métriques, reprend après interruption et expose CLI, API et tableau de bord local."
+    },
+    {
+      "id": "incident-response-console",
+      "prompt": "Construire une console locale de réponse aux incidents qui collecte des journaux, corrèle les événements, gère les dossiers et preuves, applique des permissions, génère une chronologie et des rapports, avec API et tests de sécurité et de reprise."
+    },
+    {
+      "id": "industrial-inspection",
+      "prompt": "Développer un programme d'inspection industrielle hors ligne qui ingère des photos, exécute des adaptateurs de détection optionnels, fournit un mode déterministe sans modèle, permet la revue humaine, exporte les anomalies et possède une interface et une API testées."
+    }
+  ]
+}

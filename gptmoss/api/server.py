@@ -114,10 +114,14 @@ async def lifespan(_: FastAPI):
     if app_state.state_engine and app_state.event_bus and not app_state.flush_task:
         app_state.flush_task = app_state.state_engine.start_db_flush_loop(app_state.event_bus)
         logger.info("Started debounced state persistence loop")
+    if app_state.execution_engine:
+        app_state.execution_engine.resume_waiting_provider_executions()
 
     try:
         yield
     finally:
+        if app_state.execution_engine:
+            await app_state.execution_engine.stop_provider_resume_tasks()
         if app_state.flush_task:
             app_state.flush_task.cancel()
             with suppress(asyncio.CancelledError):
@@ -618,8 +622,14 @@ async def approve_execution(execution_id: str, req: DecisionRequest):
     if state.status != "paused":
         raise HTTPException(status_code=400, detail="Execution is not in paused state.")
         
-    # Resume with approval
-    await app_state.execution_engine.resume_with_decision(execution_id, decision="allow", reason=req.reason)
+    if state.variables.get("pending_scope_approval"):
+        await app_state.execution_engine.resolve_scope_approval(
+            execution_id, decision="allow", reason=req.reason
+        )
+    else:
+        await app_state.execution_engine.resume_with_decision(
+            execution_id, decision="allow", reason=req.reason
+        )
     return {"status": "resumed", "decision": "allow"}
 
 @app.post("/executions/{execution_id}/reject")
@@ -632,7 +642,14 @@ async def reject_execution(execution_id: str, req: DecisionRequest):
         raise HTTPException(status_code=400, detail="Execution is not in paused state.")
         
     # Resume with rejection
-    await app_state.execution_engine.resume_with_decision(execution_id, decision="reject", reason=req.reason)
+    if state.variables.get("pending_scope_approval"):
+        await app_state.execution_engine.resolve_scope_approval(
+            execution_id, decision="reject", reason=req.reason
+        )
+        return {"status": "failed", "decision": "reject"}
+    await app_state.execution_engine.resume_with_decision(
+        execution_id, decision="reject", reason=req.reason
+    )
     return {"status": "resumed", "decision": "reject"}
 
 @app.post("/executions/{execution_id}/pause")
@@ -657,7 +674,7 @@ async def resume_execution(execution_id: str):
         raise HTTPException(status_code=500, detail="Engine not initialized.")
         
     state = app_state.state_engine.get_execution(execution_id)
-    if state.status != "paused":
+    if state.status not in ("paused", "waiting_provider"):
         raise HTTPException(status_code=400, detail=f"Cannot resume execution in status '{state.status}'.")
         
     # If paused on approval, the user must use /approve or /reject.
@@ -666,6 +683,11 @@ async def resume_execution(execution_id: str):
         raise HTTPException(
             status_code=400,
             detail="Execution is paused waiting for capability approval. Use /approve or /reject endpoint."
+        )
+    if "pending_scope_approval" in state.variables:
+        raise HTTPException(
+            status_code=400,
+            detail="Execution is paused waiting for scope approval. Use /approve or /reject endpoint."
         )
         
     state.status = "running"
@@ -689,7 +711,7 @@ async def cancel_execution(execution_id: str):
         raise HTTPException(status_code=500, detail="Engine not initialized.")
         
     state = app_state.state_engine.get_execution(execution_id)
-    if state.status not in ("running", "paused", "pending"):
+    if state.status not in ("running", "paused", "pending", "waiting_provider"):
         raise HTTPException(status_code=400, detail=f"Cannot cancel execution in status '{state.status}'.")
         
     state.status = "cancelled"

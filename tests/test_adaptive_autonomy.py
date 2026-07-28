@@ -1,5 +1,6 @@
+import asyncio
 import json
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 from pathlib import Path
 
 import pytest
@@ -7,7 +8,7 @@ import pytest
 from gptmoss.capabilities.filesystem import FilesystemCapability
 from gptmoss.core.context import ContextEngine
 from gptmoss.core.event_bus import EventBus
-from gptmoss.core.execution import ExecutionEngine, normalize_plan
+from gptmoss.core.execution import ExecutionEngine, ProviderUnavailableError, normalize_plan
 from gptmoss.core.skills import SkillRegistry
 from gptmoss.core.state import StateEngine
 from gptmoss.memory.ram import RAMMemoryProvider
@@ -37,6 +38,104 @@ def _engine(tmp_path, llm, max_iterations=8):
     )
     engine.register_capability("filesystem", FilesystemCapability(str(tmp_path), state))
     return engine, state
+
+
+@pytest.mark.asyncio
+async def test_provider_outage_is_persisted_as_resumable_wait(tmp_path):
+    class UnavailablePlanner:
+        async def plan(self, *args, **kwargs):
+            error = ConnectionError("private provider offline")
+            raise ProviderUnavailableError("provider unavailable", error)
+
+    persist_path = tmp_path / "state.json"
+    state = StateEngine(str(persist_path))
+    event_bus = EventBus()
+    llm = MockLLMProvider()
+    engine = ExecutionEngine(
+        event_bus, state, ContextEngine(state, RAMMemoryProvider()), llm,
+        UnavailablePlanner(), SimplePolicyProvider(),
+    )
+
+    await engine.execute_task("durable-wait", "Build a complex local application")
+
+    execution = state.get_execution("durable-wait")
+    assert execution.status == "waiting_provider"
+    assert execution.results.get("error") is None
+    assert execution.variables["task"] == "Build a complex local application"
+    restored = StateEngine(str(persist_path)).get_execution("durable-wait")
+    assert restored.status == "waiting_provider"
+    resume_task = engine._provider_resume_tasks.pop("durable-wait")
+    resume_task.cancel()
+    await asyncio.gather(resume_task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_scope_reduction_requires_a_hashed_decision_before_resume(tmp_path):
+    engine, state = _engine(tmp_path, MockLLMProvider())
+    execution = state.get_execution("scope-decision")
+    execution.status = "paused"
+    execution.variables["task"] = "Build the complete application"
+    execution.variables["pending_scope_approval"] = {
+        "contract_sha256": "abc123",
+        "changes": [{"id": "SCOPE-001", "statement": "Defer the UI"}],
+    }
+    engine.execute_task = AsyncMock()
+
+    await engine.resolve_scope_approval("scope-decision", "allow", "accepted prototype")
+    await asyncio.sleep(0)
+
+    assert execution.status == "running"
+    assert execution.variables["approved_scope_contract_sha256"] == "abc123"
+    assert execution.variables["scope_decisions"][0]["reason"] == "accepted prototype"
+    engine.execute_task.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_failed_final_assurance_reopens_only_repair_and_auditor(tmp_path):
+    llm = MockLLMProvider()
+    delivery = json.dumps({
+        "summary": "repaired", "artifacts": [], "evidence": [],
+        "risks": [], "next_action": "audit",
+    })
+    llm.add_response(content=delivery)
+    llm.add_response(content=delivery)
+    llm.add_response(content="final audit")
+    llm.add_response(content="final audit")
+    engine, state = _engine(tmp_path, llm)
+    parent = state.get_execution("assurance-repair")
+    parent.current_plan = normalize_plan({"steps": [
+        {
+            "id": 0, "role": "developer", "specialist": "Completed Engineer",
+            "description": "Existing implementation", "dependencies": [],
+            "required_artifacts": [], "acceptance_criteria": [],
+            "verification_commands": [], "status": "completed",
+        },
+        {
+            "id": 1, "role": "debugger", "specialist": "Final Repair Engineer",
+            "description": "Repair final defects", "dependencies": [0],
+            "required_artifacts": [], "acceptance_criteria": [],
+            "verification_commands": [], "status": "completed",
+        },
+        {
+            "id": 2, "role": "coordinator", "specialist": "Final Auditor",
+            "description": "Audit the final delivery", "dependencies": [1],
+            "required_artifacts": [], "acceptance_criteria": [],
+            "verification_commands": [], "status": "completed",
+        },
+    ]})
+    failed_report = {"passed": False, "checks": [], "failures": ["CLI smoke failed"]}
+    passed_report = {"passed": True, "checks": [], "failures": []}
+    engine._independent_delivery_report = Mock(side_effect=[failed_report, passed_report])
+
+    await engine.execute_task("assurance-repair", "Build a software application")
+
+    assert parent.status == "completed"
+    assert parent.variables["assurance_repair_round"] == 1
+    assert engine._independent_delivery_report.call_count == 2
+    children = [item for item in state.executions.values()
+                if item.variables.get("parent_execution_id") == "assurance-repair"]
+    assert len(children) == 1
+    assert children[0].variables["plan_step_id"] == 1
 
 
 def test_avatar_request_is_very_high_complexity_and_has_rich_safe_fallback():
@@ -214,6 +313,23 @@ def test_progress_ignores_repeated_success_and_identical_file_rewrite(tmp_path):
 
     (root / "work.md").write_text("changed\n", encoding="utf-8")
     assert engine._progress_signature("progress", step) != before
+
+
+def test_quality_delta_limits_file_churn_and_rewards_fewer_failures(tmp_path):
+    engine, _ = _engine(tmp_path, MockLLMProvider())
+    first = ((('app.py', 'hash-1'),), (), (), 5)
+    second = ((('app.py', 'hash-2'),), (), (), 5)
+    third = ((('app.py', 'hash-3'),), (), (), 5)
+    fourth = ((('app.py', 'hash-4'),), (), (), 5)
+
+    assert engine._quality_improved("quality", first, second)[0]
+    assert engine._quality_improved("quality", second, third)[0]
+    assert not engine._quality_improved("quality", third, fourth)[0]
+    improved, kind = engine._quality_improved(
+        "quality", fourth, ((('app.py', 'hash-4'),), (), (), 2)
+    )
+    assert improved
+    assert kind == "fewer_machine_failures"
 
 
 def test_tool_argument_normalization_recovers_wrappers_aliases_and_prefixed_path():
