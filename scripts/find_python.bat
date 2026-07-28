@@ -3,6 +3,7 @@ setlocal EnableExtensions EnableDelayedExpansion
 
 set "runtime_python="
 set "runtime_kind="
+set "runtime_directory="
 set /a portable_count=0
 
 if exist "%~dp0..\venv\pyvenv.cfg" if exist "%~dp0..\venv\Scripts\python.exe" (
@@ -16,6 +17,7 @@ for /d %%D in ("%~dp0..\python-*-embed-amd64") do (
         set /a portable_count+=1
         set "runtime_python=%%~fD\python.exe"
         set "runtime_kind=embedded"
+        set "runtime_directory=%%~fD"
     )
 )
 
@@ -45,5 +47,6 @@ exit /b 1
 endlocal & (
     set "GPTMOSS_PYTHON=%runtime_python%"
     set "GPTMOSS_RUNTIME_KIND=%runtime_kind%"
+    set "GPTMOSS_PYTHON_DIRECTORY=%runtime_directory%"
 )
 exit /b 0
