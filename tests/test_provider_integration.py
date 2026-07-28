@@ -87,3 +87,44 @@ async def test_local_openai_compatible_tool_call_round_trip():
         "arguments": {"path": "local.txt", "content": "from local model"},
     }
     assert response["usage"]["total_tokens"] == 12
+
+
+def test_qwen_textual_tool_calls_are_normalized_and_deterministic():
+    xml_content = """<tool_call>
+<function=filesystem__write>
+<parameter=path>
+live-check.txt
+</parameter>
+<parameter=content>
+private-llm-ok
+</parameter>
+<parameter=overwrite>
+true
+</parameter>
+</function>
+</tool_call>"""
+    first = QwenProvider._parse_text_tool_calls(xml_content)
+    second = QwenProvider._parse_text_tool_calls(xml_content)
+
+    assert first == second
+    assert len(first) == 1
+    assert first[0]["id"].startswith("qwen-text-")
+    assert first[0]["function"] == {
+        "name": "filesystem__write",
+        "arguments": {
+            "path": "live-check.txt",
+            "content": "private-llm-ok",
+            "overwrite": True,
+        },
+    }
+
+    json_content = (
+        '<tool_call>{"name":"shell__execute",'
+        '"arguments":{"command":"python -m pytest -q"}}</tool_call>'
+    )
+    parsed_json = QwenProvider._parse_text_tool_calls(json_content)
+    assert parsed_json[0]["function"] == {
+        "name": "shell__execute",
+        "arguments": {"command": "python -m pytest -q"},
+    }
+    assert QwenProvider._parse_text_tool_calls("<tool_call>invalid</tool_call>") == []

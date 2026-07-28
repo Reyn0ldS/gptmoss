@@ -83,4 +83,10 @@ Le bouton **Bibliothèque** ouvre le centre d'administration complet :
 
 Dans **Paramètres**, la clé API peut être affichée volontairement pendant 15 secondes, uniquement depuis la machine locale. L'action est auditée mais le secret ne l'est jamais. **Tester la connexion** contacte réellement l'endpoint `/models` du fournisseur après avertissement. Avant toute sauvegarde, la GUI résume les champs modifiés ; les protections affaiblies nécessitent de saisir `CONFIRMER`.
 
+Les chemins d'API sont sensibles à la casse : conservez le `/v1` exact annoncé par
+le serveur. Pour un certificat signé par une autorité privée, importez de préférence
+la CA avec `ssl_cert_path` plutôt que de désactiver durablement la vérification TLS.
+Les réponses Qwen contenant des balises textuelles `<tool_call>` sont normalisées
+automatiquement lorsque le serveur ne fournit pas le champ OpenAI natif.
+
 Pour les procédures détaillées, limites de formats, routes API et règles de sécurité, consultez la section **Centre de contrôle GUI : mode d'emploi complet** du [README](README.md#centre-de-contrôle-gui--mode-demploi-complet).

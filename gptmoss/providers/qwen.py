@@ -1,5 +1,9 @@
+import hashlib
+import html
+import json
 import os
 import logging
+import re
 from typing import List, Dict, Any, Optional
 from openai import AsyncOpenAI
 from gptmoss.interfaces.llm import LLMProvider
@@ -99,12 +103,11 @@ class QwenProvider(LLMProvider):
     def _parse_openai_response(self, response) -> Dict[str, Any]:
         choice = response.choices[0]
         message = choice.message
-        
+        content = message.content
         tool_calls = None
         if message.tool_calls:
             tool_calls = []
             for tc in message.tool_calls:
-                import json
                 try:
                     args = json.loads(tc.function.arguments)
                 except Exception:
@@ -118,6 +121,12 @@ class QwenProvider(LLMProvider):
                         "arguments": args
                     }
                 })
+        elif content:
+            # Some Qwen/vLLM deployments render the model's tool-call template
+            # into message.content instead of exposing OpenAI's tool_calls field.
+            tool_calls = self._parse_text_tool_calls(content) or None
+            if tool_calls:
+                content = None
                 
         usage = {
             "prompt_tokens": response.usage.prompt_tokens if response.usage else 0,
@@ -126,10 +135,64 @@ class QwenProvider(LLMProvider):
         }
         
         return {
-            "content": message.content,
+            "content": content,
             "tool_calls": tool_calls,
             "usage": usage
         }
+
+    @staticmethod
+    def _parse_text_tool_calls(content: str) -> List[Dict[str, Any]]:
+        """Parse common Qwen textual tool-call formats into OpenAI calls."""
+        calls = []
+        blocks = re.findall(r"<tool_call>\s*(.*?)\s*</tool_call>", content, flags=re.DOTALL | re.IGNORECASE)
+        for index, block in enumerate(blocks):
+            name = ""
+            arguments: Any = {}
+
+            try:
+                candidate = json.loads(block.strip())
+            except (TypeError, ValueError):
+                candidate = None
+            if isinstance(candidate, dict):
+                candidate = candidate.get("tool_call", candidate)
+                if not isinstance(candidate, dict):
+                    candidate = {}
+                function = candidate.get("function") if isinstance(candidate.get("function"), dict) else candidate
+                name = str(function.get("name") or "").strip()
+                arguments = function.get("arguments", {})
+
+            if not name:
+                function_match = re.search(
+                    r"<function=([^>\r\n]+)>\s*(.*?)\s*</function>",
+                    block,
+                    flags=re.DOTALL | re.IGNORECASE,
+                )
+                if function_match:
+                    name = html.unescape(function_match.group(1)).strip().strip(chr(34) + chr(39))
+                    arguments = {}
+                    for parameter_match in re.finditer(
+                        r"<parameter=([^>\r\n]+)>\s*(.*?)\s*</parameter>",
+                        function_match.group(2),
+                        flags=re.DOTALL | re.IGNORECASE,
+                    ):
+                        parameter_name = html.unescape(parameter_match.group(1)).strip().strip(chr(34) + chr(39))
+                        raw_value = html.unescape(parameter_match.group(2)).strip()
+                        try:
+                            arguments[parameter_name] = json.loads(raw_value)
+                        except (TypeError, ValueError):
+                            arguments[parameter_name] = raw_value
+
+            if not name:
+                continue
+            if not isinstance(arguments, dict):
+                arguments = {}
+            digest = hashlib.sha256(block.encode("utf-8")).hexdigest()[:16]
+            calls.append({
+                "id": f"qwen-text-{digest}-{index}",
+                "type": "function",
+                "function": {"name": name, "arguments": arguments},
+            })
+        return calls
 
     async def _prompt_based_tool_calling(
         self,
