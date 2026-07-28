@@ -14,6 +14,31 @@ class SimplePlanner(PlannerProvider):
     def __init__(self, llm_provider: LLMProvider):
         self.llm_provider = llm_provider
 
+    @staticmethod
+    def _fallback_plan(task: str) -> Dict[str, Any]:
+        task_lower = task.lower()
+        software_markers = (
+            "project", "projet", "application", "software", "logiciel", "code",
+            "api", "website", "site web", "script", "module", "programme",
+        )
+        if any(marker in task_lower for marker in software_markers):
+            return {
+                "steps": [
+                    {"id": 0, "role": "architect", "description": "Architect/Analyst: analyze requirements and write technical specifications.", "dependencies": [], "status": "pending"},
+                    {"id": 1, "role": "security", "description": "Security Reviewer: review the specifications and document risks and mitigations.", "dependencies": [0], "status": "pending"},
+                    {"id": 2, "role": "developer", "description": "Developer/Coder: implement the complete project from the validated specifications.", "dependencies": [0, 1], "status": "pending"},
+                    {"id": 3, "role": "qa", "description": "QA Testing Engineer: create and run tests for the implementation.", "dependencies": [2], "status": "pending"},
+                    {"id": 4, "role": "debugger", "description": "Debugger & Bug Fixer: inspect test evidence, correct failures, and rerun relevant tests.", "dependencies": [3], "status": "pending"},
+                    {"id": 5, "role": "writer", "description": "Technical Writer: write project documentation from the implementation.", "dependencies": [2], "status": "pending"},
+                    {"id": 6, "role": "coordinator", "description": "Final Summary: synthesize all validated deliveries and report the final project result.", "dependencies": [4, 5], "status": "pending"},
+                ],
+                "rationale": "Deterministic multi-agent fallback used because the model did not return a valid plan.",
+            }
+        return {
+            "steps": [{"id": 0, "role": "coordinator", "description": f"Perform the user task: {task}", "dependencies": [], "status": "pending"}],
+            "rationale": "Deterministic single-agent fallback plan.",
+        }
+
     async def plan(
         self,
         task: str,
@@ -43,7 +68,8 @@ class SimplePlanner(PlannerProvider):
         prompt = (
             "You are the Planning Engine of the MOSS Agent Runtime.\n"
             "Break down the user task into a logical Directed Acyclic Graph (DAG) of steps.\n"
-            "Each step must be actionable, described clearly, and declare its dependencies (steps it depends on).\n\n"
+            "Each step must be actionable, described clearly, declare its dependencies, and have one explicit role.\n"
+            "Allowed roles are: architect, security, developer, qa, debugger, writer, coordinator.\n\n"
             "IMPORTANT: For any software development, file creation, or complex project task, you MUST structure your plan "
             "systematically around a collaborative multi-agent workflow containing the following roles and phases:\n"
             "1. Architect/Analyst: Analyze needs and write technical specifications (specs.md).\n"
@@ -61,8 +87,8 @@ class SimplePlanner(PlannerProvider):
             "Format:\n"
             "{\n"
             '  "steps": [\n'
-            '    {"id": 0, "description": "Step 1 description", "dependencies": [], "status": "pending"},\n'
-            '    {"id": 1, "description": "Step 2 description", "dependencies": [0], "status": "pending"}\n'
+            '    {"id": 0, "role": "architect", "description": "Step 1 description", "dependencies": [], "status": "pending"},\n'
+            '    {"id": 1, "role": "security", "description": "Step 2 description", "dependencies": [0], "status": "pending"}\n'
             '  ],\n'
             '  "rationale": "Explanation for this plan"\n'
             "}\n"
@@ -122,9 +148,4 @@ class SimplePlanner(PlannerProvider):
 
         except Exception as e:
             logger.warning(f"Error during LLM planning, using fallback single-step plan: {e}")
-            return {
-                "steps": [
-                    {"id": 0, "description": f"Perform the user task: {task}", "dependencies": [], "status": "pending"}
-                ],
-                "rationale": "Fallback planning used because LLM did not return valid JSON planning schema."
-            }
+            return self._fallback_plan(task)

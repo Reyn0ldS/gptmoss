@@ -47,6 +47,9 @@ class ContextEngine:
         exec_state = self.state_engine.get_execution(execution_id)
         convo_state = self.state_engine.get_conversation(conversation_id)
         agent_state = self.state_engine.get_agent(agent_id)
+        execution_agent_config = exec_state.variables.get("agent_config")
+        if not isinstance(execution_agent_config, dict):
+            execution_agent_config = agent_state.config
         
         # Search memory if there is a query, or summarize
         memory_summary = ""
@@ -71,7 +74,7 @@ class ContextEngine:
             "variables": exec_state.variables,
             "working_memory": memory_summary,
             "capabilities": capabilities_schemas,
-            "system_instructions": agent_state.config.get("system_prompt", "You are a helpful MOSS runtime agent."),
+            "system_instructions": execution_agent_config.get("system_prompt", "You are a helpful MOSS runtime agent."),
             "environment": {
                 "operating_system": os_name,
                 "path_separator": path_sep,

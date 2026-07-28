@@ -24,7 +24,7 @@ if /i "!GPTMOSS_RUNTIME_KIND!"=="embedded" (
     "!GPTMOSS_PYTHON!" -B "%~dp0scripts\configure_embedded_python.py" --python-directory "!GPTMOSS_PYTHON_DIRECTORY!"
     if !errorlevel! neq 0 goto :failed
 
-    "!GPTMOSS_PYTHON!" -B -c "import fastapi, httpx, openai, pydantic, uvicorn, websockets"
+    "!GPTMOSS_PYTHON!" -B -c "import fastapi, httpx, openai, pydantic, pytest, uvicorn, websockets"
     if !errorlevel! neq 0 (
         echo [ERROR] The portable Python runtime does not contain all GPTMOSS dependencies.
         echo [ERROR] On an online Windows computer with the matching full Python version, run:

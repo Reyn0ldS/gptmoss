@@ -25,7 +25,7 @@ DEFAULT_VERSION = "3.13.14"
 KNOWN_SHA256 = {
     "3.13.14": "90b4e5b9898b72d744650524bff92377c367f44bd5fbd09e3148656c080ad907",
 }
-REQUIRED_IMPORTS = "fastapi, httpx, openai, pydantic, uvicorn, websockets"
+REQUIRED_IMPORTS = "fastapi, httpx, openai, pydantic, pytest, uvicorn, websockets"
 
 
 @dataclass(frozen=True)

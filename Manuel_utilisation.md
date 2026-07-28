@@ -25,6 +25,7 @@ Lorsque vous soumettez une tâche de développement logiciel, le coordinateur pl
 4. **Testeur QA** : Conçoit et écrit la suite de tests unitaires (généralement sous pytest).
 5. **Débugueur** : Exécute le code et les tests unitaires. En cas d'échec, il lit les journaux d'erreurs et corrige les fichiers sources de manière itérative.
 6. **Rédacteur Technique** : Rédige le fichier de documentation d'utilisation et d'installation `README.md` final du projet.
+7. **Coordinateur** : Réunit les livraisons validées, vérifie leur cohérence et produit la synthèse finale sans répéter le travail des spécialistes.
 
 ---
 
@@ -34,6 +35,8 @@ GPT-Moss utilise un moteur d'ordonnancement par graphe orienté acyclique (DAG).
 * **Parallélisme** : Les étapes qui n'ont pas de dépendances directes entre elles sont exécutées en parallèle (par exemple, la rédaction d'un module de chiffrement et la conception de la maquette de l'interface utilisateur peuvent tourner en même temps).
 * **Respect des verrous** : Une étape ne démarre que lorsque l'intégralité de ses dépendances a été complétée avec succès.
 * **Sécurité antidécurrence** : Le graphe intègre une détection de dépendances cycliques pour éviter les blocages. Si une étape échoue, les autres tâches actives sont annulées de façon propre.
+* **Déduplication** : Une étape garde le même sous-agent lors d'une reprise et un second lancement concurrent de la même exécution est ignoré.
+* **Passage de relais** : Les résultats structurés des dépendances sont injectés dans la tâche du spécialiste suivant, puis toutes les livraisons sont remises au coordinateur final.
 
 ---
 
@@ -58,6 +61,12 @@ python main.py --task "Crée un projet calculator en python avec tests unitaires
 En mode CLI, les requêtes d'approbations humaines s'affichent directement dans le terminal sous forme de prompt interactif `Approve action? (y/n)`.
 
 Sous Windows, `start.bat --task "..."` sélectionne automatiquement le `venv`, le Python portable embarqué ou le Python système. Le paquet Git autonome contient déjà le runtime Windows préparé ; transférez l'intégralité du dépôt vers la machine hors-ligne.
+
+Le paquet n'a besoin d'aucun accès Internet, mais GPTMOSS a toujours besoin d'un
+serveur de modèle compatible OpenAI démarré localement ou joignable sur le réseau
+isolé. Le voyant **Serveur connecté** confirme uniquement le WebSocket de
+l'interface. Dans **Paramètres**, utilisez **Tester la connexion** pour contrôler
+séparément l'URL et le modèle LLM.
 
 ---
 

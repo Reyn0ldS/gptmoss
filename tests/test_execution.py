@@ -4,7 +4,7 @@ import shutil
 from gptmoss.core.event_bus import EventBus
 from gptmoss.core.state import StateEngine
 from gptmoss.core.context import ContextEngine
-from gptmoss.core.execution import ExecutionEngine
+from gptmoss.core.execution import ExecutionEngine, normalize_plan, parse_step_role
 from gptmoss.planners.simple import SimplePlanner
 from gptmoss.policies.simple import SimplePolicyProvider
 from gptmoss.capabilities.filesystem import FilesystemCapability
@@ -252,6 +252,24 @@ def test_sub_agent_capabilities_filtering():
     child_actions = [s["function"]["name"] for s in child_schemas]
     assert not any("agent__" in act for act in child_actions)
     assert any("filesystem__read" in act for act in child_actions)
+
+
+def test_debugger_role_wins_over_test_word_and_invalid_dag_is_rejected():
+    assert parse_step_role("Debugger & Bug Fixer: execute tests and fix failures") == "Débugueur"
+    with pytest.raises(ValueError, match="cyclical"):
+        normalize_plan({"steps": [
+            {"id": 0, "role": "developer", "description": "Develop", "dependencies": [1]},
+            {"id": 1, "role": "qa", "description": "Test", "dependencies": [0]},
+        ]})
+
+
+def test_structured_delivery_accepts_fenced_model_output():
+    response = '```json\n{"summary":"done","artifacts":["app.py"],"evidence":["tests"],"risks":[],"next_action":"ship"}\n```'
+    delivery = ExecutionEngine._structured_delivery(response)
+    assert delivery == {
+        "summary": "done", "artifacts": ["app.py"], "evidence": ["tests"],
+        "risks": [], "next_action": "ship",
+    }
 
 @pytest.mark.asyncio
 async def test_resumption_recovery_from_stuck_steps(test_workspace):

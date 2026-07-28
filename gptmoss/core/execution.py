@@ -15,21 +15,103 @@ from gptmoss.core.observability import TraceRecorder
 from gptmoss.core.skills import SkillRegistry
 from gptmoss.core.artifacts import ArtifactStore
 
-def parse_step_role(description: str) -> Optional[str]:
-    desc_lower = description.lower()
-    if "architect" in desc_lower or "architecte" in desc_lower:
-        return "Architecte"
-    elif "security" in desc_lower or "sécurité" in desc_lower or "reviewer" in desc_lower:
-        return "Analyste Sécurité"
-    elif "developer" in desc_lower or "coder" in desc_lower or "développeur" in desc_lower:
-        return "Développeur"
-    elif "test" in desc_lower or "qa" in desc_lower or "tester" in desc_lower:
-        return "Testeur QA"
-    elif "debug" in desc_lower or "bug" in desc_lower or "débug" in desc_lower:
-        return "Débugueur"
-    elif "writer" in desc_lower or "rédacteur" in desc_lower or "documentation" in desc_lower:
-        return "Rédacteur Technique"
+ROLE_DISPLAY_NAMES = {
+    "architect": "Architecte",
+    "security": "Analyste Sécurité",
+    "developer": "Développeur",
+    "qa": "Testeur QA",
+    "debugger": "Débugueur",
+    "writer": "Rédacteur Technique",
+    "coordinator": "Coordinateur",
+}
+
+ROLE_ALIASES = {
+    "architect": "architect", "architecte": "architect", "analyst": "architect", "analyste": "architect",
+    "security": "security", "sécurité": "security", "reviewer": "security", "analyste sécurité": "security",
+    "developer": "developer", "développeur": "developer", "coder": "developer", "codeur": "developer",
+    "qa": "qa", "tester": "qa", "testeur": "qa", "testeur qa": "qa",
+    "debugger": "debugger", "debug": "debugger", "débugueur": "debugger", "bug fixer": "debugger",
+    "writer": "writer", "rédacteur": "writer", "rédacteur technique": "writer", "documentation": "writer",
+    "coordinator": "coordinator", "coordinateur": "coordinator", "summary": "coordinator",
+}
+
+def canonical_step_role(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    return ROLE_ALIASES.get(str(value).strip().lower())
+
+def infer_step_role(description: str) -> Optional[str]:
+    desc_lower = str(description or "").lower()
+    # Debugger descriptions commonly contain "tests"; match them before QA.
+    if any(marker in desc_lower for marker in ("debug", "bug fixer", "débug", "corriger les erreurs")):
+        return "debugger"
+    if any(marker in desc_lower for marker in ("architect", "architecte", "technical specification", "spécification technique")):
+        return "architect"
+    if any(marker in desc_lower for marker in ("security", "sécurité", "compliance reviewer", "revue de conformité")):
+        return "security"
+    if any(marker in desc_lower for marker in ("qa", "tester", "testeur", "testing engineer", "unit tests")):
+        return "qa"
+    if any(marker in desc_lower for marker in ("developer", "coder", "développeur", "codeur")):
+        return "developer"
+    if any(marker in desc_lower for marker in ("technical writer", "writer", "rédacteur", "documentation")):
+        return "writer"
     return None
+
+def parse_step_role(description: str) -> Optional[str]:
+    role = infer_step_role(description)
+    return ROLE_DISPLAY_NAMES.get(role) if role else None
+
+def normalize_plan(plan: Dict[str, Any]) -> Dict[str, Any]:
+    """Validate a planner response and normalize its stable execution contract."""
+    if not isinstance(plan, dict) or not isinstance(plan.get("steps"), list):
+        raise ValueError("A plan must contain a list of steps.")
+    steps = plan["steps"]
+    identifiers = []
+    identifier_keys = set()
+    for index, step in enumerate(steps):
+        if not isinstance(step, dict):
+            raise ValueError(f"Plan step {index} must be an object.")
+        step_id = step.get("id", index)
+        identifier_key = str(step_id)
+        if (
+            isinstance(step_id, bool) or not isinstance(step_id, (int, str))
+            or identifier_key in identifier_keys
+        ):
+            raise ValueError(f"Plan step {index} has an invalid or duplicate id.")
+        identifiers.append(step_id)
+        identifier_keys.add(identifier_key)
+        step["id"] = step_id
+        step["description"] = str(step.get("description") or "").strip()
+        if not step["description"]:
+            raise ValueError(f"Plan step {step_id} has no description.")
+        dependencies = step.get("dependencies") or []
+        if (
+            not isinstance(dependencies, list)
+            or any(isinstance(dep, bool) or not isinstance(dep, (int, str)) for dep in dependencies)
+            or len(set(map(str, dependencies))) != len(dependencies)
+        ):
+            raise ValueError(f"Plan step {step_id} has invalid dependencies.")
+        step["dependencies"] = dependencies
+        requested_role = step.get("role")
+        role = canonical_step_role(requested_role) if requested_role is not None else infer_step_role(step["description"])
+        if requested_role is not None and not role:
+            raise ValueError(f"Plan step {step_id} has unsupported role '{requested_role}'.")
+        if role:
+            step["role"] = role
+        step["status"] = step.get("status", "pending")
+
+    identifier_set = set(identifiers)
+    for step in steps:
+        if step["id"] in step["dependencies"] or any(dep not in identifier_set for dep in step["dependencies"]):
+            raise ValueError(f"Plan step {step['id']} references an invalid dependency.")
+
+    completed = set()
+    while len(completed) < len(steps):
+        ready = [step["id"] for step in steps if step["id"] not in completed and set(step["dependencies"]) <= completed]
+        if not ready:
+            raise ValueError("Plan contains cyclical dependencies.")
+        completed.update(ready)
+    return plan
 
 
 logger = logging.getLogger("gptmoss.execution")
@@ -51,6 +133,7 @@ class ExecutionEngine:
         skill_registry: Optional[SkillRegistry] = None,
         artifact_store: Optional[ArtifactStore] = None,
         default_skills: Optional[List[str]] = None,
+        max_step_iterations: int = 30,
     ):
         self.event_bus = event_bus
         self.state_engine = state_engine
@@ -62,7 +145,9 @@ class ExecutionEngine:
         self.skill_registry = skill_registry
         self.artifact_store = artifact_store
         self.default_skills = [str(skill).lower() for skill in (default_skills or [])]
+        self.max_step_iterations = max(1, min(int(max_step_iterations), 100))
         self._capabilities: Dict[str, Any] = {}  # capability_name -> instance
+        self._execution_locks: Dict[str, asyncio.Lock] = {}
 
     def register_capability(self, capability_name: str, instance: Any):
         """Register instantiated capability."""
@@ -101,11 +186,35 @@ class ExecutionEngine:
         return allowed or None
 
     async def execute_task(self, execution_id: str, task: str):
+        """Run an execution once, even if resume/reconnect schedules it repeatedly."""
+        lock = self._execution_locks.setdefault(execution_id, asyncio.Lock())
+        if lock.locked():
+            self.telemetry.record("duplicate_execution_skipped", execution_id, task=task)
+            return
+        async with lock:
+            state = self.state_engine.get_execution(execution_id)
+            if state.status in ("completed", "failed", "cancelled"):
+                return
+            try:
+                await self._execute_task_unlocked(execution_id, task)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                state.status = "failed"
+                state.results["error"] = str(exc)
+                self.telemetry.record("execution_failed", execution_id, error=str(exc))
+                await self.event_bus.publish(Event(
+                    type="ExecutionFailed",
+                    payload={"execution_id": execution_id, "error": str(exc)},
+                ))
+
+    async def _execute_task_unlocked(self, execution_id: str, task: str):
         """
         Main execution loop for a task.
         """
         state = self.state_engine.get_execution(execution_id)
         convo = self.state_engine.get_conversation(execution_id)
+        state.variables.setdefault("task", task)
         self.telemetry.record("execution_started", execution_id, task=task)
         skills = self._active_skills(state, task)
         allowed_capabilities = self._allowed_capabilities(skills)
@@ -158,7 +267,11 @@ class ExecutionEngine:
             ))
 
             planning_started = time.perf_counter()
-            plan_result = await self.planner.plan(task, context, schemas)
+            plan_result = await self.planner.plan(
+                task, context, schemas,
+                parent_execution_id=state.variables.get("parent_execution_id"),
+            )
+            plan_result = normalize_plan(plan_result)
             self.telemetry.record("plan_generated", execution_id, duration_ms=round((time.perf_counter() - planning_started) * 1000, 2), steps=len(plan_result.get("steps", [])))
             state.current_plan = plan_result
             state.current_step = 0
@@ -167,6 +280,7 @@ class ExecutionEngine:
                 payload={"execution_id": execution_id, "plan": plan_result}
             ))
 
+        state.current_plan = normalize_plan(state.current_plan)
         steps = state.current_plan.get("steps", [])
 
         # Ensure all steps have a status, resetting stuck 'running' states to 'pending' for resumption
@@ -186,36 +300,75 @@ class ExecutionEngine:
             ))
             
             try:
-                role_name = parse_step_role(step.get("description", ""))
+                role_key = canonical_step_role(step.get("role")) or infer_step_role(step.get("description", ""))
+                role_name = ROLE_DISPLAY_NAMES.get(role_key) if role_key else None
                 is_sub_agent = state.variables.get("parent_execution_id") is not None
                 
-                if role_name and not is_sub_agent:
-                    # Spawn sub-agent
+                if role_name and role_key != "coordinator" and not is_sub_agent:
+                    # Persist the assignment before scheduling it. A resumed parent
+                    # reuses the same child instead of performing the step twice.
                     import uuid
-                    sub_id = str(uuid.uuid4())
-                    
+                    sub_id = step.get("assigned_execution_id") or str(uuid.uuid4())
+                    is_new_assignment = "assigned_execution_id" not in step
+                    step["assigned_execution_id"] = sub_id
+
+                    dependency_results = []
+                    for dependency_id in step.get("dependencies", []):
+                        dependency_step = next(item for item in steps if item.get("id") == dependency_id)
+                        dependency_results.append({
+                            "step_id": dependency_id,
+                            "role": dependency_step.get("role"),
+                            "description": dependency_step.get("description"),
+                            "delivery": dependency_step.get("delivery") or dependency_step.get("result"),
+                        })
+                    handoff = json.dumps(dependency_results, ensure_ascii=False)
+                    if len(handoff) > 8_000:
+                        handoff = handoff[:8_000] + "\n… [dependency handoff truncated]"
+                    sub_task = step["description"]
+                    if dependency_results:
+                        sub_task += (
+                            "\n\nValidated outputs from prerequisite steps are provided below. "
+                            "Reuse them; do not redo their work.\n" + handoff
+                        )
+
                     sub_exec = self.state_engine.get_execution(sub_id)
-                    sub_exec.status = "pending"
+                    if is_new_assignment:
+                        sub_exec.status = "pending"
                     sub_exec.variables["role_name"] = role_name
+                    sub_exec.variables["role_key"] = role_key
                     sub_exec.variables["parent_execution_id"] = execution_id
                     sub_exec.variables["project_id"] = state.variables.get("project_id", "proj-default")
                     sub_exec.variables["parent_task"] = state.variables.get("parent_task") or task
-                    
-                    await self.event_bus.publish(Event(
-                        type="TaskCreated",
-                        payload={
-                            "execution_id": sub_id,
-                            "task": step["description"],
-                            "agent_id": "default_agent"
-                        }
-                    ))
-                    
-                    # Run sub-agent task loop in background
-                    asyncio.create_task(self.execute_task(sub_id, step["description"]))
+                    sub_exec.variables["task"] = sub_exec.variables.get("task") or sub_task
+                    sub_exec.variables["plan_step_id"] = step.get("id")
+                    sub_exec.variables["dependency_results"] = dependency_results
+                    sub_exec.variables["attachment_ids"] = state.variables.get("attachment_ids", [])
+                    sub_exec.variables["agent_config"] = {
+                        "system_prompt": f"You are the specialized {role_name} for this project.",
+                        "role_name": role_name,
+                    }
+                    if state.variables.get("project_path"):
+                        sub_exec.variables["project_path"] = state.variables["project_path"]
+
+                    if is_new_assignment:
+                        await self.event_bus.publish(Event(
+                            type="TaskCreated",
+                            payload={
+                                "execution_id": sub_id,
+                                "parent_execution_id": execution_id,
+                                "plan_step_id": step.get("id"),
+                                "role": role_key,
+                                "task": sub_exec.variables["task"],
+                                "agent_id": "default_agent"
+                            }
+                        ))
+
+                    if sub_exec.status in ("pending", "running"):
+                        asyncio.create_task(self.execute_task(sub_id, sub_exec.variables["task"]))
                     
                     # Wait for sub-agent completion
                     while True:
-                        await asyncio.sleep(1.0)
+                        await asyncio.sleep(0.1)
                         
                         parent_state = self.state_engine.get_execution(execution_id)
                         sub_state = self.state_engine.get_execution(sub_id)
@@ -240,20 +393,23 @@ class ExecutionEngine:
                         # Resume child if parent is resumed
                         if parent_state.status == "running" and sub_state.status == "paused" and not sub_state.variables.get("pending_approval"):
                             sub_state.status = "running"
-                            asyncio.create_task(self.execute_task(sub_id, step["description"]))
+                            asyncio.create_task(self.execute_task(sub_id, sub_exec.variables["task"]))
                         
                         if sub_state.status in ("completed", "failed", "cancelled"):
                             break
                             
                     if sub_state.status == "completed":
-                        convo = self.state_engine.get_conversation(sub_id)
-                        last_response = "Sub-agent execution completed."
-                        for msg in reversed(convo.messages):
-                            if msg.get("role") == "assistant" and msg.get("content"):
-                                last_response = msg["content"]
-                                break
-                        delivery = self._structured_delivery(last_response)
+                        delivery = sub_exec.variables.get("delivery")
+                        if not isinstance(delivery, dict):
+                            sub_conversation = self.state_engine.get_conversation(sub_id)
+                            last_response = "Sub-agent execution completed."
+                            for msg in reversed(sub_conversation.messages):
+                                if msg.get("role") == "assistant" and msg.get("content"):
+                                    last_response = msg["content"]
+                                    break
+                            delivery = self._structured_delivery(last_response)
                         sub_exec.variables["delivery"] = delivery
+                        step["delivery"] = delivery
                         result = json.dumps(delivery, ensure_ascii=False)
                     else:
                         raise RuntimeError(f"Sub-agent {role_name} stopped with status: {sub_state.status}")
@@ -269,6 +425,14 @@ class ExecutionEngine:
                 
                 step["status"] = "completed"
                 step["result"] = result
+                step_record = {
+                    "step_id": step.get("id"),
+                    "description": step.get("description"),
+                    "role": step.get("role") or "coordinator",
+                    "execution_id": step.get("assigned_execution_id") or execution_id,
+                    "result": step.get("delivery") or result,
+                }
+                state.results.setdefault("steps", {})[str(step.get("id"))] = step_record
                 await self.event_bus.publish(Event(
                     type="StepCompleted",
                     payload={"execution_id": execution_id, "step_index": step_index, "result": result}
@@ -313,8 +477,14 @@ class ExecutionEngine:
                 all_completed = all(s.get("status") == "completed" for s in steps)
                 if all_completed:
                     state.status = "completed"
-                    state.results["telemetry"] = self.telemetry.metrics(execution_id)
+                    state.results["deliveries"] = [
+                        state.results.get("steps", {}).get(str(step.get("id"))) for step in steps
+                    ]
+                    state.results["deliveries"] = [item for item in state.results["deliveries"] if item]
+                    if steps:
+                        state.results["final_output"] = steps[-1].get("delivery") or steps[-1].get("result")
                     self.telemetry.record("execution_completed", execution_id, completed_steps=len(steps))
+                    state.results["telemetry"] = self.telemetry.metrics(execution_id)
                     await self.event_bus.publish(Event(
                         type="ExecutionCompleted",
                         payload={"execution_id": execution_id, "results": state.results}
@@ -359,6 +529,7 @@ class ExecutionEngine:
                     
                 if step_failure:
                     state.status = "failed"
+                    state.results["error"] = str(step_failure)
                     self.telemetry.record("execution_failed", execution_id, error=str(step_failure))
                     for t in running_tasks.values():
                         t.cancel()
@@ -386,27 +557,40 @@ class ExecutionEngine:
         allowed_capabilities = self._allowed_capabilities(skills)
         
         step_desc = step.get("description", "")
+        prerequisite_outputs = state.variables.get("dependency_results") or []
+        if not prerequisite_outputs and state.current_plan:
+            role_for_step = canonical_step_role(step.get("role")) or infer_step_role(step_desc)
+            if role_for_step == "coordinator":
+                dependency_ids = [
+                    item.get("id") for item in state.current_plan.get("steps", [])
+                    if item is not step and item.get("status") == "completed"
+                ]
+            else:
+                dependency_ids = step.get("dependencies", [])
+            for dependency_id in dependency_ids:
+                dependency_step = next(
+                    (item for item in state.current_plan.get("steps", []) if item.get("id") == dependency_id),
+                    None,
+                )
+                if dependency_step:
+                    prerequisite_outputs.append({
+                        "step_id": dependency_id,
+                        "role": dependency_step.get("role"),
+                        "description": dependency_step.get("description"),
+                        "delivery": dependency_step.get("delivery") or dependency_step.get("result"),
+                    })
         # Sub-prompt for the step: only append if not resuming from a pending approval to preserve tool call message ordering
         if not state.variables.get("pending_approval"):
-            convo.messages.append({"role": "system", "content": f"Current Step objectives: {step_desc}. Generate thought and select tools if needed.", "timestamp": time.time()})
-
-        max_iterations = 30
-        try:
-            import json
-            import os
-            filesystem_cap = self.get_capability("filesystem")
-            if filesystem_cap:
-                config_path = os.path.join(filesystem_cap.workspace_root, "config.json")
-                if os.path.exists(config_path):
-                    with open(config_path, "r", encoding="utf-8") as f:
-                        config_data = json.load(f)
-                    max_iterations = config_data.get("max_step_iterations", 30)
-        except Exception:
-            pass
+            reuse_instruction = ""
+            if prerequisite_outputs:
+                reuse_instruction = " Reuse the validated prerequisite outputs supplied in the task; do not repeat their work."
+            convo.messages.append({"role": "system", "content": f"Current Step objectives: {step_desc}.{reuse_instruction} Generate thought and select tools if needed.", "timestamp": time.time()})
 
         iteration = 0
 
-        while iteration < max_iterations:
+        while iteration < self.max_step_iterations:
+            if state.status in ("paused", "cancelled", "failed") and not state.variables.get("pending_approval", {}).get("decision"):
+                return f"Execution suspended with status: {state.status}."
             iteration += 1
 
             # Check if there is a pending approval we just resumed
@@ -419,7 +603,10 @@ class ExecutionEngine:
                 
                 # Check if user decision is approved
                 decision = pending_app.get("decision", "reject")
-                if decision == "allow":
+                completed_tool_calls = state.variables.setdefault("completed_tool_calls", {})
+                if tool_call_id in completed_tool_calls:
+                    result_str = completed_tool_calls[tool_call_id]
+                elif decision == "allow":
                     # Execute tool call
                     result_str = await self._call_tool(
                         execution_id,
@@ -429,6 +616,7 @@ class ExecutionEngine:
                     )
                 else:
                     result_str = f"Execution blocked: human rejection. Reason: {pending_app.get('reason', 'None')}"
+                completed_tool_calls[tool_call_id] = result_str
 
                 convo.messages.append({
                     "role": "tool",
@@ -451,7 +639,14 @@ class ExecutionEngine:
 
             # Build tools list
             is_sub_agent = state.variables.get("parent_execution_id") is not None
-            schemas = self.get_capabilities_schemas(is_sub_agent=is_sub_agent, allowed_capabilities=allowed_capabilities)
+            delegated_plan = (not is_sub_agent) and any(
+                canonical_step_role(item.get("role")) not in (None, "coordinator")
+                for item in (state.current_plan or {}).get("steps", [])
+            )
+            schemas = self.get_capabilities_schemas(
+                is_sub_agent=is_sub_agent or delegated_plan,
+                allowed_capabilities=allowed_capabilities,
+            )
 
             # Compile context
             context = await self.context_engine.compile_context(
@@ -468,51 +663,53 @@ class ExecutionEngine:
             # Request LLM completion
             llm_messages = []
             role_name = state.variables.get("role_name", "Coordinateur")
+            role_key = state.variables.get("role_key") or canonical_step_role(role_name) or "coordinator"
             base_prompt = context.get("system_instructions", "")
             if skills:
                 base_prompt += "\\n\\nActive skills:\\n" + "\\n\\n".join(
                     f"[{skill.name}]\\n{skill.instructions}" for skill in skills
                 )
             
-            role_lower = role_name.lower()
-            if "architect" in role_lower:
-                role_prompt = (
+            if role_key == "architect":
+                specialized_prompt = (
                     "You are the Specialized Architect Agent.\n"
                     "Your role is to analyze software requirements, design specifications, and write technical specifications files (e.g. specs.md).\n"
                     "Focus on clear system design, modular structures, and outlining detailed implementation plans for other sub-agents."
                 )
-            elif "security" in role_lower or "sécurité" in role_lower or "reviewer" in role_lower:
-                role_prompt = (
+            elif role_key == "security":
+                specialized_prompt = (
                     "You are the Specialized Security & Compliance Reviewer.\n"
                     "Your role is to check specifications or code for logical flaws, cryptographic vulnerabilities, or input validation risks.\n"
                     "Write detailed security reviews (e.g. security_review.md) highlighting potential issues and proposing mitigations."
                 )
-            elif "développeur" in role_lower or "developer" in role_lower or "coder" in role_lower:
-                role_prompt = (
+            elif role_key == "developer":
+                specialized_prompt = (
                     "You are the Specialized Developer/Coder Agent.\n"
                     "Your role is to write clean, high-quality, and fully functional source code.\n"
                     "Avoid writing comments as placeholders; write actual implementation. Follow specs.md guidelines."
                 )
-            elif "test" in role_lower or "qa" in role_lower or "tester" in role_lower:
-                role_prompt = (
+            elif role_key == "qa":
+                specialized_prompt = (
                     "You are the Specialized QA Testing Engineer.\n"
                     "Your role is to design and write robust unit tests (e.g. pytest tests) to verify the code correctness.\n"
                     "Make sure you cover edge cases, input validation, and boundary conditions."
                 )
-            elif "debug" in role_lower or "débug" in role_lower or "fixer" in role_lower:
-                role_prompt = (
+            elif role_key == "debugger":
+                specialized_prompt = (
                     "You are the Specialized Debugger & Bug Fixer.\n"
                     "Your role is to analyze test failure logs, run commands to inspect state, and modify files to fix code syntax or logical errors."
                 )
-            elif "writer" in role_lower or "rédacteur" in role_lower or "documentation" in role_lower:
-                role_prompt = (
+            elif role_key == "writer":
+                specialized_prompt = (
                     "You are the Specialized Technical Writer.\n"
                     "Your role is to write detailed project documentation, README.md files, and help guides for users."
                 )
             else:
-                role_prompt = base_prompt
-                
-            if role_name != "Coordinateur":
+                specialized_prompt = "Coordinate the current step and synthesize prerequisite results without repeating completed work."
+
+            role_prompt = (base_prompt + "\n\n" + specialized_prompt).strip()
+
+            if role_key != "coordinator":
                 role_prompt += ("\\nWhen finished, return a JSON object with keys: summary, artifacts, evidence, risks, next_action. "
                                 "Use empty arrays or strings when a field does not apply.")
             llm_messages.append({"role": "system", "content": role_prompt})
@@ -528,6 +725,13 @@ class ExecutionEngine:
                     llm_messages.append({"role": "system", "content": f"Attachment {attachment['filename']}: {attachment['note']}"})
             if context.get("context_summary"):
                 llm_messages.append({"role": "system", "content": context["context_summary"]})
+            if prerequisite_outputs:
+                llm_messages.append({
+                    "role": "system",
+                    "content": "Validated prerequisite deliveries to synthesize; do not redo them:\n" + json.dumps(
+                        prerequisite_outputs, ensure_ascii=False
+                    )[:8_000],
+                })
             llm_messages.extend(context["conversation_history"])
 
             await self.event_bus.publish(Event(
@@ -576,10 +780,32 @@ class ExecutionEngine:
 
             # Process tool calls
             for tool_call in tool_calls:
-                tool_id = tool_call.get("id")
+                tool_id = str(tool_call.get("id") or "").strip()
                 func_info = tool_call.get("function", {})
                 full_name = func_info.get("name", "")
                 args = func_info.get("arguments", {})
+                if isinstance(args, str):
+                    try:
+                        args = json.loads(args)
+                    except json.JSONDecodeError:
+                        args = {}
+                if not isinstance(args, dict):
+                    args = {}
+                if not tool_id:
+                    tool_id = f"anonymous-{iteration}-{len(state.variables.setdefault('completed_tool_calls', {}))}"
+
+                completed_tool_calls = state.variables.setdefault("completed_tool_calls", {})
+                if tool_id in completed_tool_calls:
+                    result_str = completed_tool_calls[tool_id]
+                    convo.messages.append({
+                        "role": "tool", "tool_call_id": tool_id, "name": full_name,
+                        "content": result_str, "timestamp": time.time(),
+                    })
+                    await self.event_bus.publish(Event(
+                        type="ToolReused",
+                        payload={"execution_id": execution_id, "tool_call_id": tool_id, "result": result_str},
+                    ))
+                    continue
 
                 # Parse capability and action
                 if "__" in full_name:
@@ -610,6 +836,7 @@ class ExecutionEngine:
 
                 if policy_desc.decision == "deny":
                     result_str = f"Execution blocked: Policy Denied. Reason: {policy_desc.reason}"
+                    completed_tool_calls[tool_id] = result_str
                     convo.messages.append({
                         "role": "tool",
                         "tool_call_id": tool_id,
@@ -650,6 +877,7 @@ class ExecutionEngine:
                 else:
                     # 'allow' -> Execute the capability
                     result_str = await self._call_tool(execution_id, cap_name, act_name, args)
+                    completed_tool_calls[tool_id] = result_str
                     convo.messages.append({
                         "role": "tool",
                         "tool_call_id": tool_id,
@@ -708,19 +936,25 @@ class ExecutionEngine:
     @staticmethod
     def _structured_delivery(response: str) -> Dict[str, Any]:
         """Normalize a sub-agent response into a stable parent-agent contract."""
+        parsed = None
         try:
-            import json
             parsed = json.loads(response)
-            if isinstance(parsed, dict):
-                return {
-                    "summary": str(parsed.get("summary", "")),
-                    "artifacts": parsed.get("artifacts", []),
-                    "evidence": parsed.get("evidence", []),
-                    "risks": parsed.get("risks", []),
-                    "next_action": str(parsed.get("next_action", "")),
-                }
         except (TypeError, ValueError):
-            pass
+            text = str(response or "")
+            first, last = text.find("{"), text.rfind("}")
+            if first >= 0 and last > first:
+                try:
+                    parsed = json.loads(text[first:last + 1])
+                except ValueError:
+                    parsed = None
+        if isinstance(parsed, dict):
+            return {
+                "summary": str(parsed.get("summary", "")),
+                "artifacts": parsed.get("artifacts", []) if isinstance(parsed.get("artifacts", []), list) else [],
+                "evidence": parsed.get("evidence", []) if isinstance(parsed.get("evidence", []), list) else [],
+                "risks": parsed.get("risks", []) if isinstance(parsed.get("risks", []), list) else [],
+                "next_action": str(parsed.get("next_action", "")),
+            }
         return {"summary": response, "artifacts": [], "evidence": [], "risks": [], "next_action": ""}
 
     async def resume_with_decision(self, execution_id: str, decision: str, reason: Optional[str] = None):
@@ -746,8 +980,7 @@ class ExecutionEngine:
         ))
 
         # Re-start execution process (it will load the step again, find the pending approval, and process it)
-        task = convo = self.state_engine.get_conversation(execution_id).messages[0]["content"]
-        # Remove "Task: " prefix if present
+        task = state.variables.get("task") or self.state_engine.get_conversation(execution_id).messages[0]["content"]
         if task.startswith("Task: "):
             task = task[6:]
             
