@@ -1,6 +1,7 @@
 # Python build and test artifacts
 __pycache__/
-*.py[cod]
+*.pyc
+*.pyo
 .pytest_cache/
 .coverage
 htmlcov/
@@ -8,7 +9,6 @@ htmlcov/
 # Local environments and editor settings
 .venv/
 venv/
-python-*-embed-amd64/
 wheelhouse/
 .env
 .vscode/

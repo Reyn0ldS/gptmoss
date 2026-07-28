@@ -76,4 +76,6 @@ def test_windows_launchers_share_runtime_detection():
     assert "scripts\\find_python.bat" in start
     assert 'GPTMOSS_RUNTIME_KIND!"=="embedded"' in install
     assert "--no-index" in install
-    assert '"!GPTMOSS_PYTHON!" "%~dp0main.py" %*' in start
+    assert "PYTHONDONTWRITEBYTECODE=1" in install
+    assert "PYTHONDONTWRITEBYTECODE=1" in start
+    assert '"!GPTMOSS_PYTHON!" -B "%~dp0main.py" %*' in start
