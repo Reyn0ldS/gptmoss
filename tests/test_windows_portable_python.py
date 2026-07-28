@@ -13,8 +13,8 @@ WINDOWS_ONLY = pytest.mark.skipif(os.name != "nt", reason="Windows script")
 
 @WINDOWS_ONLY
 def test_embedded_python_configuration_is_idempotent(tmp_path):
-    runtime = tmp_path / "python-3.14.6-embed-amd64"
-    runtime.mkdir()
+    runtime = tmp_path / "gptmoss-main (1)" / "python-3.14.6-embed-amd64"
+    runtime.mkdir(parents=True)
     (runtime / "python.exe").touch()
     path_file = runtime / "python314._pth"
     path_file.write_text("python314.zip\n.\n#import site\n", encoding="ascii")
@@ -51,7 +51,8 @@ def test_runtime_detector_finds_portable_python_in_path_with_spaces(tmp_path):
     runner.write_text(
         f'@call "{scripts / "find_python.bat"}"\n'
         "@echo KIND=%GPTMOSS_RUNTIME_KIND%\n"
-        "@echo PYTHON=%GPTMOSS_PYTHON%\n",
+        "@echo PYTHON=%GPTMOSS_PYTHON%\n"
+        "@echo DIRECTORY=%GPTMOSS_PYTHON_DIRECTORY%\n",
         encoding="ascii",
     )
     result = subprocess.run(
@@ -64,6 +65,7 @@ def test_runtime_detector_finds_portable_python_in_path_with_spaces(tmp_path):
     assert result.returncode == 0, result.stdout + result.stderr
     assert "KIND=embedded" in result.stdout
     assert f"PYTHON={python}" in result.stdout
+    assert f"DIRECTORY={python.parent}" in result.stdout
 
 
 def test_windows_launchers_share_runtime_detection():

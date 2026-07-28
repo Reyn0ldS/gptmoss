@@ -20,8 +20,7 @@ if !errorlevel! neq 0 (
 :: 2. Embedded Python is a private application runtime and cannot create venv.
 if /i "!GPTMOSS_RUNTIME_KIND!"=="embedded" (
     echo [INFO] Configuring portable embedded Python...
-    for %%P in ("!GPTMOSS_PYTHON!") do set "EMBEDDED_DIRECTORY=%%~dpP"
-    "!GPTMOSS_PYTHON!" "%~dp0scripts\configure_embedded_python.py" --python-directory "!EMBEDDED_DIRECTORY!"
+    "!GPTMOSS_PYTHON!" "%~dp0scripts\configure_embedded_python.py" --python-directory "!GPTMOSS_PYTHON_DIRECTORY!"
     if !errorlevel! neq 0 goto :failed
 
     "!GPTMOSS_PYTHON!" -c "import fastapi, httpx, openai, pydantic, uvicorn, websockets"
