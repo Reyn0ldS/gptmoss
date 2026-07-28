@@ -11,14 +11,20 @@ class SimplePolicyProvider(PolicyProvider):
     def __init__(
         self,
         approval_required_capabilities: Optional[List[str]] = None,
-        denied_capabilities: Optional[List[str]] = None
+        denied_capabilities: Optional[List[str]] = None,
+        workspace_full_autonomy: bool = False,
     ):
-        self.approval_required = [c.lower() for c in (approval_required_capabilities or ["shell"])]
+        approvals = ["shell"] if approval_required_capabilities is None else approval_required_capabilities
+        self.approval_required = [c.lower() for c in approvals]
         self.denied = [c.lower() for c in (denied_capabilities or [])]
+        self.workspace_full_autonomy = bool(workspace_full_autonomy)
 
-    def update_policy(self, approval_required: List[str], denied: List[str]):
+    def update_policy(self, approval_required: List[str], denied: List[str],
+                      workspace_full_autonomy: Optional[bool] = None):
         self.approval_required = [c.lower() for c in approval_required]
         self.denied = [c.lower() for c in denied]
+        if workspace_full_autonomy is not None:
+            self.workspace_full_autonomy = bool(workspace_full_autonomy)
 
     async def check_action(
         self,
@@ -38,6 +44,16 @@ class SimplePolicyProvider(PolicyProvider):
                 decision="deny",
                 reason=f"Action '{capability}.{action}' is blacklisted by policy.",
                 details={"capability": capability, "action": action}
+            )
+
+        # Explicit opt-in: all current and future shell commands are
+        # pre-authorized. Capability and shell-level workspace/safety checks
+        # still apply, as do the explicit denials evaluated above.
+        if self.workspace_full_autonomy and cap_lower == "shell":
+            return PolicyDecision(
+                decision="allow",
+                reason="Shell command pre-authorized by workspace full autonomy mode.",
+                details={"capability": capability, "action": action, "workspace_scoped": True},
             )
             
         # Check approval required

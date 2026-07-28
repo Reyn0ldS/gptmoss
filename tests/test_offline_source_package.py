@@ -47,7 +47,10 @@ def test_archive_extraction_rejects_parent_traversal(tmp_path):
 def test_committed_runtime_matches_manifest():
     manifest = json.loads((PROJECT_ROOT / "offline-runtime-manifest.json").read_text(encoding="utf-8"))
     runtime = PROJECT_ROOT / manifest["runtime_directory"]
-    files = [path for path in runtime.rglob("*") if path.is_file()]
+    files = [
+        path for path in runtime.rglob("*")
+        if path.is_file() and "__pycache__" not in path.parts and path.suffix not in {".pyc", ".pyo"}
+    ]
 
     assert runtime.is_dir()
     assert (runtime / "python.exe").is_file()

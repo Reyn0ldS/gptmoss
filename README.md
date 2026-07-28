@@ -117,11 +117,14 @@ La configuration active est `workspace/config.json`. Au démarrage, GPTMOSS la n
     "shell",
     "devteam.approve_quality_gate"
   ],
+  "workspace_full_autonomy": false,
+  "continue_while_progress": true,
   "workspace_path": "./workspace",
   "restrict_to_workspace": true,
   "allow_subfolders": true,
   "max_context_chars": 12000,
   "max_step_iterations": 30,
+  "max_step_retries": 2,
   "safe_shell_mode": true,
   "shell_timeout_seconds": 60,
   "shell_max_output_chars": 12000,
@@ -141,10 +144,14 @@ La configuration active est `workspace/config.json`. Au démarrage, GPTMOSS la n
 | `ssl_cert_path` | Chemin d'un certificat d'autorité personnalisé. | Vide, sauf PKI interne. |
 | `denied_capabilities` | Capacités ou actions interdites. | Par ex. `['shell']` ou `['filesystem.delete']`. |
 | `approval_required_capabilities` | Capacités ou actions nécessitant une décision humaine. | Conserver `shell` et le quality gate. |
+| `workspace_full_autonomy` | Préautorise toutes les actions shell présentes et futures, uniquement dans les projets du workspace. Les refus explicites et le shell sûr restent prioritaires. | `false`, ou `true` sur un workspace isolé et de confiance. |
+| `continue_while_progress` | Supprime la limite globale de tours d'une étape tant qu'un progrès durable est détecté. | `true` pour les tâches longues. |
 | `workspace_path` | Racine de travail des agents. | Un dossier dédié. |
 | `restrict_to_workspace` | Empêche les accès de fichiers hors de la racine. | `true`. |
 | `allow_subfolders` | Autorise les opérations dans les sous-dossiers. | `true`. |
 | `max_context_chars` | Budget du contexte conversationnel. Borné entre 2 000 et 100 000. | `12000`. |
+| `max_step_iterations` | Avec le mode progrès actif : nombre de tours consécutifs sans progrès avant échec/reprise. Sinon : limite totale de tours. | `30` (1 à 100). |
+| `max_step_retries` | Nombre de nouveaux spécialistes autonomes après l'échec d'une étape. | `2` (0 à 5). |
 | `projects` | Projets proposés dans l'interface. | Voir ci-dessous. |
 | `safe_shell_mode` | Active le blocage des commandes destructrices connues. | `true`. |
 | `shell_timeout_seconds` | Délai maximal d'une commande shell. | `60` (1 à 600). |
@@ -199,7 +206,9 @@ Invoke-RestMethod http://127.0.0.1:8000/api/settings
 | Modèle par défaut | Modèle utilisé pour les nouvelles étapes. | Utiliser le nom exact fourni par l’API. |
 | Vérifier le certificat SSL | Active la validation TLS ; le chemin de certificat apparaît si nécessaire. | Laisser activé. |
 | Budget de contexte | Nombre de caractères de conversation donnés au modèle. | 12 000 est un bon départ ; augmenter si les tâches longues perdent du contexte. |
-| Itérations ReAct | Nombre maximal de tours outil/modèle pour une étape. | 20 à 40 ; une valeur élevée augmente coût et durée. |
+| Continuer tant que le travail progresse | Autorise une étape à dépasser tout nombre total de tours lorsque fichiers, livrables ou nouveaux tests réussis évoluent réellement. | Activé pour les projets longs. |
+| Budget sans progrès | Nombre de tours consécutifs sans modification durable ni nouvelle preuve avant reprise ou échec. | 20 à 40 ; ce n'est pas une durée maximale. |
+| Reprises autonomes | Nombre de nouveaux spécialistes chargés de reprendre les artefacts et preuves d'une tentative échouée. | 2 est un bon départ. |
 
 #### Panneau Sécurité shell
 
@@ -212,6 +221,9 @@ Invoke-RestMethod http://127.0.0.1:8000/api/settings
 | Capacités interdites | Refuse la capacité, même si le modèle la demande. | Bloquer `filesystem` ou `shell` pour un agent d’analyse seule. |
 | Restriction du workspace | Empêche les accès hors du dossier de travail. | Toujours activée. |
 | Sous-dossiers | Autorise la création et lecture dans les sous-dossiers. | Activé pour le développement ; désactiver pour limiter strictement l’agent. |
+| Autonomie totale dans le workspace | Ne demande plus de confirmation humaine pour les commandes shell actuelles ou ajoutées plus tard. Ne désactive ni la restriction de chemin, ni les refus, ni le blocage destructif. | Seulement dans un workspace dédié et de confiance. |
+
+Il n'existe pas de timeout global de projet. `shell_timeout_seconds` reste un garde-fou distinct pour une commande unique qui ne rend pas la main ; un projet peut enchaîner autant de commandes et d'étapes que nécessaire. En mode progrès, une modification de contenu, la création d'un livrable ou une nouvelle commande de vérification réussie remet le budget de stagnation à zéro. Répéter la même lecture, réécrire un contenu identique ou relancer la même commande ne le remet pas à zéro.
 
 #### Panneau Skills
 
@@ -345,10 +357,9 @@ Le client doit garder la connexion ouverte et peut envoyer un message périodiqu
 
 ## Exécutions, plan et validations
 
-Une tâche est planifiée en étapes reliées par dépendances. Le plan fournit un rôle
-explicite (`architect`, `security`, `developer`, `qa`, `debugger`, `writer` ou
-`coordinator`) et le moteur valide les identifiants, les références et l'absence de
-cycle avant de démarrer. Les étapes indépendantes s'exécutent en parallèle.
+Une tâche est d'abord classée selon sa taille, ses domaines et ses résultats attendus. Le plan adaptatif fournit un rôle canonique (`architect`, `security`, `developer`, `qa`, `debugger`, `writer` ou `coordinator`) et un profil métier distinct (`specialist`, `expertise`, artefacts, critères d'acceptation et commandes de vérification). Une demande mêlant vision, ML, géométrie 3D, vêtements, interface et confidentialité crée donc plusieurs ingénieurs spécialisés plutôt qu'un seul développeur générique. Le moteur rejette un plan complexe sous-dimensionné, les poids de modèles prétendument générés et les workflows vêtement qui omettent le corps complet.
+
+Le moteur valide les identifiants, les références et l'absence de cycle avant de démarrer. Les étapes indépendantes s'exécutent en parallèle. Un spécialiste ne peut annoncer sa réussite qu'après création des artefacts non vides, exécution exacte des vérifications déclarées et remise d'un résultat JSON structuré. Les agents QA importent le code réel : les dépendances locales factices, mocks de remplacement et géométries aléatoires sont refusés.
 
 Chaque étape spécialiste possède un seul sous-agent persistant. Son identifiant et
 son résultat sont enregistrés avant et après l'exécution, ce qui empêche une reprise
@@ -356,6 +367,10 @@ ou un double clic de refaire le même travail. Les livraisons des dépendances s
 transmises explicitement à l'étape suivante. Le coordinateur final reçoit toutes les
 livraisons dans l'ordre du plan, les synthétise sans relancer de sous-agent et expose
 l'ensemble dans le champ `results` de l'exécution.
+
+Après un échec, un nouveau spécialiste peut reprendre le même workspace sans refaire les dépendances déjà validées. Il reçoit les dernières erreurs de commandes et les contrats Python extraits des sources. Si une boucle n'arrive pas à créer un fichier texte requis, un contexte de secours court peut générer cet artefact, qui doit ensuite être relu et vérifié normalement.
+
+Le pipeline logiciel ne bloque plus l'agent de réparation derrière une suite déjà verte : l'auteur QA doit d'abord produire des tests réellement importables et collectables, puis un agent de réparation exécute et corrige la suite unité/intégration. L'acceptation E2E ajoute ensuite ses scénarios, suivie d'une réparation finale des seules régressions restantes. Une indisponibilité temporaire du fournisseur LLM est retentée avec attente progressive sans effacer les fichiers du projet ; les erreurs permanentes d'authentification restent immédiates.
 
 États possibles :
 
@@ -404,7 +419,7 @@ allowed_capabilities: [filesystem, shell]
 Instructions détaillées données à l'agent lorsqu'il sélectionne ce skill.
 ```
 
-`name` doit contenir uniquement lettres minuscules, chiffres, `_` ou `-`. Les capabilities autorisées sont l'union de celles des skills sélectionnés : choisissez-les avec parcimonie. Les skills intégrés sont `secure-python`, `test-and-debug`, `project-architecture`, `documentation` et `code-review`.
+`name` doit contenir uniquement lettres minuscules, chiffres, `_` ou `-`. Les capabilities autorisées sont l'union de celles des skills sélectionnés : choisissez-les avec parcimonie. En plus des skills généraux (`secure-python`, `test-and-debug`, `project-architecture`, `documentation`, `code-review`), le paquet fournit des skills spécialisés : `requirements-feasibility`, `computer-vision-ml`, `geometry-3d`, `digital-garments`, `backend-api`, `frontend-3d`, `integration-delivery` et `biometric-privacy`.
 
 Deux modes de sélection existent :
 

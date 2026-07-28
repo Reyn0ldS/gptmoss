@@ -1,5 +1,6 @@
 import hashlib
 import html
+import hashlib
 import json
 import os
 import logging
@@ -27,19 +28,30 @@ class QwenProvider(LLMProvider):
         self.base_url = base_url or os.getenv("OPENAI_BASE_URL") or "https://dashscope.aliyuncs.com/compatible-mode/v1"
         self.default_model = default_model
         self.supports_vision = any(marker in default_model.lower() for marker in ("vision", "-vl", "omni"))
+        self._native_tools_supported: Optional[bool] = None
         
         logger.info(f"Initializing QwenProvider calling base_url={self.base_url} with default_model={self.default_model}")
         import httpx
         # Certificate validation is secure by default. A local/self-signed
         # endpoint can still be enabled explicitly through settings.
         http_client = httpx.AsyncClient(verify=True)
-        self.client = AsyncOpenAI(api_key=self.api_key, base_url=self.base_url, http_client=http_client)
+        self.client = AsyncOpenAI(api_key=self.api_key, base_url=self.base_url, http_client=http_client,
+                                  max_retries=5, timeout=90.0)
+
+    @staticmethod
+    def _log_completion_error(error: Exception):
+        text = (error.__class__.__name__ + " " + str(error)).lower()
+        if any(marker in text for marker in ("connection", "timeout", "rate limit", "429", "502", "503", "504")):
+            logger.warning("Temporary LLM provider failure (%s): %s", error.__class__.__name__, error)
+        else:
+            logger.error("Error in LLM completion: %s", error, exc_info=True)
 
     def update_config(self, api_key: str, base_url: str, ssl_verify: bool = False, ssl_cert_path: str = "", model_name: str = "qwen-turbo"):
         self.api_key = api_key
         self.base_url = base_url
         self.default_model = model_name
         self.supports_vision = any(marker in model_name.lower() for marker in ("vision", "-vl", "omni"))
+        self._native_tools_supported = None
         
         import httpx
         if ssl_verify:
@@ -48,7 +60,8 @@ class QwenProvider(LLMProvider):
             verify_value = False
             
         http_client = httpx.AsyncClient(verify=verify_value)
-        self.client = AsyncOpenAI(api_key=self.api_key, base_url=self.base_url, http_client=http_client)
+        self.client = AsyncOpenAI(api_key=self.api_key, base_url=self.base_url, http_client=http_client,
+                                  max_retries=5, timeout=90.0)
         logger.info(f"QwenProvider config updated. base_url={self.base_url}, ssl_verify={ssl_verify}, ssl_cert_path={ssl_cert_path}")
 
     async def completion(
@@ -72,8 +85,11 @@ class QwenProvider(LLMProvider):
                 )
                 return self._parse_openai_response(response)
             except Exception as e:
-                logger.error(f"Error in LLM completion: {e}", exc_info=True)
+                self._log_completion_error(e)
                 raise e
+
+        if self._native_tools_supported is False:
+            return await self._prompt_based_tool_calling(messages, tools, model, **kwargs)
 
         # Build arguments for openai client to try native tool calling
         client_kwargs = {
@@ -89,15 +105,18 @@ class QwenProvider(LLMProvider):
 
         try:
             response = await self.client.chat.completions.create(**client_kwargs)
-            return self._parse_openai_response(response)
+            parsed = self._parse_openai_response(response)
+            self._native_tools_supported = True
+            return parsed
         except Exception as e:
             err_msg = str(e).lower()
             # If native tool calling fails because auto tool choice is disabled on remote server, fall back
             if "tool_choice" in err_msg or "tool-call-parser" in err_msg or "tool_call" in err_msg or "400" in err_msg:
                 logger.warning("Native tool calling failed/not supported by remote endpoint, falling back to prompt-based tool calling.")
+                self._native_tools_supported = False
                 return await self._prompt_based_tool_calling(messages, tools, model, **kwargs)
             else:
-                logger.error(f"Error in LLM completion: {e}", exc_info=True)
+                self._log_completion_error(e)
                 raise e
 
     def _parse_openai_response(self, response) -> Dict[str, Any]:
@@ -241,7 +260,7 @@ class QwenProvider(LLMProvider):
                         text_parts.append(part.get("text", ""))
                     elif part.get("type") == "image_url":
                         text_parts.append("[image attached]")
-                cleaned_messages.append({"role": role, "content": "\\n".join(text_parts)})
+                cleaned_messages.append({"role": role, "content": "\n".join(text_parts)})
                 continue
             if role == "tool":
                 cleaned_messages.append({
@@ -344,6 +363,9 @@ class QwenProvider(LLMProvider):
                             tool_args = json.loads(tool_args)
                         except Exception:
                             pass
+                    while (isinstance(tool_args, dict) and len(tool_args) == 1
+                           and isinstance(tool_args.get("arguments"), dict)):
+                        tool_args = tool_args["arguments"]
                     
                     if not isinstance(tool_args, dict):
                         tool_args = {}

@@ -69,14 +69,40 @@ class SkillRegistry:
         return {"mapped": {tool: self.TOOL_MAP[tool] for tool in requested if tool in self.TOOL_MAP},
                 "unsupported": [tool for tool in requested if tool not in self.TOOL_MAP]}
 
-    def select(self, task: str, requested: Optional[List[str]] = None, limit: int = 3) -> List[Skill]:
-        if requested:
-            return [self.skills[name.lower()] for name in requested if name.lower() in self.skills]
-        task_tokens = set(re.findall("[A-Za-z0-9_-]+", task.lower()))
+    @staticmethod
+    def _tokens(text: str) -> set[str]:
+        return {token for token in re.findall(r"[^\W_]+(?:[-_][^\W_]+)*", text.lower(), flags=re.UNICODE)
+                if len(token) > 1}
+
+    def select(self, task: str, requested: Optional[List[str]] = None,
+               preferred: Optional[List[str]] = None, limit: int = 4) -> List[Skill]:
+        """Select explicit baseline skills plus expertise relevant to this exact subtask."""
+        selected: List[Skill] = []
+        seen = set()
+        for name in [*(requested or []), *(preferred or [])]:
+            skill = self.skills.get(str(name).lower())
+            if skill and skill.name not in seen:
+                selected.append(skill)
+                seen.add(skill.name)
+
+        task_lower = task.lower()
+        task_tokens = self._tokens(task_lower)
         scored = []
         for skill in self.skills.values():
+            if skill.name in seen:
+                continue
             haystack = f"{skill.name} {skill.description} {skill.instructions[:500]}".lower()
-            score = len(task_tokens & set(re.findall("[A-Za-z0-9_-]+", haystack)))
+            overlap = task_tokens & self._tokens(haystack)
+            score = len(overlap)
+            if skill.name.replace("-", " ") in task_lower:
+                score += 5
+            description_tokens = self._tokens(skill.description)
+            score += len(task_tokens & description_tokens) * 2
             if score:
                 scored.append((score, skill))
-        return [skill for _, skill in sorted(scored, key=lambda item: item[0], reverse=True)[:limit]]
+        scored.sort(key=lambda item: (-item[0], item[1].name))
+        for _, skill in scored:
+            if len(selected) >= limit:
+                break
+            selected.append(skill)
+        return selected[:limit]

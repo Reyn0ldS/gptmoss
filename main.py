@@ -70,6 +70,8 @@ def bootstrap_runtime(workspace_root: str):
     ssl_cert_path = config_data.get("ssl_cert_path", "")
     denied_capabilities = config_data.get("denied_capabilities", [])
     approval_required = config_data.get("approval_required_capabilities", ["shell", "devteam.approve_quality_gate"])
+    workspace_full_autonomy = bool(config_data.get("workspace_full_autonomy", False))
+    continue_while_progress = bool(config_data.get("continue_while_progress", True))
     workspace_path = config_data.get("workspace_path") or os.path.abspath(workspace_root)
     restrict_to_workspace = config_data.get("restrict_to_workspace", True)
     allow_subfolders = config_data.get("allow_subfolders", True)
@@ -83,6 +85,11 @@ def bootstrap_runtime(workspace_root: str):
     except (TypeError, ValueError):
         max_step_iterations = 30
     max_step_iterations = max(1, min(max_step_iterations, 100))
+    try:
+        max_step_retries = int(config_data.get("max_step_retries", 2))
+    except (TypeError, ValueError):
+        max_step_retries = 2
+    max_step_retries = max(0, min(max_step_retries, 5))
     safe_shell_mode = bool(config_data.get("safe_shell_mode", True))
     try:
         shell_timeout_seconds = int(config_data.get("shell_timeout_seconds", 60))
@@ -106,11 +113,14 @@ def bootstrap_runtime(workspace_root: str):
         "ssl_cert_path": ssl_cert_path,
         "denied_capabilities": denied_capabilities,
         "approval_required_capabilities": approval_required,
+        "workspace_full_autonomy": workspace_full_autonomy,
+        "continue_while_progress": continue_while_progress,
         "workspace_path": workspace_path,
         "restrict_to_workspace": restrict_to_workspace,
         "allow_subfolders": allow_subfolders,
         "max_context_chars": max_context_chars,
         "max_step_iterations": max_step_iterations,
+        "max_step_retries": max_step_retries,
         "safe_shell_mode": safe_shell_mode,
         "shell_timeout_seconds": shell_timeout_seconds,
         "shell_max_output_chars": shell_max_output_chars,
@@ -136,7 +146,8 @@ def bootstrap_runtime(workspace_root: str):
     planner = SimplePlanner(llm_provider)
     policy_provider = SimplePolicyProvider(
         approval_required_capabilities=approval_required,
-        denied_capabilities=denied_capabilities
+        denied_capabilities=denied_capabilities,
+        workspace_full_autonomy=workspace_full_autonomy,
     )
 
     # 4. Execution Engine and register standard capabilities
@@ -152,6 +163,8 @@ def bootstrap_runtime(workspace_root: str):
         artifact_store=artifact_store,
         default_skills=default_skills,
         max_step_iterations=max_step_iterations,
+        max_step_retries=max_step_retries,
+        continue_while_progress=continue_while_progress,
     )
 
     # Register capabilities

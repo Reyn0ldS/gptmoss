@@ -1,8 +1,12 @@
 import asyncio
+import ast
+import hashlib
 import json
 import time
 import logging
 import inspect
+import os
+import re
 from typing import Dict, Any, List, Optional
 from gptmoss.core.event_bus import Event, EventBus
 from gptmoss.core.state import StateEngine
@@ -98,6 +102,16 @@ def normalize_plan(plan: Dict[str, Any]) -> Dict[str, Any]:
             raise ValueError(f"Plan step {step_id} has unsupported role '{requested_role}'.")
         if role:
             step["role"] = role
+        specialist = str(step.get("specialist") or "").strip()
+        if specialist:
+            if len(specialist) > 160:
+                raise ValueError(f"Plan step {step_id} has an excessively long specialist title.")
+            step["specialist"] = specialist
+        for field in ("expertise", "required_artifacts", "acceptance_criteria", "verification_commands"):
+            values = step.get(field) or []
+            if not isinstance(values, list) or any(not isinstance(value, str) for value in values):
+                raise ValueError(f"Plan step {step_id} has an invalid {field} list.")
+            step[field] = [value.strip() for value in values if value.strip()]
         step["status"] = step.get("status", "pending")
 
     identifier_set = set(identifiers)
@@ -134,6 +148,8 @@ class ExecutionEngine:
         artifact_store: Optional[ArtifactStore] = None,
         default_skills: Optional[List[str]] = None,
         max_step_iterations: int = 30,
+        max_step_retries: int = 2,
+        continue_while_progress: bool = True,
     ):
         self.event_bus = event_bus
         self.state_engine = state_engine
@@ -146,6 +162,8 @@ class ExecutionEngine:
         self.artifact_store = artifact_store
         self.default_skills = [str(skill).lower() for skill in (default_skills or [])]
         self.max_step_iterations = max(1, min(int(max_step_iterations), 100))
+        self.max_step_retries = max(0, min(int(max_step_retries), 5))
+        self.continue_while_progress = bool(continue_while_progress)
         self._capabilities: Dict[str, Any] = {}  # capability_name -> instance
         self._execution_locks: Dict[str, asyncio.Lock] = {}
 
@@ -159,6 +177,41 @@ class ExecutionEngine:
     def get_capability(self, capability_name: str) -> Optional[Any]:
         """Retrieve a registered capability by name."""
         return self._capabilities.get(capability_name.lower())
+
+    @staticmethod
+    def _is_transient_llm_error(error: Exception) -> bool:
+        text = (error.__class__.__name__ + " " + str(error)).lower()
+        permanent_markers = ("authentication", "permissiondenied", "invalid api key", "401", "403")
+        transient_markers = (
+            "connection", "timeout", "timed out", "ratelimit", "rate limit", "429",
+            "internalserver", "server error", "502", "503", "504", "temporar", "unavailable",
+        )
+        return not any(marker in text for marker in permanent_markers) and any(
+            marker in text for marker in transient_markers
+        )
+
+    async def _completion_with_recovery(self, execution_id: str, **kwargs) -> Dict[str, Any]:
+        """Keep durable task state through temporary local/provider outages."""
+        consecutive_errors = 0
+        while True:
+            try:
+                return await self.llm_provider.completion(**kwargs)
+            except Exception as error:
+                if (not self._is_transient_llm_error(error)
+                        or consecutive_errors >= self.max_step_iterations):
+                    raise
+                consecutive_errors += 1
+                delay_seconds = min(30, 2 ** min(consecutive_errors - 1, 5))
+                await self.event_bus.publish(Event(
+                    type="LLMRetryScheduled",
+                    payload={
+                        "execution_id": execution_id,
+                        "attempt": consecutive_errors,
+                        "delay_seconds": delay_seconds,
+                        "error_type": error.__class__.__name__,
+                    },
+                ))
+                await asyncio.sleep(delay_seconds)
 
     def get_capabilities_schemas(self, is_sub_agent: bool = False, allowed_capabilities: Optional[set[str]] = None) -> List[Dict[str, Any]]:
         """Generate JSON schemas for all registered capabilities."""
@@ -175,8 +228,8 @@ class ExecutionEngine:
     def _active_skills(self, state, task: str):
         if not self.skill_registry:
             return []
-        requested = state.variables.get("requested_skills") or self.default_skills
-        selected = self.skill_registry.select(task, requested=requested)
+        requested = state.variables.get("requested_skills")
+        selected = self.skill_registry.select(task, requested=requested, preferred=self.default_skills)
         state.variables["active_skills"] = [{"name": skill.name, "digest": skill.digest} for skill in selected]
         return selected
 
@@ -184,6 +237,416 @@ class ExecutionEngine:
     def _allowed_capabilities(skills) -> Optional[set[str]]:
         allowed = set().union(*(set(skill.allowed_capabilities) for skill in skills)) if skills else set()
         return allowed or None
+
+    def _artifact_exists(self, execution_id: str, path: str) -> bool:
+        filesystem = self.get_capability("filesystem")
+        if not filesystem or not hasattr(filesystem, "_resolve_path"):
+            return False
+        try:
+            resolved = filesystem._resolve_path(path, execution_id)
+            return os.path.isfile(resolved) and os.path.getsize(resolved) > 0
+        except (OSError, PermissionError, ValueError):
+            return False
+
+    def _missing_artifacts(self, execution_id: str, step: Dict[str, Any]) -> List[str]:
+        return [path for path in step.get("required_artifacts", [])
+                if not self._artifact_exists(execution_id, path)]
+
+    def _progress_signature(self, execution_id: str, step: Dict[str, Any]) -> tuple:
+        """Fingerprint durable work without counting repeated reads or failed commands."""
+        filesystem = self.get_capability("filesystem")
+        files = []
+        if filesystem and hasattr(filesystem, "_get_workspace_for_execution"):
+            try:
+                root = filesystem._get_workspace_for_execution(execution_id)
+                ignored_directories = {".git", ".pytest_cache", "__pycache__", "node_modules", ".mypy_cache"}
+                for directory, directory_names, filenames in os.walk(root):
+                    directory_names[:] = sorted(
+                        name for name in directory_names if name not in ignored_directories
+                    )
+                    for filename in sorted(filenames):
+                        if filename.endswith((".pyc", ".pyo")):
+                            continue
+                        full_path = os.path.join(directory, filename)
+                        relative = os.path.relpath(full_path, root).replace(os.sep, "/")
+                        digest = hashlib.sha256()
+                        with open(full_path, "rb") as source:
+                            while True:
+                                chunk = source.read(1024 * 1024)
+                                if not chunk:
+                                    break
+                                digest.update(chunk)
+                        files.append((relative, digest.hexdigest()))
+                        if len(files) >= 2_000:
+                            break
+                    if len(files) >= 2_000:
+                        break
+            except (OSError, PermissionError, ValueError):
+                files = []
+
+        history = self.state_engine.get_execution(execution_id).variables.get("tool_call_history", [])
+        successful_commands = sorted({
+            str(item.get("arguments", {}).get("command") or "").strip()
+            for item in history
+            if item.get("capability") == "shell" and item.get("action") == "execute"
+            and "EXIT_CODE: 0" in str(item.get("result") or "")
+        })
+        return (
+            tuple(files),
+            tuple(successful_commands),
+            tuple(sorted(self._missing_artifacts(execution_id, step))),
+        )
+
+    @staticmethod
+    def _normalize_tool_arguments(capability: str, action: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        """Recover common local-LLM wrappers and aliases before dispatch."""
+        normalized = dict(arguments or {})
+        wrappers = ("arguments", "parameters", "kwargs", "input", "data")
+        while len(normalized) == 1:
+            wrapper_name, wrapper_value = next(iter(normalized.items()))
+            if wrapper_name not in wrappers or not isinstance(wrapper_value, dict):
+                break
+            normalized = dict(wrapper_value)
+
+        if capability.lower() == "filesystem":
+            if "path" not in normalized:
+                for alias in ("file_path", "filepath", "filename", "file"):
+                    if normalized.get(alias):
+                        normalized["path"] = normalized.pop(alias)
+                        break
+            if action.lower() == "write" and "content" not in normalized:
+                for alias in ("text", "source", "body"):
+                    if alias in normalized:
+                        normalized["content"] = normalized.pop(alias)
+                        break
+            if action.lower() == "write" and not normalized.get("path"):
+                content = normalized.get("content")
+                if isinstance(content, str):
+                    first_line = content.strip().splitlines()[0] if content.strip() else ""
+                    candidate = first_line.removeprefix("File:").strip().strip(chr(34) + chr(39) + "`")
+                    if re.fullmatch(r"[\w .()/-]+\.[A-Za-z0-9]{1,10}", candidate.replace(chr(92), "/")):
+                        normalized["path"] = candidate
+                        normalized["content"] = ExecutionEngine._strip_code_fence(
+                            "\n".join(content.strip().splitlines()[1:]), candidate,
+                        )
+        return normalized
+
+    def _fake_dependency_packages(self, execution_id: str) -> List[str]:
+        filesystem = self.get_capability("filesystem")
+        if not filesystem or not hasattr(filesystem, "_get_workspace_for_execution"):
+            return []
+        root = filesystem._get_workspace_for_execution(execution_id)
+        suspicious = ("numpy", "torch", "cv2", "trimesh", "pillow", "scipy")
+        return [name for name in suspicious
+                if os.path.isfile(os.path.join(root, name, "__init__.py"))]
+
+    def _integration_contract_issues(self, execution_id: str) -> List[str]:
+        """Detect package-layout defects that can create duplicate Python class identities."""
+        filesystem = self.get_capability("filesystem")
+        if not filesystem or not hasattr(filesystem, "_get_workspace_for_execution"):
+            return []
+        try:
+            root = filesystem._get_workspace_for_execution(execution_id)
+        except (OSError, PermissionError, ValueError):
+            return []
+        package_root = os.path.join(root, "src", "avatar3d")
+        if not os.path.isdir(package_root):
+            return []
+
+        issues = []
+        invalid_imports = []
+        for directory, directory_names, filenames in os.walk(root):
+            directory_names[:] = [name for name in directory_names if name not in {"__pycache__", ".pytest_cache"}]
+            for filename in filenames:
+                if not filename.endswith(".py"):
+                    continue
+                full_path = os.path.join(directory, filename)
+                try:
+                    with open(full_path, "r", encoding="utf-8") as source:
+                        content = source.read()
+                except (OSError, UnicodeError):
+                    continue
+                if re.search(r"(?:from|import)\s+src\.avatar3d\b", content):
+                    invalid_imports.append(os.path.relpath(full_path, root).replace(os.sep, "/"))
+        if invalid_imports:
+            issues.append(
+                "replace src.avatar3d imports with the single canonical avatar3d package identity in: "
+                + ", ".join(sorted(invalid_imports)[:20])
+            )
+
+        pytest_path = os.path.join(root, "pytest.ini")
+        if os.path.isfile(pytest_path):
+            try:
+                with open(pytest_path, "r", encoding="utf-8") as config_file:
+                    pytest_config = config_file.read()
+                if re.search(r"(?m)^\s*python_paths\s*=", pytest_config):
+                    issues.append("replace unsupported pytest.ini option python_paths with pythonpath")
+            except (OSError, UnicodeError):
+                pass
+        return issues
+
+    @staticmethod
+    def _strip_code_fence(content: str, path: str = "") -> str:
+        text = str(content or "").strip()
+        suffix = os.path.splitext(path)[1].lower()
+        if suffix != ".md" and "```" in text:
+            fenced = re.findall(r"```[^\r\n]*\r?\n(.*?)\r?\n```", text, flags=re.DOTALL)
+            if fenced:
+                text = max(fenced, key=len).strip()
+        elif text.startswith("```"):
+            first_newline = text.find("\n")
+            if first_newline >= 0:
+                text = text[first_newline + 1:]
+            if text.rstrip().endswith("```"):
+                text = text.rstrip()[:-3]
+        lines = text.strip().splitlines()
+        if lines and path and lines[0].strip().replace(chr(92), "/") == path.replace(chr(92), "/"):
+            lines.pop(0)
+        return "\n".join(lines).strip() + "\n"
+
+    def _source_contract_summary(self, execution_id: str) -> str:
+        filesystem = self.get_capability("filesystem")
+        if not filesystem or not hasattr(filesystem, "_get_workspace_for_execution"):
+            return ""
+        root = filesystem._get_workspace_for_execution(execution_id)
+        summaries = []
+        source_root = os.path.join(root, "src")
+        if not os.path.isdir(source_root):
+            return ""
+        for directory, _, filenames in os.walk(source_root):
+            for filename in sorted(filenames):
+                if not filename.endswith(".py"):
+                    continue
+                full_path = os.path.join(directory, filename)
+                relative = os.path.relpath(full_path, root).replace(os.sep, "/")
+                try:
+                    with open(full_path, "r", encoding="utf-8") as source_file:
+                        tree = ast.parse(source_file.read())
+                except (OSError, UnicodeError, SyntaxError):
+                    continue
+                def signature(node):
+                    positional = list(node.args.posonlyargs) + list(node.args.args)
+                    defaults = [None] * (len(positional) - len(node.args.defaults)) + list(node.args.defaults)
+                    parameters = []
+                    for argument, default in zip(positional, defaults):
+                        parameter = argument.arg
+                        if default is not None:
+                            parameter += "=" + ast.unparse(default)[:80]
+                        parameters.append(parameter)
+                    if node.args.vararg:
+                        parameters.append("*" + node.args.vararg.arg)
+                    elif node.args.kwonlyargs:
+                        parameters.append("*")
+                    for argument, default in zip(node.args.kwonlyargs, node.args.kw_defaults):
+                        parameter = argument.arg
+                        if default is not None:
+                            parameter += "=" + ast.unparse(default)[:80]
+                        parameters.append(parameter)
+                    if node.args.kwarg:
+                        parameters.append("**" + node.args.kwarg.arg)
+                    return node.name + "(" + ", ".join(parameters) + ")"
+
+                entries = []
+                for node in tree.body:
+                    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        entries.append("function " + signature(node))
+                    elif isinstance(node, ast.ClassDef):
+                        methods = [signature(child) for child in node.body
+                                   if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)) and not child.name.startswith("__")]
+                        entries.append("class " + node.name + " methods=" + ",".join(methods[:20]))
+                summaries.append(relative + ": " + "; ".join(entries))
+        return "\n".join(summaries)[:6000]
+
+    @staticmethod
+    def _rescue_content_issues(path: str, content: str) -> List[str]:
+        issues = []
+        suffix = os.path.splitext(path)[1].lower()
+        if suffix == ".py":
+            try:
+                ast.parse(content)
+            except SyntaxError as exc:
+                issues.append(f"invalid Python syntax at line {exc.lineno}: {exc.msg}")
+        normalized_path = path.replace(chr(92), "/").lower()
+        if normalized_path.startswith("tests/") or "/tests/" in normalized_path:
+            lower = content.lower()
+            if not re.search(r"(?:from|import)\s+avatar3d", lower):
+                issues.append("tests do not import the actual avatar3d implementation")
+            if re.search(r"(?:from|import)\s+src\.avatar3d", lower):
+                issues.append("tests import src.avatar3d instead of the canonical avatar3d package")
+            if any(marker in lower for marker in ("mockmesh", "magicmock", "unittest.mock", "# mocking", "np.random")):
+                issues.append("tests contain mocks, replicated implementation, or random data")
+            if "def test_" not in lower:
+                issues.append("test file contains no pytest test function")
+        if any(name in normalized_path for name in ("face.py", "body.py", "garment.py", "geometry.py", "fitting.py")):
+            if re.search(r"\b(?:np\.random|numpy\.random|random\.random|random\.randint)\b", content):
+                issues.append("geometry implementation uses random output")
+        return issues
+
+    async def _rescue_missing_artifacts(self, execution_id: str, step: Dict[str, Any],
+                                        prerequisite_outputs: List[Dict[str, Any]]) -> List[str]:
+        """Use a clean, concise LLM context when a tool loop stalls before creating files."""
+        state = self.state_engine.get_execution(execution_id)
+        missing = self._missing_artifacts(execution_id, step)
+        text_suffixes = {".py", ".md", ".txt", ".json", ".html", ".css", ".js",
+                         ".toml", ".yaml", ".yml", ".bat", ".ps1", ".sh"}
+        candidates = [path for path in missing if os.path.splitext(path)[1].lower() in text_suffixes][:4]
+        contracts = self._source_contract_summary(execution_id)
+        rescued = []
+        for path in candidates:
+            rescue_messages = [
+                {"role": "system", "content": (
+                    "You are GPTMOSS's artifact rescue engineer. Return only the complete raw file content requested: "
+                    "no markdown fence, no explanation, no placeholder, no TODO. The file must be runnable, dependency-light, "
+                    "deterministic, and honest about unavailable external models."
+                )},
+                {"role": "user", "content": (
+                    f"Main outcome: {state.variables.get('parent_task', state.variables.get('task', ''))}\n"
+                    f"Specialist: {step.get('specialist', state.variables.get('role_name', ''))}\n"
+                    f"Assignment: {step.get('description', '')}\n"
+                    f"Expertise: {json.dumps(step.get('expertise', []), ensure_ascii=False)}\n"
+                    f"Acceptance criteria: {json.dumps(step.get('acceptance_criteria', []), ensure_ascii=False)}\n"
+                    f"All required files: {json.dumps(step.get('required_artifacts', []), ensure_ascii=False)}\n"
+                    f"Generate this missing file now: {path}\n"
+                    f"Actual neighboring source contracts (import and test these; do not replicate or mock them):\n{contracts}\n"
+                    f"Prerequisite delivery summaries:\n{json.dumps(prerequisite_outputs, ensure_ascii=False)[:3000]}\n"
+                    "It must integrate with the stated neighboring modules through clear contracts."
+                )},
+            ]
+            content = ""
+            for attempt in range(2):
+                await self.event_bus.publish(Event(
+                    type="ArtifactRescueRequested",
+                    payload={"execution_id": execution_id, "path": path, "attempt": attempt + 1},
+                ))
+                response = await self._completion_with_recovery(
+                    execution_id, messages=rescue_messages, temperature=0.1,
+                )
+                content = self._strip_code_fence(response.get("content", ""), path)
+                content_issues = self._rescue_content_issues(path, content)
+                if len(content.strip()) >= 20 and not content_issues:
+                    break
+                content = ""
+                rescue_messages.append({
+                    "role": "user",
+                    "content": "Regenerate the complete file. Previous output was rejected: " + "; ".join(content_issues or ["content was empty or too short"]),
+                })
+            if not content:
+                continue
+            policy = await self.policy_provider.check_action(
+                execution_id=execution_id, capability="filesystem", action="write",
+                arguments={"path": path, "content": content}, context={"artifact_rescue": True},
+            )
+            if policy.decision != "allow":
+                continue
+            result = await self._call_tool(execution_id, "filesystem", "write", {"path": path, "content": content})
+            self._record_tool_result(execution_id, "filesystem", "write", {"path": path}, result)
+            if self._artifact_exists(execution_id, path):
+                rescued.append(path)
+                await self.event_bus.publish(Event(
+                    type="ArtifactRescued", payload={"execution_id": execution_id, "path": path},
+                ))
+        return rescued
+
+    @staticmethod
+    def _is_structured_delivery(response: str) -> bool:
+        text = str(response or "").strip()
+        candidates = [text]
+        first, last = text.find("{"), text.rfind("}")
+        if first >= 0 and last > first:
+            candidates.append(text[first:last + 1])
+        for candidate in candidates:
+            try:
+                parsed = json.loads(candidate)
+            except (TypeError, ValueError):
+                continue
+            if isinstance(parsed, dict) and all(
+                key in parsed for key in ("summary", "artifacts", "evidence", "risks", "next_action")
+            ):
+                return True
+        return False
+
+    def _step_completion_issues(self, execution_id: str, step: Dict[str, Any], response: str) -> List[str]:
+        """Evaluate machine-checkable delivery gates before accepting prose as completion."""
+        issues = []
+        quality_contract = bool(
+            step.get("specialist") or step.get("required_artifacts")
+            or step.get("acceptance_criteria") or step.get("verification_commands")
+        )
+        role_key = canonical_step_role(step.get("role")) or infer_step_role(step.get("description", ""))
+        if quality_contract and role_key != "coordinator" and not self._is_structured_delivery(response):
+            issues.append("return the required structured JSON delivery contract")
+
+        missing = [path for path in step.get("required_artifacts", [])
+                   if not self._artifact_exists(execution_id, path)]
+        if missing:
+            issues.append("create non-empty required artifacts: " + ", ".join(missing))
+
+        if role_key in {"qa", "debugger", "coordinator"}:
+            fake_packages = self._fake_dependency_packages(execution_id)
+            if fake_packages:
+                issues.append(
+                    "remove local packages impersonating third-party dependencies and use real code contracts: "
+                    + ", ".join(fake_packages)
+                )
+            issues.extend(self._integration_contract_issues(execution_id))
+
+        if step.get("verification_commands"):
+            history = self.state_engine.get_execution(execution_id).variables.get("tool_call_history", [])
+            missing_commands = []
+            for command in step["verification_commands"]:
+                matched = any(
+                    item.get("capability") == "shell" and item.get("action") == "execute"
+                    and str(item.get("arguments", {}).get("command") or "").strip() == command.strip()
+                    and "EXIT_CODE: 0" in str(item.get("result") or "")
+                    for item in history
+                )
+                if not matched:
+                    missing_commands.append(command)
+            if missing_commands:
+                issues.append("run declared verification command(s) successfully: " + ", ".join(missing_commands))
+        return issues
+
+    def _record_tool_result(self, execution_id: str, capability: str, action: str,
+                            arguments: Dict[str, Any], result: str) -> None:
+        state = self.state_engine.get_execution(execution_id)
+        state.variables.setdefault("tool_call_history", []).append({
+            "capability": capability.lower(), "action": action.lower(),
+            "arguments": dict(arguments), "result": str(result),
+        })
+
+    def _can_engine_finalize(self, execution_id: str, step: Dict[str, Any]) -> bool:
+        """Detect converged work even when a model keeps calling tools or formats its finale badly."""
+        role_key = canonical_step_role(step.get("role")) or infer_step_role(step.get("description", ""))
+        if role_key == "coordinator":
+            return False
+        valid_contract = json.dumps({
+            "summary": "checked", "artifacts": [], "evidence": [], "risks": [], "next_action": "",
+        })
+        if self._step_completion_issues(execution_id, step, valid_contract):
+            return False
+        if role_key in {"developer", "qa", "debugger"}:
+            history = self.state_engine.get_execution(execution_id).variables.get("tool_call_history", [])
+            shell_results = [item for item in history
+                             if item.get("capability") == "shell" and item.get("action") == "execute"]
+            if not shell_results or "EXIT_CODE: 0" not in str(shell_results[-1].get("result") or ""):
+                return False
+        return True
+
+    def _engine_delivery(self, execution_id: str, step: Dict[str, Any]) -> str:
+        state = self.state_engine.get_execution(execution_id)
+        artifacts = list(step.get("required_artifacts", []))
+        evidence = [f"verified non-empty artifact: {path}" for path in artifacts]
+        for item in state.variables.get("tool_call_history", []):
+            if item.get("capability") == "shell" and "EXIT_CODE: 0" in str(item.get("result") or ""):
+                evidence.append(
+                    "EXIT_CODE: 0 for " + str(item.get("arguments", {}).get("command") or "shell command")
+                )
+        return json.dumps({
+            "summary": "GPTMOSS verified the specialist's converged workspace delivery after tool execution.",
+            "artifacts": artifacts, "evidence": evidence[-8:],
+            "risks": ["The specialist did not return a clean final contract; GPTMOSS synthesized it from machine evidence."],
+            "next_action": "Validate this delivery in its dependent integration and acceptance steps.",
+        }, ensure_ascii=False)
 
     async def execute_task(self, execution_id: str, task: str):
         """Run an execution once, even if resume/reconnect schedules it repeatedly."""
@@ -270,6 +733,7 @@ class ExecutionEngine:
             plan_result = await self.planner.plan(
                 task, context, schemas,
                 parent_execution_id=state.variables.get("parent_execution_id"),
+                delegated_step=state.variables.get("delegated_step"),
             )
             plan_result = normalize_plan(plan_result)
             self.telemetry.record("plan_generated", execution_id, duration_ms=round((time.perf_counter() - planning_started) * 1000, 2), steps=len(plan_result.get("steps", [])))
@@ -292,6 +756,7 @@ class ExecutionEngine:
         running_tasks = {}
         
         async def run_step(step):
+            sub_id = None
             step["status"] = "running"
             step_index = steps.index(step)
             await self.event_bus.publish(Event(
@@ -301,7 +766,8 @@ class ExecutionEngine:
             
             try:
                 role_key = canonical_step_role(step.get("role")) or infer_step_role(step.get("description", ""))
-                role_name = ROLE_DISPLAY_NAMES.get(role_key) if role_key else None
+                generic_role_name = ROLE_DISPLAY_NAMES.get(role_key) if role_key else None
+                role_name = step.get("specialist") or generic_role_name
                 is_sub_agent = state.variables.get("parent_execution_id") is not None
                 
                 if role_name and role_key != "coordinator" and not is_sub_agent:
@@ -325,6 +791,12 @@ class ExecutionEngine:
                     if len(handoff) > 8_000:
                         handoff = handoff[:8_000] + "\n… [dependency handoff truncated]"
                     sub_task = step["description"]
+                    if step.get("retry_context"):
+                        sub_task += (
+                            "\n\nAUTONOMOUS RETRY: A previous specialist attempt did not satisfy its delivery gates. "
+                            "Inspect and reuse any valid partial artifacts, correct the root cause, and complete the assignment. "
+                            + str(step["retry_context"])
+                        )
                     if dependency_results:
                         sub_task += (
                             "\n\nValidated outputs from prerequisite steps are provided below. "
@@ -336,16 +808,25 @@ class ExecutionEngine:
                         sub_exec.status = "pending"
                     sub_exec.variables["role_name"] = role_name
                     sub_exec.variables["role_key"] = role_key
+                    sub_exec.variables["generic_role_name"] = generic_role_name
                     sub_exec.variables["parent_execution_id"] = execution_id
                     sub_exec.variables["project_id"] = state.variables.get("project_id", "proj-default")
                     sub_exec.variables["parent_task"] = state.variables.get("parent_task") or task
                     sub_exec.variables["task"] = sub_exec.variables.get("task") or sub_task
                     sub_exec.variables["plan_step_id"] = step.get("id")
                     sub_exec.variables["dependency_results"] = dependency_results
+                    sub_exec.variables["specialist"] = step.get("specialist") or role_name
+                    sub_exec.variables["expertise"] = list(step.get("expertise", []))
+                    sub_exec.variables["delegated_step"] = {
+                        key: value for key, value in step.items()
+                        if key not in {"id", "dependencies", "status", "assigned_execution_id", "delivery", "result", "error"}
+                    }
                     sub_exec.variables["attachment_ids"] = state.variables.get("attachment_ids", [])
                     sub_exec.variables["agent_config"] = {
-                        "system_prompt": f"You are the specialized {role_name} for this project.",
+                        "system_prompt": f"You are the {role_name}, a domain specialist accountable for verified delivery.",
                         "role_name": role_name,
+                        "role_key": role_key,
+                        "expertise": list(step.get("expertise", [])),
                     }
                     if state.variables.get("project_path"):
                         sub_exec.variables["project_path"] = state.variables["project_path"]
@@ -358,6 +839,7 @@ class ExecutionEngine:
                                 "parent_execution_id": execution_id,
                                 "plan_step_id": step.get("id"),
                                 "role": role_key,
+                                "specialist": role_name,
                                 "task": sub_exec.variables["task"],
                                 "agent_id": "default_agent"
                             }
@@ -416,6 +898,10 @@ class ExecutionEngine:
                 else:
                     # Execute step loop locally
                     result = await self._execute_step_loop(execution_id, step)
+                    if state.variables.get("parent_execution_id") and role_key != "coordinator":
+                        delivery = self._structured_delivery(result)
+                        state.variables["delivery"] = delivery
+                        step["delivery"] = delivery
                 
                 # If the step execution suspended (e.g. paused for approval), reset to pending
                 parent_state = self.state_engine.get_execution(execution_id)
@@ -439,7 +925,45 @@ class ExecutionEngine:
                 ))
                 return "completed"
                 
+            except asyncio.CancelledError:
+                if sub_id:
+                    child = self.state_engine.get_execution(sub_id)
+                    if child.status in ("pending", "running", "paused"):
+                        child.status = "cancelled"
+                step["status"] = "pending" if state.status == "paused" else "cancelled"
+                raise
             except Exception as e:
+                retry_count = int(step.get("retry_count", 0))
+                if sub_id and retry_count < self.max_step_retries and state.status not in ("cancelled", "paused"):
+                    step["retry_count"] = retry_count + 1
+                    step.setdefault("failed_attempts", []).append({
+                        "execution_id": sub_id, "attempt": retry_count + 1, "error": str(e),
+                    })
+                    failed_child = self.state_engine.get_execution(sub_id)
+                    recent_failures = []
+                    for item in failed_child.variables.get("tool_call_history", [])[-8:]:
+                        result_text = str(item.get("result") or "")
+                        if ("EXIT_CODE: 0" not in result_text or "Error" in result_text
+                                or item.get("capability") == "shell"):
+                            recent_failures.append({
+                                "capability": item.get("capability"),
+                                "action": item.get("action"),
+                                "arguments": item.get("arguments"),
+                                "result": result_text[-3_000:],
+                            })
+                    step["retry_context"] = (
+                        f"Previous attempt {retry_count + 1} failed: {e}\n"
+                        "Recent machine evidence from that attempt (do not repeat the same failed action):\n"
+                        + json.dumps(recent_failures, ensure_ascii=False)[:8_000]
+                    )
+                    step.pop("assigned_execution_id", None)
+                    step["status"] = "pending"
+                    await self.event_bus.publish(Event(
+                        type="StepRetryScheduled",
+                        payload={"execution_id": execution_id, "step_index": step_index,
+                                 "attempt": retry_count + 2, "error": str(e)},
+                    ))
+                    return "retry"
                 step["status"] = "failed"
                 step["error"] = str(e)
                 await self.event_bus.publish(Event(
@@ -533,6 +1057,14 @@ class ExecutionEngine:
                     self.telemetry.record("execution_failed", execution_id, error=str(step_failure))
                     for t in running_tasks.values():
                         t.cancel()
+                    await asyncio.gather(*running_tasks.values(), return_exceptions=True)
+                    for child in self.state_engine.executions.values():
+                        if (child.variables.get("parent_execution_id") == execution_id
+                                and child.status in ("pending", "running", "paused")):
+                            child.status = "cancelled"
+                            await self.event_bus.publish(Event(
+                                type="ExecutionCancelled", payload={"execution_id": child.execution_id}
+                            ))
                     await self.event_bus.publish(Event(
                         type="ExecutionFailed",
                         payload={"execution_id": execution_id, "error": str(step_failure)}
@@ -553,7 +1085,12 @@ class ExecutionEngine:
         """
         state = self.state_engine.get_execution(execution_id)
         convo = self.state_engine.get_conversation(execution_id)
-        skills = self._active_skills(state, state.variables.get("parent_task") or step.get("description", ""))
+        expertise_query = " ".join([
+            str(state.variables.get("specialist") or step.get("specialist") or ""),
+            step.get("description", ""),
+            " ".join(state.variables.get("expertise") or step.get("expertise", [])),
+        ])
+        skills = self._active_skills(state, expertise_query)
         allowed_capabilities = self._allowed_capabilities(skills)
         
         step_desc = step.get("description", "")
@@ -587,9 +1124,36 @@ class ExecutionEngine:
             convo.messages.append({"role": "system", "content": f"Current Step objectives: {step_desc}.{reuse_instruction} Generate thought and select tools if needed.", "timestamp": time.time()})
 
         iteration = 0
+        stagnant_iterations = 0
+        previous_progress = self._progress_signature(execution_id, step)
 
-        while iteration < self.max_step_iterations:
-            if state.status in ("paused", "cancelled", "failed") and not state.variables.get("pending_approval", {}).get("decision"):
+        while True:
+            current_progress = self._progress_signature(execution_id, step)
+            if iteration:
+                if current_progress != previous_progress:
+                    stagnant_iterations = 0
+                    await self.event_bus.publish(Event(
+                        type="StepProgressDetected",
+                        payload={
+                            "execution_id": execution_id,
+                            "iteration": iteration,
+                            "remaining_stagnation_budget": self.max_step_iterations,
+                        },
+                    ))
+                else:
+                    stagnant_iterations += 1
+            previous_progress = current_progress
+            if self.continue_while_progress:
+                if stagnant_iterations >= self.max_step_iterations:
+                    break
+            elif iteration >= self.max_step_iterations:
+                break
+
+            if state.status == "cancelled":
+                raise asyncio.CancelledError()
+            if state.status == "failed":
+                raise RuntimeError("Execution state was marked failed.")
+            if state.status == "paused" and not state.variables.get("pending_approval", {}).get("decision"):
                 return f"Execution suspended with status: {state.status}."
             iteration += 1
 
@@ -617,6 +1181,10 @@ class ExecutionEngine:
                 else:
                     result_str = f"Execution blocked: human rejection. Reason: {pending_app.get('reason', 'None')}"
                 completed_tool_calls[tool_call_id] = result_str
+                self._record_tool_result(
+                    execution_id, pending_app["capability"], pending_app["action"],
+                    pending_app["arguments"], result_str,
+                )
 
                 convo.messages.append({
                     "role": "tool",
@@ -664,17 +1232,26 @@ class ExecutionEngine:
             llm_messages = []
             role_name = state.variables.get("role_name", "Coordinateur")
             role_key = state.variables.get("role_key") or canonical_step_role(role_name) or "coordinator"
+            specialist_name = state.variables.get("specialist") or step.get("specialist") or role_name
+            expertise = state.variables.get("expertise") or step.get("expertise", [])
             base_prompt = context.get("system_instructions", "")
+            environment = context.get("environment", {})
+            base_prompt += (
+                f"\n\nRuntime environment: operating_system={environment.get('operating_system')}, "
+                f"shell={environment.get('shell')}, path_separator={environment.get('path_separator')}. "
+                "Use commands compatible with this exact environment; do not use Unix utilities on Windows."
+            )
             if skills:
-                base_prompt += "\\n\\nActive skills:\\n" + "\\n\\n".join(
-                    f"[{skill.name}]\\n{skill.instructions}" for skill in skills
+                base_prompt += "\n\nActive skills:\n" + "\n\n".join(
+                    f"[{skill.name}]\n{skill.instructions}" for skill in skills
                 )
             
             if role_key == "architect":
                 specialized_prompt = (
                     "You are the Specialized Architect Agent.\n"
                     "Your role is to analyze software requirements, design specifications, and write technical specifications files (e.g. specs.md).\n"
-                    "Focus on clear system design, modular structures, and outlining detailed implementation plans for other sub-agents."
+                    "Focus on clear system design, modular structures, and detailed implementation plans for other sub-agents. "
+                    "Inventory dependencies against the offline runtime and design standard-library deterministic geometry when ML weights are unavailable."
                 )
             elif role_key == "security":
                 specialized_prompt = (
@@ -686,13 +1263,15 @@ class ExecutionEngine:
                 specialized_prompt = (
                     "You are the Specialized Developer/Coder Agent.\n"
                     "Your role is to write clean, high-quality, and fully functional source code.\n"
-                    "Avoid writing comments as placeholders; write actual implementation. Follow specs.md guidelines."
+                    "Avoid placeholders; write actual implementation. Do not create local packages that impersonate missing third-party "
+                    "dependencies such as numpy, torch, cv2, or trimesh. Use standard-library data structures or explicit optional adapters."
                 )
             elif role_key == "qa":
                 specialized_prompt = (
                     "You are the Specialized QA Testing Engineer.\n"
                     "Your role is to design and write robust unit tests (e.g. pytest tests) to verify the code correctness.\n"
-                    "Make sure you cover edge cases, input validation, and boundary conditions."
+                    "Import and exercise the actual project modules. Do not replace them with mocks, replicas, or random data. "
+                    "Cover edge cases, invariants, input validation, deterministic repeatability, and boundary conditions."
                 )
             elif role_key == "debugger":
                 specialized_prompt = (
@@ -709,13 +1288,35 @@ class ExecutionEngine:
 
             role_prompt = (base_prompt + "\n\n" + specialized_prompt).strip()
 
+            role_prompt += (
+                f"\n\nExact specialist assignment: {specialist_name}."
+                f"\nRequired expertise: {json.dumps(expertise, ensure_ascii=False)}."
+                f"\nRequired artifacts: {json.dumps(step.get('required_artifacts', []), ensure_ascii=False)}."
+                f"\nAcceptance criteria: {json.dumps(step.get('acceptance_criteria', []), ensure_ascii=False)}."
+                f"\nVerification commands: {json.dumps(step.get('verification_commands', []), ensure_ascii=False)}."
+                "\nAct autonomously inside the project workspace: inspect existing prerequisite artifacts, implement the assignment, "
+                "run relevant checks, diagnose failures, fix root causes, and rerun checks before finishing. Do not merely describe "
+                "what should be done. Do not redo validated dependency work. Never claim an artifact or successful test that you did not create or execute."
+                " Do not install dependencies online or create fake dependency packages inside the project."
+            )
+
             if role_key != "coordinator":
-                role_prompt += ("\\nWhen finished, return a JSON object with keys: summary, artifacts, evidence, risks, next_action. "
-                                "Use empty arrays or strings when a field does not apply.")
+                role_prompt += ("\nOnly after all declared gates pass, return one raw JSON object with keys: summary, artifacts, "
+                                "evidence, risks, next_action. artifacts and evidence must be arrays. Use empty arrays or strings "
+                                "when a field does not apply. Until then, keep using tools and correcting the workspace.")
+            if role_key in {"qa", "debugger"}:
+                source_contracts = self._source_contract_summary(execution_id)
+                if source_contracts:
+                    role_prompt += (
+                        "\n\nActual source contracts discovered from the workspace are listed below. Read the source files "
+                        "before writing assertions. Tests must call these real names and signatures; never invent a more "
+                        "convenient API. If existing tests contradict the source contract, correct the tests or the source "
+                        "according to the validated specification, then run the complete declared command.\n" + source_contracts
+                    )
             llm_messages.append({"role": "system", "content": role_prompt})
             for attachment in context.get("attachments", []):
                 if attachment.get("text") is not None:
-                    llm_messages.append({"role": "user", "content": f"Attached file {attachment['filename']}:\\n{attachment['text']}"})
+                    llm_messages.append({"role": "user", "content": f"Attached file {attachment['filename']}:\n{attachment['text']}"})
                 elif attachment.get("image_url"):
                     llm_messages.append({"role": "user", "content": [
                         {"type": "text", "text": f"Attached image: {attachment['filename']}"},
@@ -740,7 +1341,8 @@ class ExecutionEngine:
             ))
 
             llm_started = time.perf_counter()
-            llm_response = await self.llm_provider.completion(
+            llm_response = await self._completion_with_recovery(
+                execution_id,
                 messages=llm_messages,
                 tools=schemas if schemas else None
             )
@@ -764,6 +1366,20 @@ class ExecutionEngine:
             # Check for tool calls
             tool_calls = llm_response.get("tool_calls")
             if not tool_calls:
+                response_text = llm_response.get("content") or ""
+                completion_issues = self._step_completion_issues(execution_id, step, response_text)
+                if completion_issues:
+                    if self._can_engine_finalize(execution_id, step):
+                        return self._engine_delivery(execution_id, step)
+                    convo.messages.append({
+                        "role": "system",
+                        "content": (
+                            "Delivery rejected by automatic quality gates. Continue working autonomously with tools. "
+                            "Before finishing you must: " + "; ".join(completion_issues) + "."
+                        ),
+                        "timestamp": time.time(),
+                    })
+                    continue
                 # If this is the first iteration and no tools have been called yet,
                 # let's prompt the agent to perform actions if needed rather than early-exiting.
                 has_called_tools_in_step = any(msg.get("role") == "tool" for msg in convo.messages)
@@ -776,7 +1392,7 @@ class ExecutionEngine:
                     continue
                 else:
                     # No tools called. Step is completed. Return content as result
-                    return llm_response.get("content") or "Step completed without response text."
+                    return response_text or "Step completed without response text."
 
             # Process tool calls
             for tool_call in tool_calls:
@@ -791,6 +1407,8 @@ class ExecutionEngine:
                         args = {}
                 if not isinstance(args, dict):
                     args = {}
+                while len(args) == 1 and isinstance(args.get("arguments"), dict):
+                    args = args["arguments"]
                 if not tool_id:
                     tool_id = f"anonymous-{iteration}-{len(state.variables.setdefault('completed_tool_calls', {}))}"
 
@@ -813,6 +1431,7 @@ class ExecutionEngine:
                 else:
                     cap_name = full_name
                     act_name = ""
+                args = self._normalize_tool_arguments(cap_name, act_name, args)
 
                 # Evaluate policy
                 policy_desc = await self.policy_provider.check_action(
@@ -878,6 +1497,7 @@ class ExecutionEngine:
                     # 'allow' -> Execute the capability
                     result_str = await self._call_tool(execution_id, cap_name, act_name, args)
                     completed_tool_calls[tool_id] = result_str
+                    self._record_tool_result(execution_id, cap_name, act_name, args, result_str)
                     convo.messages.append({
                         "role": "tool",
                         "tool_call_id": tool_id,
@@ -890,7 +1510,50 @@ class ExecutionEngine:
                         payload={"execution_id": execution_id, "tool_call_id": tool_id, "result": result_str}
                     ))
 
-        return "Reached maximum step iterations."
+            tool_history = state.variables.get("tool_call_history", [])
+            if (self._missing_artifacts(execution_id, step) and len(tool_history) >= 8
+                    and not state.variables.get("artifact_rescue_attempted")):
+                state.variables["artifact_rescue_attempted"] = True
+                rescued = await self._rescue_missing_artifacts(
+                    execution_id, step, prerequisite_outputs,
+                )
+                if rescued:
+                    convo.messages.append({
+                        "role": "system",
+                        "content": (
+                            "Stall recovery created missing artifact(s): " + ", ".join(rescued) + ". "
+                            "Inspect them, correct integration or syntax defects, run relevant checks, then deliver."
+                        ),
+                        "timestamp": time.time(),
+                    })
+
+            if self._can_engine_finalize(execution_id, step):
+                nudges = int(state.variables.get("delivery_nudges", 0)) + 1
+                state.variables["delivery_nudges"] = nudges
+                if nudges >= 2:
+                    return self._engine_delivery(execution_id, step)
+                convo.messages.append({
+                    "role": "system",
+                    "content": (
+                        "Machine-checkable delivery gates now pass. Stop calling tools and return only the compact raw JSON "
+                        "delivery contract immediately. Dependent QA/integration agents will perform broader validation."
+                    ),
+                    "timestamp": time.time(),
+                })
+            else:
+                state.variables["delivery_nudges"] = 0
+
+        if self._can_engine_finalize(execution_id, step):
+            return self._engine_delivery(execution_id, step)
+        raise RuntimeError(
+            (
+                f"Step '{step_desc}' did not satisfy its delivery gates after "
+                f"{self.max_step_iterations} consecutive stagnant iterations."
+                if self.continue_while_progress else
+                f"Step '{step_desc}' did not satisfy its delivery gates within "
+                f"{self.max_step_iterations} iterations."
+            )
+        )
 
     async def _call_tool(self, execution_id: str, capability: str, action: str, arguments: Dict[str, Any]) -> str:
         """Helper to invoke the registered capability class method."""
@@ -911,6 +1574,16 @@ class ExecutionEngine:
             
             sig = inspect.signature(bound_method)
             kwargs = dict(arguments)
+            missing_arguments = [
+                name for name, parameter in sig.parameters.items()
+                if name != "context" and parameter.default is inspect.Parameter.empty
+                and name not in kwargs
+            ]
+            if missing_arguments:
+                return (
+                    f"Error: Invalid arguments for {capability}.{action}; missing required "
+                    f"argument(s): {', '.join(missing_arguments)}. Correct the tool call and retry."
+                )
             if "context" in sig.parameters:
                 # Compile context to pass along
                 context = await self.context_engine.compile_context(
