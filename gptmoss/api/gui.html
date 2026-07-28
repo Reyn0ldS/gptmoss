@@ -230,6 +230,7 @@
         .badge.completed { background-color: rgba(52, 211, 153, 0.15); color: var(--status-completed); }
         .badge.failed { background-color: rgba(248, 113, 113, 0.15); color: var(--status-failed); }
         .badge.paused { background-color: rgba(251, 191, 36, 0.15); color: var(--status-paused); }
+        .badge.waiting_provider { background-color: rgba(251, 191, 36, 0.15); color: var(--status-paused); }
         .badge.cancelled { background-color: rgba(156, 163, 175, 0.15); color: var(--text-muted); }
 
         .card-title {
@@ -1127,7 +1128,7 @@
             <div class="approval-banner" id="approval-banner" style="display: none;">
                 <div class="approval-title-row">
                     <span class="approval-icon">⚠️</span>
-                    <span class="approval-title">Autorisation requise pour l'action</span>
+                    <span class="approval-title" id="approval-title">Autorisation requise pour l'action</span>
                 </div>
                 <div class="approval-details">
                     <span class="details-label">Capacité :</span>
@@ -1147,8 +1148,8 @@
                     <input type="text" class="approval-reason-input" id="approval-reason" placeholder="Raison de la décision (facultatif)">
                 </div>
                 <div class="approval-buttons">
-                    <button class="btn-approval allow" onclick="submitApprovalDecision(true)">Autoriser l'action</button>
-                    <button class="btn-approval reject" onclick="submitApprovalDecision(false)">Refuser</button>
+                    <button class="btn-approval allow" id="approval-allow" onclick="submitApprovalDecision(true)">Autoriser l'action</button>
+                    <button class="btn-approval reject" id="approval-reject" onclick="submitApprovalDecision(false)">Refuser</button>
                 </div>
             </div>
 
@@ -1669,17 +1670,28 @@
                 const btnDelete = document.getElementById("btn-delete");
                 
                 btnPause.style.display = exec.status === "running" ? "block" : "none";
-                btnResume.style.display = (exec.status === "paused" && !exec.variables?.pending_approval) ? "block" : "none";
-                btnCancel.style.display = (exec.status === "running" || exec.status === "paused" || exec.status === "pending") ? "block" : "none";
+                btnResume.style.display = ((exec.status === "paused" && !exec.variables?.pending_approval && !exec.variables?.pending_scope_approval) || exec.status === "waiting_provider") ? "block" : "none";
+                btnCancel.style.display = (["running", "paused", "pending", "waiting_provider"].includes(exec.status)) ? "block" : "none";
                 btnDelete.style.display = "block";
 
                 // 2. Approval Request details
                 const approvalBanner = document.getElementById("approval-banner");
-                if (exec.status === "paused" && exec.variables?.pending_approval) {
-                    const pending = exec.variables.pending_approval;
+                const pendingScope = exec.variables?.pending_scope_approval;
+                if (exec.status === "paused" && (exec.variables?.pending_approval || pendingScope)) {
+                    const pending = exec.variables.pending_approval || {};
+                    const isScope = Boolean(pendingScope);
+                    document.getElementById("approval-title").textContent = isScope ? "Approbation requise pour une réduction de périmètre" : "Autorisation requise pour l'action";
+                    document.getElementById("approval-allow").textContent = isScope ? "Accepter ce périmètre" : "Autoriser l'action";
+                    document.getElementById("approval-reject").textContent = isScope ? "Refuser la réduction" : "Refuser";
                     document.getElementById("approval-capability").textContent = pending.capability || "-";
                     document.getElementById("approval-action").textContent = pending.action || "-";
-                    document.getElementById("approval-args").textContent = JSON.stringify(pending.arguments || {});
+                    if (isScope) {
+                        document.getElementById("approval-capability").textContent = "Contrat de livraison";
+                        document.getElementById("approval-action").textContent = "Modification du besoin utilisateur";
+                        document.getElementById("approval-args").textContent = (pendingScope.changes || []).map(change => `${change.id}: ${change.statement}`).join("\n");
+                    } else {
+                        document.getElementById("approval-args").textContent = JSON.stringify(pending.arguments || {});
+                    }
                     
                     // Show preview container if there's interesting content
                     const previewContainer = document.getElementById("approval-preview-container");
@@ -1833,6 +1845,18 @@
                 // 4. Plan Steps Checklist
                 const planSteps = document.getElementById("plan-steps");
                 planSteps.innerHTML = "";
+
+                const deliveryContract = exec.variables?.delivery_contract;
+                const assurance = exec.results?.delivery_assurance;
+                if (deliveryContract) {
+                    const covered = (deliveryContract.traceability || []).filter(row => row.implementation_steps?.length && row.validation_steps?.length).length;
+                    const total = (deliveryContract.traceability || []).length;
+                    const contractDiv = document.createElement("div");
+                    const assuranceLabel = assurance ? (assurance.passed ? "audit indépendant réussi" : "audit indépendant en échec") : "audit indépendant à venir";
+                    contractDiv.className = "step-item";
+                    contractDiv.innerHTML = `<div class="step-content"><div class="step-desc"><b>Contrat de livraison</b></div><div style="font-size:11px;color:var(--text-muted);margin-top:5px;">Exigences tracées : ${covered}/${total}<br>${escapeHTML(assuranceLabel)}<br>Contrat : ${escapeHTML((deliveryContract.contract_sha256 || "").slice(0, 12))}</div></div>`;
+                    planSteps.appendChild(contractDiv);
+                }
                 
                 if (exec.plan && exec.plan.steps) {
                     exec.plan.steps.forEach((step, idx) => {
@@ -1849,6 +1873,9 @@
                         const specialistHtml = step.specialist
                             ? `<span style="font-size:10px;color:var(--accent-primary);background:rgba(99,102,241,.12);padding:2px 6px;border-radius:4px;font-weight:600;">${escapeHTML(step.specialist)}</span>`
                             : "";
+                        const requirementsHtml = (step.requirement_ids || []).length
+                            ? `<span style="font-size:10px;color:var(--status-completed);">${escapeHTML(step.requirement_ids.join(", "))}</span>`
+                            : "";
                         let depsHtml = "";
                         if (step.dependencies && step.dependencies.length > 0) {
                             const depLabels = step.dependencies.map(depId => {
@@ -1864,6 +1891,7 @@
                                 <div class="step-desc" style="display: flex; align-items: center; flex-wrap: wrap; gap: 6px;">
                                     <span>${escapeHTML(step.description || 'Étape sans description')}</span>
                                     ${specialistHtml}
+                                    ${requirementsHtml}
                                     ${depsHtml}
                                 </div>
                                 ${resultHtml}

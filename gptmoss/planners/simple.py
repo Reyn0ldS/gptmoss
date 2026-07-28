@@ -23,15 +23,40 @@ DOMAIN_MARKERS = {
     "offline-delivery": ("hors-ligne", "hors ligne", "offline", "portable", "autonome"),
 }
 
+# Correct Unicode spellings coexist with historical mojibake strings so old
+# persisted prompts remain classifiable while new UTF-8 requests stay exact.
+DOMAIN_MARKERS["machine-learning"] += ("modèle", "inférence")
+DOMAIN_MARKERS["digital-garments"] += ("vêtement", "vêtements")
+
+
+def _contains_domain_marker_legacy(text: str, marker: str) -> bool:
+    return bool(re.search(
+        rf"(?<![\wÀ-ÿ]){re.escape(marker)}(?![\wÀ-ÿ])",
+        text,
+        flags=re.IGNORECASE,
+    ))
+
+
+def _contains_domain_marker(text: str, marker: str) -> bool:
+    return bool(re.search(rf"(?<!\w){re.escape(marker)}(?!\w)", text, flags=re.IGNORECASE))
+
 
 def analyze_task_complexity(task: str) -> Dict[str, Any]:
     """Return deterministic hints so the LLM cannot silently trivialize a task."""
     text = str(task or "").lower()
-    domains = [domain for domain, markers in DOMAIN_MARKERS.items() if any(marker in text for marker in markers)]
+    domains = [
+        domain for domain, markers in DOMAIN_MARKERS.items()
+        if any(_contains_domain_marker(text, marker) for marker in markers)
+    ]
     requested_outcomes = len(re.findall(
         r"\b(?:doit|devra|pouvoir|créer|creer|faire|importer|extrapoler|intégrer|integrer|"
         r"must|should|create|build|implement|support|import)\b", text,
     ))
+    if "software-engineering" in domains:
+        requested_outcomes = max(
+            requested_outcomes,
+            min(5, len(re.findall(r"[,;]", text)) + 1),
+        )
     score = len(domains) * 2 + min(requested_outcomes, 5)
     score += 2 if len(text) > 300 else 1 if len(text) > 140 else 0
     if score >= 14:
@@ -52,7 +77,8 @@ def _step(step_id: int, role: str, specialist: str, description: str,
     return {"id": step_id, "role": role, "specialist": specialist, "description": description,
             "dependencies": dependencies, "expertise": expertise,
             "required_artifacts": required_artifacts, "acceptance_criteria": acceptance_criteria,
-            "verification_commands": verification_commands or [], "status": "pending"}
+            "verification_commands": verification_commands or [], "requirement_ids": [],
+            "owned_paths": list(required_artifacts), "status": "pending"}
 
 
 class SimplePlanner(PlannerProvider):
@@ -142,12 +168,16 @@ class SimplePlanner(PlannerProvider):
                 _step(0, "architect", "Requirements & Feasibility Analyst", "Analyze requirements, constraints, assumptions, risks, and acceptance criteria.", [], ["requirements engineering"], ["specs/requirements.md"], ["Requested outcomes are testable."]),
                 _step(1, "architect", "Solution Architect", "Design modules, interfaces, data flow, dependencies, and delivery strategy.", [0], ["software architecture", *sorted(domains)], ["specs/architecture.md"], ["Architecture covers every requirement."]),
                 _step(2, "security", "Security & Privacy Reviewer", "Review the design and specify concrete security and privacy mitigations.", [0, 1], ["threat modeling", "privacy"], ["specs/security.md"], ["Risks have actionable controls."]),
-                _step(3, "developer", "Core Implementation Engineer", "Implement the complete runnable core from validated specifications.", [1, 2], ["implementation", *sorted(domains)], [], ["Core behavior has no placeholders."]),
-                _step(4, "developer", "Integration Engineer", "Integrate components and expose the requested user-facing workflows.", [3], ["systems integration"], [], ["Requested workflows run end to end."]),
-                _step(5, "qa", "Test & Acceptance Engineer", "Create and run unit, edge-case, integration, and acceptance tests.", [4], ["test engineering"], ["tests/test_acceptance.py"], ["Complete tests exit successfully."], ["python -m pytest -q"]),
-                _step(6, "debugger", "Autonomous Repair Engineer", "Fix root causes and rerun the complete validation suite.", [5], ["debugging", "root-cause analysis"], [], ["Complete tests exit with code 0."], ["python -m pytest -q"]),
-                _step(7, "writer", "Technical Documentation Writer", "Document installation, use, architecture, tests, limitations, and maintenance.", [4, 5], ["technical writing"], ["README.md"], ["Documentation matches actual behavior."]),
-                _step(8, "coordinator", "Final Delivery Auditor", "Audit requirements against artifacts and evidence and report honestly.", [6, 7], ["delivery audit"], [], ["No unsupported completion claim."]),
+                _step(3, "developer", "Domain Model & Persistence Engineer", "Implement validated domain models, persistence boundaries, recovery behavior, and core invariants without placeholders.", [1, 2], ["domain modeling", "persistence", *sorted(domains)], [], ["State and domain behavior satisfy validated invariants."]),
+                _step(4, "developer", "Core Workflow Engineer", "Implement the complete runnable business workflows from specifications, reusing the domain contracts.", [1, 2, 3], ["implementation", "workflow engineering", *sorted(domains)], [], ["Core workflows execute real behavior without mock substitution."]),
+                _step(5, "developer", "Interface & Automation Engineer", "Expose the requested CLI, API, UI, import/export, and automation entry points that apply to the request.", [1, 4], ["API design", "CLI design", "user journeys"], [], ["Every requested user-facing workflow has a runnable entry point."]),
+                _step(6, "developer", "Cross-Component Integration Engineer", "Integrate components, verify producer/consumer signatures and data shapes, and remove duplicate or disconnected implementations.", [3, 4, 5], ["systems integration", "interface contracts"], [], ["Requested workflows use one coherent implementation end to end."]),
+                _step(7, "qa", "Independent Contract Test Engineer", "Create independent unit, boundary, import, and interface contract tests against actual public modules, then collect them without changing implementation.", [3, 4, 5], ["test engineering", "contract testing"], ["tests/test_acceptance.py"], ["Tests import and exercise real public modules."], ["python -m pytest --collect-only -q"]),
+                _step(8, "debugger", "Autonomous Unit & Integration Repair Engineer", "Run the complete suite, inspect concrete failures, repair root causes across integrated components, and rerun until green.", [6, 7], ["debugging", "root-cause analysis"], [], ["Complete unit and integration suite exits with code 0."], ["python -m pytest -q"]),
+                _step(9, "qa", "Clean-Process End-to-End Acceptance Engineer", "Create and run real CLI/API/UI smoke journeys from a fresh process with local fixtures; verify outputs instead of mocked replicas.", [8], ["end-to-end testing", "process isolation", "artifact validation"], ["tests/test_end_to_end.py"], ["Requested user journeys run through public entry points."], ["python -m pytest -q"]),
+                _step(10, "debugger", "Final Autonomous Acceptance Repair Engineer", "Repair only defects exposed by end-to-end acceptance and rerun all validations without repeating completed feature work.", [9], ["acceptance debugging", "regression repair"], [], ["Complete suite exits with code 0 after final repair."], ["python -m pytest -q"]),
+                _step(11, "writer", "Technical Documentation & Operations Writer", "Document installation, offline operation, launch commands, use, architecture, tests, recovery, limitations, and maintenance from actual evidence.", [5, 9], ["technical writing", "operations"], ["README.md"], ["Documentation matches runnable behavior and exact limitations."]),
+                _step(12, "coordinator", "Final Requirement Traceability Auditor", "Audit every mandatory requirement against implementation artifacts, independent validation, launch evidence, limitations, and approved scope changes.", [10, 11], ["delivery audit", "traceability"], [], ["No unsupported completion claim and no unmapped mandatory requirement."]),
             ]
             return {"analysis": analysis, "steps": steps, "rationale": "Adaptive deterministic software fallback."}
         return {"analysis": analysis,
@@ -198,7 +228,10 @@ class SimplePlanner(PlannerProvider):
             dependencies = step.get("dependencies", [])
             if not isinstance(dependencies, list) or any(not isinstance(item, (str, int)) for item in dependencies):
                 raise ValueError(f"Planner step {index} has invalid dependencies.")
-            for field in ("expertise", "required_artifacts", "acceptance_criteria", "verification_commands"):
+            for field in (
+                "expertise", "required_artifacts", "acceptance_criteria",
+                "verification_commands", "requirement_ids", "owned_paths",
+            ):
                 value = step.get(field, [])
                 if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
                     raise ValueError(f"Planner step {index} has invalid {field}.")
@@ -291,12 +324,17 @@ class SimplePlanner(PlannerProvider):
             "Multiple differently specialized developers and testers are expected.\n"
             f"For {analysis['level']} complexity, provide at least {analysis['suggested_min_steps']} substantive steps unless a smaller complete DAG is explicitly justified. "
             "Parallelize independent work and depend on existing outputs so work is not repeated.\n"
-            "Every step must contain id, role, specialist, description, dependencies, expertise, required_artifacts, acceptance_criteria, verification_commands, and status='pending'. "
+            "Extract a top-level requirements array from the user's exact request before planning. Each requirement has id, statement, priority, mandatory, source='user', and acceptance. "
+            "Every step must contain id, role, specialist, description, dependencies, expertise, required_artifacts, acceptance_criteria, verification_commands, requirement_ids, owned_paths, and status='pending'. "
+            "requirement_ids trace exact requirements. owned_paths are non-overlapping relative file paths or globs that the specialist may modify. "
             "Array fields must be arrays; artifacts are concrete relative file paths.\n"
             "Implementation must be runnable and must not silently substitute random/mock behavior. If weights, hardware, datasets, or services are unavailable, build a truthful deterministic prototype and explicit adapter contract, document the limitation, and test both paths.\n"
             "Do not list pretrained checkpoint files as artifacts an agent can create. For a human avatar plus clothing task, reconstruct a coherent canonical full body and fit garments to that body; a face/head mesh alone is not an avatar that can wear clothing.\n"
             "End with autonomous repair after acceptance testing and a final delivery auditor that cannot claim success without evidence.\n"
-            "Return raw JSON with keys analysis, steps, rationale. analysis includes level, domains, workstreams, assumptions, risks, mvp_boundary, out_of_scope. No prose."
+            "Acceptance must be independent of implementation: include clean-room launch/CLI/API user journeys and interface/signature checks, not only tests written by implementation agents. "
+            "Any MVP boundary, unsupported feature, mock, deferred work, or reduction of a mandatory user requirement must be listed in top-level scope_changes with statement, kind, reason, and requirement_ids. It requires user approval. "
+            "Each interfaces item has module, symbol (function or Class.method), parameters, returns, and consumers (relative source paths). "
+            "Return raw JSON with keys analysis, requirements, scope_changes, interfaces, launch_commands, steps, rationale. analysis includes level, domains, workstreams, assumptions, risks, mvp_boundary, out_of_scope. No prose."
         )
         try:
             response = await self.llm_provider.completion(
@@ -306,12 +344,23 @@ class SimplePlanner(PlannerProvider):
             if not plan_data:
                 raise ValueError("Planner response is not a JSON object.")
             plan_data.setdefault("analysis", analysis)
+            if not isinstance(plan_data.get("requirements"), list):
+                plan_data["requirements"] = []
+            if not isinstance(plan_data.get("scope_changes"), list):
+                plan_data["scope_changes"] = []
+            if not isinstance(plan_data.get("interfaces"), list):
+                plan_data["interfaces"] = []
+            plan_data["launch_commands"] = self._coerce_string_array(
+                plan_data.get("launch_commands", []), ("command", "cmd", "description")
+            )
             for step in plan_data["steps"]:
                 step.setdefault("dependencies", [])
                 step["expertise"] = self._coerce_string_array(step.get("expertise", []), ("name", "area", "skill"))
                 step["required_artifacts"] = self._coerce_string_array(step.get("required_artifacts", []), ("path", "file", "artifact"))
                 step["acceptance_criteria"] = self._coerce_string_array(step.get("acceptance_criteria", []), ("criterion", "description", "name"))
                 step["verification_commands"] = self._coerce_string_array(step.get("verification_commands", []), ("command", "cmd", "description"))
+                step["requirement_ids"] = self._coerce_string_array(step.get("requirement_ids", []), ("id", "requirement_id", "name"))
+                step["owned_paths"] = self._coerce_string_array(step.get("owned_paths", []), ("path", "glob", "file"))
                 if analysis["level"] in {"low", "moderate"} and not step.get("specialist"):
                     role_title = str(step.get("role") or "Task").replace("_", " ").title()
                     step["specialist"] = f"{role_title} Specialist"

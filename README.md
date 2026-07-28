@@ -4,6 +4,10 @@ GPTMOSS est une plateforme locale d'orchestration d'agents IA. Elle combine un m
 
 Ce document est le mode d'emploi complet. Les exemples utilisent PowerShell et l'adresse locale `http://127.0.0.1:8000`.
 
+La conception de la traçabilité, des propriétaires de fichiers, de l'audit
+indépendant, des reprises LLM et du benchmark multi-prompts est détaillée dans
+[DELIVERY_ASSURANCE.md](DELIVERY_ASSURANCE.md).
+
 ## Sommaire
 
 - [Démarrage rapide](#démarrage-rapide)
@@ -19,6 +23,7 @@ Ce document est le mode d'emploi complet. Les exemples utilisent PowerShell et l
 - [Sécurité](#sécurité)
 - [Dépannage](#dépannage)
 - [Tests du projet GPTMOSS](#tests-du-projet-gptmoss)
+- [Garantie de livraison](DELIVERY_ASSURANCE.md)
 - [Centre de contrôle GUI : mode d'emploi complet](#centre-de-contrôle-gui--mode-demploi-complet)
 
 ## Démarrage rapide
