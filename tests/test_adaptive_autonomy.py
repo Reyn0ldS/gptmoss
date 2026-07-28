@@ -160,6 +160,20 @@ def test_avatar_request_is_very_high_complexity_and_has_rich_safe_fallback():
     assert first_repair["verification_commands"] == ["python -m pytest -q"]
     assert plan["steps"][-2]["role"] == "writer"
     assert plan["steps"][-1]["role"] == "coordinator"
+    assert {item["id"] for item in plan["requirements"]} == {
+        "REQ-AVATAR-PROGRAM", "REQ-FACE-IMAGE", "REQ-FULL-BODY",
+        "REQ-GARMENT-IMAGE", "REQ-MULTI-AVATAR-FIT",
+    }
+    body_step = next(step for step in plan["steps"] if step["specialist"] == "Parametric Body & Geometry Engineer")
+    garment_step = next(step for step in plan["steps"] if step["specialist"] == "Garment Reconstruction Engineer")
+    fitting_step = next(step for step in plan["steps"] if step["specialist"] == "Virtual Try-On & Rigging Engineer")
+    assert body_step["requirement_ids"] == ["REQ-FULL-BODY"]
+    assert garment_step["requirement_ids"] == ["REQ-GARMENT-IMAGE"]
+    assert fitting_step["requirement_ids"] == ["REQ-MULTI-AVATAR-FIT"]
+    assert plan["scope_changes"][0]["requirement_ids"] == [
+        "REQ-FACE-IMAGE", "REQ-FULL-BODY", "REQ-GARMENT-IMAGE",
+        "REQ-MULTI-AVATAR-FIT",
+    ]
 
 
 def test_plan_contract_preserves_specialist_quality_fields_and_rejects_bad_lists():

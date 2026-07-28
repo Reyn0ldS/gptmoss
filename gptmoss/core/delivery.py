@@ -107,6 +107,9 @@ def normalize_requirements(plan: Dict[str, Any], task: str) -> List[Dict[str, An
 def map_requirements(plan: Dict[str, Any], requirements: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Map every requirement to implementation and independent validation steps."""
     steps = plan.get("steps", [])
+    has_developer_steps = any(
+        str(step.get("role") or "").lower() == "developer" for step in steps
+    )
     known = {requirement["id"] for requirement in requirements}
     for step in steps:
         explicit = _strings(step.get("requirement_ids"))
@@ -132,17 +135,31 @@ def map_requirements(plan: Dict[str, Any], requirements: List[Dict[str, Any]]) -
         if not explicitly_mapped:
             implementation_candidates = [
                 pair for pair in scored
-                if str(pair[1].get("role") or "") not in INDEPENDENT_ROLES
+                if (
+                    str(pair[1].get("role") or "").lower() == "developer"
+                    if has_developer_steps
+                    else str(pair[1].get("role") or "") not in INDEPENDENT_ROLES
+                )
             ]
             best = max(implementation_candidates or scored, key=lambda pair: pair[0],
                        default=(0, None))[1]
             if best is not None:
                 best["requirement_ids"].append(requirement["id"])
-        elif not any(str(step.get("role") or "") not in INDEPENDENT_ROLES
-                     for step in explicitly_mapped):
+        elif not any(
+            (
+                str(step.get("role") or "").lower() == "developer"
+                if has_developer_steps
+                else str(step.get("role") or "") not in INDEPENDENT_ROLES
+            )
+            for step in explicitly_mapped
+        ):
             implementation_candidates = [
                 pair for pair in scored
-                if str(pair[1].get("role") or "") not in INDEPENDENT_ROLES
+                if (
+                    str(pair[1].get("role") or "").lower() == "developer"
+                    if has_developer_steps
+                    else str(pair[1].get("role") or "") not in INDEPENDENT_ROLES
+                )
             ]
             best = max(implementation_candidates, key=lambda pair: pair[0],
                        default=(0, None))[1]
@@ -153,11 +170,19 @@ def map_requirements(plan: Dict[str, Any], requirements: List[Dict[str, Any]]) -
             and str(step.get("role") or "") in INDEPENDENT_ROLES
             for step in steps
         ):
-            verifier = next(
-                (step for step in reversed(steps)
-                 if str(step.get("role") or "") in INDEPENDENT_ROLES),
-                None,
-            )
+            validation_candidates = [
+                pair for pair in scored
+                if str(pair[1].get("role") or "").lower() == "qa"
+            ]
+            positive_qa = [pair for pair in validation_candidates if pair[0] > 0]
+            if positive_qa:
+                verifier = max(positive_qa, key=lambda pair: pair[0])[1]
+            else:
+                verifier = next(
+                    (step for step in reversed(steps)
+                     if str(step.get("role") or "") in INDEPENDENT_ROLES),
+                    None,
+                )
             if verifier is not None:
                 verifier["requirement_ids"].append(requirement["id"])
 
@@ -167,13 +192,20 @@ def map_requirements(plan: Dict[str, Any], requirements: List[Dict[str, Any]]) -
             step for step in steps
             if requirement["id"] in step.get("requirement_ids", [])
         ]
+        mapped_has_developer = any(
+            str(step.get("role") or "").lower() == "developer" for step in mapped
+        )
         matrix.append({
             "requirement_id": requirement["id"],
             "statement": requirement["statement"],
             "mandatory": requirement["mandatory"],
             "implementation_steps": [
                 step["id"] for step in mapped
-                if str(step.get("role") or "") not in INDEPENDENT_ROLES
+                if (
+                    str(step.get("role") or "").lower() == "developer"
+                    if mapped_has_developer
+                    else str(step.get("role") or "") not in INDEPENDENT_ROLES
+                )
             ],
             "validation_steps": [
                 step["id"] for step in mapped

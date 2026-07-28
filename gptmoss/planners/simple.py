@@ -89,6 +89,42 @@ class SimplePlanner(PlannerProvider):
 
     @staticmethod
     def _avatar_3d_fallback(task: str, analysis: Dict[str, Any]) -> Dict[str, Any]:
+        requirements = [
+            {
+                "id": "REQ-AVATAR-PROGRAM",
+                "statement": "Deliver a runnable local program exposing the complete avatar and garment workflow.",
+                "priority": "must", "mandatory": True, "source": "user",
+                "acceptance": ["A clean-process local smoke workflow exits successfully."],
+            },
+            {
+                "id": "REQ-FACE-IMAGE",
+                "statement": "Ingest a face image and derive validated 3D face geometry attached to the avatar.",
+                "priority": "must", "mandatory": True, "source": "user",
+                "acceptance": ["Valid face media is accepted, invalid media is rejected, and exported geometry is non-empty."],
+            },
+            {
+                "id": "REQ-FULL-BODY",
+                "statement": "Produce a coherent neutral undressed full-body 3D avatar rather than only a head mesh.",
+                "priority": "must", "mandatory": True, "source": "user",
+                "acceptance": ["The exported full-body mesh is valid, deterministic, and connected to the reconstructed face contract."],
+            },
+            {
+                "id": "REQ-GARMENT-IMAGE",
+                "statement": "Ingest a garment image and derive a validated, exportable 3D garment representation.",
+                "priority": "must", "mandatory": True, "source": "user",
+                "acceptance": ["Garment output has valid deterministic topology, dimensions, anchors, and provenance."],
+            },
+            {
+                "id": "REQ-MULTI-AVATAR-FIT",
+                "statement": "Fit the same reconstructed garment coherently onto multiple different full-body avatars.",
+                "priority": "must", "mandatory": True, "source": "user",
+                "acceptance": ["Cross-avatar fitting is deterministic and validates deformation, anchors, and collisions."],
+            },
+        ]
+        mvp_boundary = (
+            "Without supplied validated pretrained checkpoints, the offline delivery is deterministic procedural geometry "
+            "plus explicit model adapters; there is no claim of photorealistic learned single-view reconstruction."
+        )
         steps = [
             _step(0, "architect", "Product & Feasibility Analyst",
                   "Define user journeys, honest MVP boundaries, input assumptions, measurable acceptance criteria, and unavailable model/checkpoint constraints in specs/requirements.md.",
@@ -153,9 +189,58 @@ class SimplePlanner(PlannerProvider):
                   [12, 13], ["delivery audit", "acceptance management", "evidence synthesis"],
                   [], ["No capability is claimed without an artifact or successful execution evidence."]),
         ]
-        return {"analysis": {**analysis, "workstreams": [step["specialist"] for step in steps],
-                             "mvp_boundary": "Runnable deterministic local prototype plus adapters for external pretrained models; no claim of photorealistic single-view reconstruction without checkpoints."},
-                "steps": steps, "rationale": "Deterministic cross-domain fallback preserves the real size and dependencies of the request."}
+        requirement_map = {
+            3: ["REQ-FACE-IMAGE"],
+            4: ["REQ-FULL-BODY"],
+            5: ["REQ-GARMENT-IMAGE"],
+            6: ["REQ-MULTI-AVATAR-FIT"],
+            7: [
+                "REQ-AVATAR-PROGRAM", "REQ-FACE-IMAGE", "REQ-FULL-BODY",
+                "REQ-GARMENT-IMAGE", "REQ-MULTI-AVATAR-FIT",
+            ],
+            8: ["REQ-AVATAR-PROGRAM"],
+            9: [
+                "REQ-FACE-IMAGE", "REQ-FULL-BODY", "REQ-GARMENT-IMAGE",
+                "REQ-MULTI-AVATAR-FIT",
+            ],
+            10: [
+                "REQ-AVATAR-PROGRAM", "REQ-FACE-IMAGE", "REQ-FULL-BODY",
+                "REQ-GARMENT-IMAGE", "REQ-MULTI-AVATAR-FIT",
+            ],
+            11: [
+                "REQ-AVATAR-PROGRAM", "REQ-FACE-IMAGE", "REQ-FULL-BODY",
+                "REQ-GARMENT-IMAGE", "REQ-MULTI-AVATAR-FIT",
+            ],
+            12: [
+                "REQ-AVATAR-PROGRAM", "REQ-FACE-IMAGE", "REQ-FULL-BODY",
+                "REQ-GARMENT-IMAGE", "REQ-MULTI-AVATAR-FIT",
+            ],
+            14: [
+                "REQ-AVATAR-PROGRAM", "REQ-FACE-IMAGE", "REQ-FULL-BODY",
+                "REQ-GARMENT-IMAGE", "REQ-MULTI-AVATAR-FIT",
+            ],
+        }
+        for step in steps:
+            step["requirement_ids"] = requirement_map.get(step["id"], [])
+        return {
+            "analysis": {
+                **analysis,
+                "workstreams": [step["specialist"] for step in steps],
+                "mvp_boundary": mvp_boundary,
+            },
+            "requirements": requirements,
+            "scope_changes": [{
+                "kind": "mvp_boundary",
+                "statement": mvp_boundary,
+                "requirement_ids": [
+                    "REQ-FACE-IMAGE", "REQ-FULL-BODY", "REQ-GARMENT-IMAGE",
+                    "REQ-MULTI-AVATAR-FIT",
+                ],
+                "reason": "Validated model weights are external assets and cannot be fabricated by an agent.",
+            }],
+            "steps": steps,
+            "rationale": "Deterministic cross-domain fallback preserves the real size and dependencies of the request.",
+        }
 
     @staticmethod
     def _fallback_plan(task: str, analysis: Dict[str, Any] | None = None) -> Dict[str, Any]:

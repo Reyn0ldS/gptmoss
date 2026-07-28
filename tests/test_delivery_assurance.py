@@ -74,6 +74,43 @@ def test_contract_freezes_traceability_scope_and_ownership():
     assert not path_is_owned(contract, 1, "debugger", "./.gptmoss/contract.json")
 
 
+def test_automatic_software_traceability_prefers_developer_and_relevant_qa():
+    plan = normalize_plan({
+        "requirements": [{
+            "id": "REQ-GARMENT",
+            "statement": "Fit a reconstructed garment onto multiple avatars",
+            "mandatory": True,
+        }],
+        "steps": [
+            {
+                "id": 0, "role": "architect", "specialist": "Requirements Analyst",
+                "description": "Define all project requirements", "dependencies": [],
+                "requirement_ids": ["REQ-GARMENT"],
+            },
+            {
+                "id": 1, "role": "developer", "specialist": "Garment Fitting Engineer",
+                "description": "Fit a reconstructed garment onto multiple body avatars",
+                "dependencies": [0],
+            },
+            {
+                "id": 2, "role": "qa", "specialist": "Garment Acceptance Engineer",
+                "description": "Validate garment fitting across multiple avatars",
+                "dependencies": [1],
+                "requirement_ids": ["REQ-GARMENT"],
+            },
+            {
+                "id": 3, "role": "coordinator", "specialist": "Final Auditor",
+                "description": "Audit the final delivery", "dependencies": [2],
+            },
+        ],
+    })
+
+    row = build_delivery_contract(plan, "Fit garments")["traceability"][0]
+
+    assert row["implementation_steps"] == [1]
+    assert row["validation_steps"] == [2]
+
+
 def test_static_assurance_detects_package_identity_and_signature_mismatch(tmp_path):
     package = tmp_path / "src" / "sample"
     package.mkdir(parents=True)
