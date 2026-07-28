@@ -474,9 +474,9 @@ Le contexte conversationnel est compacté au-delà de `max_context_chars`; les s
 
 | Symptôme | Vérifications et correction |
 |---|---|
-| Erreur de connexion au LLM | Vérifier `base_url`, `api_key`, `model_name`, la connectivité et le certificat TLS. |
+| Erreur de connexion au LLM | Vérifier `base_url`, `api_key`, `model_name`, la connectivité et le certificat TLS. Les chemins sont sensibles à la casse : utiliser le `/v1` réellement exposé par le serveur. Pour une CA privée, renseigner de préférence `ssl_cert_path`. |
 | Erreur TLS | Garder `ssl_verify: true`; pour une PKI interne, fournir `ssl_cert_path`. Désactiver la vérification seulement pour un environnement explicitement contrôlé. |
-| L'outil n'est pas appelé | Vérifier la politique, les skills sélectionnés et la compatibilité tool-calling du modèle. GPTMOSS utilise un repli par prompt si l'appel d'outil natif échoue. |
+| L'outil n'est pas appelé | Vérifier la politique, les skills sélectionnés et la compatibilité tool-calling du modèle. GPTMOSS normalise les balises textuelles `<tool_call>` de Qwen et utilise un repli par prompt si l'appel natif échoue. |
 | Exécution bloquée en pause | Lire l'état puis appeler `/approve` ou `/reject` si une approbation est en attente ; sinon `/resume`. |
 | Accès fichier refusé | Le chemin sort du workspace, contient une traversée ou les sous-dossiers sont désactivés. Utiliser un chemin relatif au projet. |
 | Commande shell expirée | Simplifier la commande ou la découper ; la limite par défaut est 60 secondes. |
