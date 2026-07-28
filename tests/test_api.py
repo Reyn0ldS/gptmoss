@@ -423,6 +423,8 @@ def test_gui_management_api_complete_flow(tmp_path):
     assert listed_skill["editable"] is True
     assert listed_skill["instructions"] == "Review carefully."
     assert client.post("/skills/gui-review/validate").json()["valid"] is True
+    assert client.get("/agent-profiles").json() == []
+    assert client.get("/evolution").json()["creation_enabled"] is False
     imported = "---\nname: imported-skill\ndescription: Imported\nallowed_capabilities: [shell]\n---\n\nUse safe commands.\n"
     assert client.post("/skills/import", json={"content": imported}).status_code == 201
 
@@ -458,6 +460,8 @@ def test_gui_management_api_complete_flow(tmp_path):
         "projects": [{"id": "proj-default", "name": "Défaut"}], "confirm_sensitive": False,
     }
     assert client.post("/api/settings", json=settings).status_code == 200
+    assert client.get("/api/settings").json()["autonomous_skill_creation"] is True
+    assert client.get("/evolution").json()["creation_enabled"] is True
     audit = client.get("/api/audit").json()
     assert audit and audit[-1]["secret_changed"] is True
     assert "audit-secret" not in json.dumps(audit)

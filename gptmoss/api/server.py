@@ -22,6 +22,8 @@ GUI_FILE_PATH = os.path.join(CURRENT_DIR, "gui.html")
 
 from gptmoss.core import EventBus, Event, StateEngine, RuntimeKernel, ExecutionEngine, DEFAULT_SYSTEM_PROMPT
 from gptmoss.core.artifacts import ArtifactStore
+from gptmoss.core.evolution import AgentProfileRegistry, AutonomousSkillLifecycle
+from gptmoss.core.skills import SkillRegistry
 
 logger = logging.getLogger("gptmoss.api")
 
@@ -79,6 +81,11 @@ class SettingsRequest(BaseModel):
     approval_required_capabilities: List[str]
     workspace_full_autonomy: bool = False
     continue_while_progress: bool = True
+    autonomous_specialization: bool = True
+    autonomous_skill_creation: bool = True
+    autonomous_skill_improvement: bool = True
+    skill_coverage_threshold: int = Field(default=4, ge=1, le=30)
+    max_autonomous_skills_per_execution: int = Field(default=6, ge=0, le=50)
     workspace_path: str
     restrict_to_workspace: bool
     allow_subfolders: bool
@@ -462,6 +469,21 @@ async def list_skills():
         return []
     filesystem = app_state.execution_engine.get_capability("filesystem")
     return sorted([_skill_payload(skill, filesystem.workspace_root) for skill in registry.skills.values()], key=lambda item: item["name"])
+
+@app.get("/agent-profiles")
+async def list_agent_profiles():
+    if not app_state.execution_engine or not app_state.execution_engine.agent_profile_registry:
+        return []
+    registry = app_state.execution_engine.agent_profile_registry
+    registry.discover()
+    return sorted(registry.profiles.values(), key=lambda item: str(item.get("name", "")).lower())
+
+@app.get("/evolution")
+async def evolution_status():
+    if not app_state.execution_engine:
+        raise HTTPException(status_code=500, detail="Engine not initialized.")
+    lifecycle = app_state.execution_engine.skill_lifecycle
+    return lifecycle.diagnostics() if lifecycle else {"creation_enabled": False, "generated_skills": []}
 
 def _skill_payload(skill, workspace_root: str) -> Dict[str, Any]:
     workspace_skills = (Path(workspace_root) / "skills").resolve()
@@ -859,6 +881,11 @@ async def get_settings():
         config.setdefault("default_skills", [])
         config.setdefault("workspace_full_autonomy", False)
         config.setdefault("continue_while_progress", True)
+        config.setdefault("autonomous_specialization", True)
+        config.setdefault("autonomous_skill_creation", True)
+        config.setdefault("autonomous_skill_improvement", True)
+        config.setdefault("skill_coverage_threshold", 4)
+        config.setdefault("max_autonomous_skills_per_execution", 6)
         return config
             
     # Fallback to current memory values
@@ -874,6 +901,11 @@ async def get_settings():
         "approval_required_capabilities": getattr(policy, "approval_required", []),
         "workspace_full_autonomy": getattr(policy, "workspace_full_autonomy", False),
         "continue_while_progress": getattr(app_state.execution_engine, "continue_while_progress", True),
+        "autonomous_specialization": getattr(app_state.execution_engine, "autonomous_specialization", True),
+        "autonomous_skill_creation": getattr(getattr(app_state.execution_engine, "skill_lifecycle", None), "creation_enabled", True),
+        "autonomous_skill_improvement": getattr(getattr(app_state.execution_engine, "skill_lifecycle", None), "improvement_enabled", True),
+        "skill_coverage_threshold": getattr(getattr(app_state.execution_engine, "skill_lifecycle", None), "coverage_threshold", 4),
+        "max_autonomous_skills_per_execution": getattr(getattr(app_state.execution_engine, "skill_lifecycle", None), "max_skills_per_execution", 6),
         "workspace_path": getattr(fs, "workspace_root", "."),
         "restrict_to_workspace": getattr(fs, "restrict_to_workspace", True),
         "allow_subfolders": getattr(fs, "allow_subfolders", True),
@@ -958,6 +990,11 @@ async def update_settings(req: SettingsRequest):
         "approval_required_capabilities": req.approval_required_capabilities,
         "workspace_full_autonomy": req.workspace_full_autonomy,
         "continue_while_progress": req.continue_while_progress,
+        "autonomous_specialization": req.autonomous_specialization,
+        "autonomous_skill_creation": req.autonomous_skill_creation,
+        "autonomous_skill_improvement": req.autonomous_skill_improvement,
+        "skill_coverage_threshold": req.skill_coverage_threshold,
+        "max_autonomous_skills_per_execution": req.max_autonomous_skills_per_execution,
         "workspace_path": req.workspace_path,
         "restrict_to_workspace": req.restrict_to_workspace,
         "allow_subfolders": req.allow_subfolders,
@@ -998,6 +1035,30 @@ async def update_settings(req: SettingsRequest):
     app_state.execution_engine.max_step_iterations = req.max_step_iterations
     app_state.execution_engine.max_step_retries = req.max_step_retries
     app_state.execution_engine.continue_while_progress = req.continue_while_progress
+    app_state.execution_engine.autonomous_specialization = req.autonomous_specialization
+    workspace_changed = Path(workspace_root).resolve() != Path(req.workspace_path).resolve()
+    if workspace_changed or not app_state.execution_engine.agent_profile_registry:
+        app_state.execution_engine.agent_profile_registry = AgentProfileRegistry(req.workspace_path)
+    lifecycle = app_state.execution_engine.skill_lifecycle
+    if workspace_changed or not lifecycle:
+        if workspace_changed:
+            bundled_skills = Path(CURRENT_DIR).resolve().parent / "skills"
+            app_state.execution_engine.skill_registry = SkillRegistry([
+                str(bundled_skills), str(Path(req.workspace_path) / "skills"),
+            ])
+        elif not app_state.execution_engine.skill_registry:
+            app_state.execution_engine.skill_registry = SkillRegistry([
+                str(Path(CURRENT_DIR).resolve().parent / "skills"),
+                str(Path(req.workspace_path) / "skills"),
+            ])
+        else:
+            app_state.execution_engine.skill_registry.discover(str(Path(req.workspace_path) / "skills"))
+        lifecycle = AutonomousSkillLifecycle(req.workspace_path, app_state.execution_engine.skill_registry)
+        app_state.execution_engine.skill_lifecycle = lifecycle
+    lifecycle.creation_enabled = req.autonomous_skill_creation
+    lifecycle.improvement_enabled = req.autonomous_skill_improvement
+    lifecycle.coverage_threshold = req.skill_coverage_threshold
+    lifecycle.max_skills_per_execution = req.max_autonomous_skills_per_execution
         
     for cap_name in ["filesystem", "shell", "agent", "devteam"]:
         cap = app_state.execution_engine.get_capability(cap_name)

@@ -18,6 +18,7 @@ from gptmoss.interfaces.capability import generate_action_schema, get_actions
 from gptmoss.core.observability import TraceRecorder
 from gptmoss.core.skills import SkillRegistry
 from gptmoss.core.artifacts import ArtifactStore
+from gptmoss.core.evolution import AgentProfileRegistry, AutonomousSkillLifecycle
 from gptmoss.core.delivery import (
     build_delivery_contract,
     evaluate_delivery,
@@ -167,6 +168,9 @@ class ExecutionEngine:
         max_step_iterations: int = 30,
         max_step_retries: int = 2,
         continue_while_progress: bool = True,
+        agent_profile_registry: Optional[AgentProfileRegistry] = None,
+        skill_lifecycle: Optional[AutonomousSkillLifecycle] = None,
+        autonomous_specialization: bool = True,
     ):
         self.event_bus = event_bus
         self.state_engine = state_engine
@@ -181,6 +185,9 @@ class ExecutionEngine:
         self.max_step_iterations = max(1, min(int(max_step_iterations), 100))
         self.max_step_retries = max(0, min(int(max_step_retries), 5))
         self.continue_while_progress = bool(continue_while_progress)
+        self.agent_profile_registry = agent_profile_registry
+        self.skill_lifecycle = skill_lifecycle
+        self.autonomous_specialization = bool(autonomous_specialization)
         self._capabilities: Dict[str, Any] = {}  # capability_name -> instance
         self._execution_locks: Dict[str, asyncio.Lock] = {}
         self._provider_resume_tasks: Dict[str, asyncio.Task] = {}
@@ -310,10 +317,76 @@ class ExecutionEngine:
         state.variables["active_skills"] = [{"name": skill.name, "digest": skill.digest} for skill in selected]
         return selected
 
+    def _evolution_capabilities(self) -> set[str]:
+        denied = {str(item).lower().split(".", 1)[0] for item in getattr(self.policy_provider, "denied", [])}
+        return set(self._capabilities) - denied
+
+    async def _prepare_autonomous_specialization(self, execution_id: str, state,
+                                                 step: Dict[str, Any]) -> Dict[str, Any]:
+        """Persist a novel specialist and synthesize a missing procedural skill."""
+        if not self.autonomous_specialization or not self.agent_profile_registry:
+            return {}
+        profile = self.agent_profile_registry.ensure(step, self._evolution_capabilities())
+        retry_count = int(step.get("retry_count", 0))
+        if retry_count and step.get("profile_revision_attempt") != retry_count:
+            revision_result = await self.agent_profile_registry.improve(
+                profile["id"], str(step.get("retry_context") or "Previous delivery gates failed."),
+                lambda **kwargs: self._completion_with_recovery(execution_id, **kwargs),
+            )
+            if revision_result.get("improved"):
+                profile = revision_result["profile"]
+            step["profile_revision_attempt"] = retry_count
+        step["agent_profile_id"] = profile["id"]
+        step["agent_profile_revision"] = profile.get("revision", 1)
+        requested = set(step.get("autonomous_skill_names", [])) | set(profile.get("skill_names", []))
+        lifecycle_result: Dict[str, Any] = {}
+        if self.skill_lifecycle:
+            if retry_count and step.get("skill_revision_attempt") != retry_count:
+                for skill_name in sorted(requested):
+                    await self.skill_lifecycle.improve(
+                        execution_id, skill_name, profile, step,
+                        str(step.get("retry_context") or "Previous specialist failed delivery gates."),
+                        self._evolution_capabilities(),
+                        lambda **kwargs: self._completion_with_recovery(execution_id, **kwargs),
+                    )
+                step["skill_revision_attempt"] = retry_count
+            synthesis_round = retry_count + 1
+            if step.get("skill_synthesis_round") != synthesis_round:
+                lifecycle_result = await self.skill_lifecycle.ensure_for_step(
+                    execution_id, profile, step, self._evolution_capabilities(),
+                    lambda **kwargs: self._completion_with_recovery(execution_id, **kwargs),
+                )
+                step["skill_synthesis_round"] = synthesis_round
+                step["skill_lifecycle_status"] = {
+                    key: lifecycle_result.get(key) for key in
+                    ("created", "reused", "rejected", "budget_exhausted") if key in lifecycle_result
+                }
+                requested.update(lifecycle_result.get("skill_names", []))
+        for skill_name in sorted(requested):
+            self.agent_profile_registry.attach_skill(profile["id"], skill_name)
+        step["autonomous_skill_names"] = sorted(requested)
+        state.variables.setdefault("agent_profiles", {})[str(step.get("id"))] = profile["id"]
+        await self.event_bus.publish(Event(type="AutonomousSpecializationPrepared", payload={
+            "execution_id": execution_id, "step_id": step.get("id"), "profile_id": profile["id"],
+            "skill_names": sorted(requested), "skill_created": bool(lifecycle_result.get("created")),
+        }))
+        return {"profile": profile, "skill_names": sorted(requested), "lifecycle": lifecycle_result}
+
+    def _record_specialization_outcome(self, execution_id: str, step: Dict[str, Any],
+                                       success: bool, feedback: str = "") -> None:
+        profile_id = str(step.get("agent_profile_id") or "")
+        if profile_id and self.agent_profile_registry:
+            self.agent_profile_registry.record_outcome(profile_id, success)
+        if profile_id and self.skill_lifecycle:
+            self.skill_lifecycle.record_outcome(
+                execution_id, profile_id, step.get("autonomous_skill_names", []), success, feedback,
+            )
+
     @staticmethod
     def _allowed_capabilities(skills) -> Optional[set[str]]:
-        allowed = set().union(*(set(skill.allowed_capabilities) for skill in skills)) if skills else set()
-        return allowed or None
+        if not skills:
+            return None
+        return set().union(*(set(skill.allowed_capabilities) for skill in skills))
 
     def _artifact_exists(self, execution_id: str, path: str) -> bool:
         filesystem = self.get_capability("filesystem")
@@ -998,6 +1071,7 @@ class ExecutionEngine:
             ))
             
             try:
+                specialization = await self._prepare_autonomous_specialization(execution_id, state, step)
                 role_key = canonical_step_role(step.get("role")) or infer_step_role(step.get("description", ""))
                 generic_role_name = ROLE_DISPLAY_NAMES.get(role_key) if role_key else None
                 role_name = step.get("specialist") or generic_role_name
@@ -1050,6 +1124,14 @@ class ExecutionEngine:
                     sub_exec.variables["dependency_results"] = dependency_results
                     sub_exec.variables["specialist"] = step.get("specialist") or role_name
                     sub_exec.variables["expertise"] = list(step.get("expertise", []))
+                    sub_exec.variables["agent_profile_id"] = step.get("agent_profile_id")
+                    sub_exec.variables["agent_profile_prompt"] = specialization.get("profile", {}).get("system_prompt", "")
+                    sub_exec.variables["requested_skills"] = sorted({
+                        str(item).lower() for item in [
+                            *state.variables.get("requested_skills", []),
+                            *step.get("autonomous_skill_names", []),
+                        ] if isinstance(item, str)
+                    })
                     sub_exec.variables["delegated_step"] = {
                         key: value for key, value in step.items()
                         if key not in {"id", "dependencies", "status", "assigned_execution_id", "delivery", "result", "error"}
@@ -1141,6 +1223,15 @@ class ExecutionEngine:
                         raise RuntimeError(f"Sub-agent {role_name} stopped with status: {sub_state.status}")
                 else:
                     # Execute step loop locally
+                    if specialization.get("profile"):
+                        state.variables["agent_profile_id"] = specialization["profile"]["id"]
+                        state.variables["agent_profile_prompt"] = specialization["profile"].get("system_prompt", "")
+                        state.variables["requested_skills"] = sorted(
+                            {str(item).lower() for item in state.variables.get("requested_skills", [])
+                             if isinstance(item, str)} |
+                            {str(item).lower() for item in specialization.get("skill_names", [])
+                             if isinstance(item, str)}
+                        )
                     result = await self._execute_step_loop(execution_id, step)
                     if state.variables.get("parent_execution_id") and role_key != "coordinator":
                         delivery = self._structured_delivery(result)
@@ -1158,6 +1249,8 @@ class ExecutionEngine:
                 
                 step["status"] = "completed"
                 step["result"] = result
+                if not sub_id:
+                    self._record_specialization_outcome(execution_id, step, True, str(result))
                 step_record = {
                     "step_id": step.get("id"),
                     "description": step.get("description"),
@@ -1179,7 +1272,12 @@ class ExecutionEngine:
                         child.status = "cancelled"
                 step["status"] = "pending" if state.status == "paused" else "cancelled"
                 raise
+            except ProviderUnavailableError:
+                step["status"] = "pending"
+                raise
             except Exception as e:
+                if not sub_id:
+                    self._record_specialization_outcome(execution_id, step, False, str(e))
                 retry_count = int(step.get("retry_count", 0))
                 if sub_id and retry_count < self.max_step_retries and state.status not in ("cancelled", "paused"):
                     step["retry_count"] = retry_count + 1
@@ -1352,7 +1450,15 @@ class ExecutionEngine:
                         elif res == "suspended_provider":
                             provider_suspended = True
                     except Exception as exc:
-                        step_failure = exc
+                        if isinstance(exc, ProviderUnavailableError):
+                            provider_suspended = True
+                            state.variables["provider_wait"] = {
+                                "error": str(exc.original_error),
+                                "error_type": exc.original_error.__class__.__name__,
+                                "suspended_at": time.time(),
+                            }
+                        else:
+                            step_failure = exc
                         
                 # Update current step count
                 state.current_step = sum(1 for s in steps if s.get("status") == "completed")
@@ -1564,6 +1670,9 @@ class ExecutionEngine:
             specialist_name = state.variables.get("specialist") or step.get("specialist") or role_name
             expertise = state.variables.get("expertise") or step.get("expertise", [])
             base_prompt = context.get("system_instructions", "")
+            profile_prompt = str(state.variables.get("agent_profile_prompt") or "").strip()
+            if profile_prompt:
+                base_prompt += "\n\nPersistent autonomous agent profile:\n" + profile_prompt
             environment = context.get("environment", {})
             base_prompt += (
                 f"\n\nRuntime environment: operating_system={environment.get('operating_system')}, "

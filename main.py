@@ -9,7 +9,9 @@ from dotenv import load_dotenv
 # Ensure local packages are resolvable even in isolated python environments
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from gptmoss.core import EventBus, StateEngine, ContextEngine, ExecutionEngine, RuntimeKernel, Event, DEFAULT_SYSTEM_PROMPT, TraceRecorder, SkillRegistry, ArtifactStore
+from gptmoss.core import (EventBus, StateEngine, ContextEngine, ExecutionEngine, RuntimeKernel, Event,
+                          DEFAULT_SYSTEM_PROMPT, TraceRecorder, SkillRegistry, ArtifactStore,
+                          AgentProfileRegistry, AutonomousSkillLifecycle)
 from gptmoss.providers import QwenProvider
 from gptmoss.memory import JSONMemoryProvider
 from gptmoss.capabilities import FilesystemCapability, ShellCapability, AgentCapability, DeveloperTeamCapability
@@ -72,6 +74,9 @@ def bootstrap_runtime(workspace_root: str):
     approval_required = config_data.get("approval_required_capabilities", ["shell", "devteam.approve_quality_gate"])
     workspace_full_autonomy = bool(config_data.get("workspace_full_autonomy", False))
     continue_while_progress = bool(config_data.get("continue_while_progress", True))
+    autonomous_specialization = bool(config_data.get("autonomous_specialization", True))
+    autonomous_skill_creation = bool(config_data.get("autonomous_skill_creation", True))
+    autonomous_skill_improvement = bool(config_data.get("autonomous_skill_improvement", True))
     workspace_path = config_data.get("workspace_path") or os.path.abspath(workspace_root)
     restrict_to_workspace = config_data.get("restrict_to_workspace", True)
     allow_subfolders = config_data.get("allow_subfolders", True)
@@ -90,6 +95,16 @@ def bootstrap_runtime(workspace_root: str):
     except (TypeError, ValueError):
         max_step_retries = 2
     max_step_retries = max(0, min(max_step_retries, 5))
+    try:
+        skill_coverage_threshold = int(config_data.get("skill_coverage_threshold", 4))
+    except (TypeError, ValueError):
+        skill_coverage_threshold = 4
+    skill_coverage_threshold = max(1, min(skill_coverage_threshold, 30))
+    try:
+        max_autonomous_skills_per_execution = int(config_data.get("max_autonomous_skills_per_execution", 6))
+    except (TypeError, ValueError):
+        max_autonomous_skills_per_execution = 6
+    max_autonomous_skills_per_execution = max(0, min(max_autonomous_skills_per_execution, 50))
     safe_shell_mode = bool(config_data.get("safe_shell_mode", True))
     try:
         shell_timeout_seconds = int(config_data.get("shell_timeout_seconds", 60))
@@ -115,6 +130,11 @@ def bootstrap_runtime(workspace_root: str):
         "approval_required_capabilities": approval_required,
         "workspace_full_autonomy": workspace_full_autonomy,
         "continue_while_progress": continue_while_progress,
+        "autonomous_specialization": autonomous_specialization,
+        "autonomous_skill_creation": autonomous_skill_creation,
+        "autonomous_skill_improvement": autonomous_skill_improvement,
+        "skill_coverage_threshold": skill_coverage_threshold,
+        "max_autonomous_skills_per_execution": max_autonomous_skills_per_execution,
         "workspace_path": workspace_path,
         "restrict_to_workspace": restrict_to_workspace,
         "allow_subfolders": allow_subfolders,
@@ -149,6 +169,15 @@ def bootstrap_runtime(workspace_root: str):
         denied_capabilities=denied_capabilities,
         workspace_full_autonomy=workspace_full_autonomy,
     )
+    skill_registry.discover(os.path.join(workspace_path, "skills"))
+    agent_profile_registry = AgentProfileRegistry(workspace_path)
+    skill_lifecycle = AutonomousSkillLifecycle(
+        workspace_path, skill_registry,
+        coverage_threshold=skill_coverage_threshold,
+        max_skills_per_execution=max_autonomous_skills_per_execution,
+        creation_enabled=autonomous_skill_creation,
+        improvement_enabled=autonomous_skill_improvement,
+    )
 
     # 4. Execution Engine and register standard capabilities
     exec_engine = ExecutionEngine(
@@ -165,6 +194,9 @@ def bootstrap_runtime(workspace_root: str):
         max_step_iterations=max_step_iterations,
         max_step_retries=max_step_retries,
         continue_while_progress=continue_while_progress,
+        agent_profile_registry=agent_profile_registry,
+        skill_lifecycle=skill_lifecycle,
+        autonomous_specialization=autonomous_specialization,
     )
 
     # Register capabilities

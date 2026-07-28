@@ -29,6 +29,14 @@ Lorsque vous soumettez une tâche de développement logiciel, le coordinateur é
 
 Chaque profil reçoit sa spécialité, son expertise, ses fichiers obligatoires, ses critères d'acceptation et ses commandes de vérification. Une tâche complexe n'est donc pas limitée à sept agents : GPTMOSS crée les spécialistes nécessaires et rejette un plan manifestement trop petit.
 
+### Profils et skills entièrement nouveaux
+
+Les spécialistes inventés par le plan sont maintenant conservés dans `workspace/agents/`. Si leur expertise n'est pas couverte par les skills connus, GPTMOSS peut générer automatiquement une procédure Markdown, vérifier ses permissions et son contenu, lui faire passer un essai procédural isolé, l'enregistrer puis la charger immédiatement. Un échec concret permet de produire une révision ; la version précédente est conservée dans le dossier `revisions`.
+
+Ces options sont disponibles dans **Paramètres > Agents et skills autonomes sur mesure**. Le seuil règle la sensibilité de détection et le budget maximal empêche une tâche de créer une quantité non bornée de skills. Les profils sont consultables par `GET /agent-profiles` et les manifests par `GET /evolution`.
+
+Cette autonomie ne crée jamais de capabilities exécutables : les nouveaux agents combinent un profil, une expertise et des skills avec les outils déjà enregistrés. Les approbations, refus, chemins autorisés et protections du shell restent imposés par le noyau.
+
 ---
 
 ## 3. Planification Concurrente (DAG Scheduler)

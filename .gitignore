@@ -22,6 +22,10 @@ workspace/memories.json
 settings_audit.jsonl
 workspace/settings_audit.jsonl
 workspace/projects/
+workspace/uploads/
+workspace/agents/
+workspace/evolution/
+workspace/skills/
 
 # Distribution artifacts
 build/

@@ -2236,6 +2236,11 @@
                 document.getElementById("settings-allow-subfolders").checked = data.allow_subfolders !== false;
                 document.getElementById("settings-workspace-full-autonomy").checked = data.workspace_full_autonomy === true;
                 document.getElementById("settings-continue-while-progress").checked = data.continue_while_progress !== false;
+                document.getElementById("settings-autonomous-specialization").checked = data.autonomous_specialization !== false;
+                document.getElementById("settings-autonomous-skill-creation").checked = data.autonomous_skill_creation !== false;
+                document.getElementById("settings-autonomous-skill-improvement").checked = data.autonomous_skill_improvement !== false;
+                document.getElementById("settings-skill-coverage-threshold").value = data.skill_coverage_threshold || 4;
+                document.getElementById("settings-max-autonomous-skills").value = data.max_autonomous_skills_per_execution ?? 6;
                 document.getElementById("settings-max-step-iterations").value = data.max_step_iterations || 30;
                 document.getElementById("settings-max-step-retries").value = data.max_step_retries ?? 2;
                 document.getElementById("settings-max-context-chars").value = data.max_context_chars || 12000;
@@ -2269,6 +2274,11 @@
                 approval_required_capabilities: Array.from(document.querySelectorAll("input[name='settings-approval']:checked"), cb => cb.value),
                 workspace_full_autonomy: document.getElementById("settings-workspace-full-autonomy").checked,
                 continue_while_progress: document.getElementById("settings-continue-while-progress").checked,
+                autonomous_specialization: document.getElementById("settings-autonomous-specialization").checked,
+                autonomous_skill_creation: document.getElementById("settings-autonomous-skill-creation").checked,
+                autonomous_skill_improvement: document.getElementById("settings-autonomous-skill-improvement").checked,
+                skill_coverage_threshold: parseInt(document.getElementById("settings-skill-coverage-threshold").value, 10) || 4,
+                max_autonomous_skills_per_execution: Math.max(0, parseInt(document.getElementById("settings-max-autonomous-skills").value, 10) || 0),
                 workspace_path: document.getElementById("settings-workspace-path").value.trim(),
                 restrict_to_workspace: document.getElementById("settings-restrict-to-workspace").checked,
                 allow_subfolders: document.getElementById("settings-allow-subfolders").checked,
@@ -2474,6 +2484,17 @@
                     <span><strong>Continuer tant que le travail progresse</strong><br>
                     Aucune limite globale d'itérations : le budget ci-dessus est remis à zéro lors d'une modification réelle du projet ou d'un nouveau test réussi. Les lectures et erreurs répétées ne le renouvellent pas.</span>
                 </label>
+                <div style="padding: 9px; border: 1px solid var(--border-color); border-radius: 4px; display: grid; gap: 7px;">
+                    <strong style="font-size: 12px; color: var(--text-normal);">Agents et skills autonomes sur mesure</strong>
+                    <label style="font-size: 11px; display: flex; gap: 6px;"><input type="checkbox" id="settings-autonomous-specialization">Créer et conserver un profil spécialisé inédit pour chaque expertise du plan.</label>
+                    <label style="font-size: 11px; display: flex; gap: 6px;"><input type="checkbox" id="settings-autonomous-skill-creation">Détecter les expertises non couvertes, générer un skill, le valider, le tester de façon isolée et le charger à chaud.</label>
+                    <label style="font-size: 11px; display: flex; gap: 6px;"><input type="checkbox" id="settings-autonomous-skill-improvement">Améliorer uniquement les skills générés après un échec concret.</label>
+                    <div style="display:flex;gap:10px;flex-wrap:wrap">
+                        <label style="font-size:11px;flex:1">Seuil de couverture<input type="number" id="settings-skill-coverage-threshold" class="approval-reason-input" min="1" max="30" style="margin:4px 0 0;width:100%"></label>
+                        <label style="font-size:11px;flex:1">Nouveaux skills max./exécution<input type="number" id="settings-max-autonomous-skills" class="approval-reason-input" min="0" max="50" style="margin:4px 0 0;width:100%"></label>
+                    </div>
+                    <small style="color:var(--text-muted)">Un skill généré reste une procédure Markdown : il ne peut ni créer un outil exécutable, ni augmenter les permissions du noyau.</small>
+                </div>
                 <div style="display: flex; flex-direction: column; gap: 4px; margin-top: 6px;">
                     <label style="font-size: 11px; color: var(--text-normal);">Nouveaux agents autonomes après échec d'une étape</label>
                     <input type="number" id="settings-max-step-retries" class="approval-reason-input" style="margin: 0;" placeholder="2" min="0" max="5">

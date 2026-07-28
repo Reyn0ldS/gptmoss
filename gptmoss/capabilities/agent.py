@@ -91,7 +91,7 @@ class AgentCapability:
             while True:
                 await asyncio.sleep(1.0)
                 state = state_engine.get_execution(exec_id)
-                if state.status in ("completed", "failed", "cancelled"):
+                if state.status in ("completed", "failed", "cancelled", "waiting_provider"):
                     break
                     
             convo = state_engine.get_conversation(exec_id)
@@ -103,6 +103,9 @@ class AgentCapability:
                         last_response = msg["content"]
                         break
                 return f"Subtask completed successfully. Result:\n{last_response}"
+            elif state.status == "waiting_provider":
+                return (f"Subtask is durably waiting for the private LLM provider and will resume automatically. "
+                        f"Execution ID: {exec_id}.")
             else:
                 return f"Subtask failed or was cancelled. Final status: {state.status}."
         except Exception as e:

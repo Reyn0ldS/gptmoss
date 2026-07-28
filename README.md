@@ -124,6 +124,11 @@ La configuration active est `workspace/config.json`. Au démarrage, GPTMOSS la n
   ],
   "workspace_full_autonomy": false,
   "continue_while_progress": true,
+  "autonomous_specialization": true,
+  "autonomous_skill_creation": true,
+  "autonomous_skill_improvement": true,
+  "skill_coverage_threshold": 4,
+  "max_autonomous_skills_per_execution": 6,
   "workspace_path": "./workspace",
   "restrict_to_workspace": true,
   "allow_subfolders": true,
@@ -151,6 +156,11 @@ La configuration active est `workspace/config.json`. Au démarrage, GPTMOSS la n
 | `approval_required_capabilities` | Capacités ou actions nécessitant une décision humaine. | Conserver `shell` et le quality gate. |
 | `workspace_full_autonomy` | Préautorise toutes les actions shell présentes et futures, uniquement dans les projets du workspace. Les refus explicites et le shell sûr restent prioritaires. | `false`, ou `true` sur un workspace isolé et de confiance. |
 | `continue_while_progress` | Supprime la limite globale de tours d'une étape tant qu'un progrès durable est détecté. | `true` pour les tâches longues. |
+| `autonomous_specialization` | Crée et conserve un profil d'agent propre à chaque spécialiste inédit du plan. | `true`. |
+| `autonomous_skill_creation` | Génère un skill procédural lorsqu'aucun skill chargé ne couvre suffisamment l'expertise. | `true`. |
+| `autonomous_skill_improvement` | Révise un skill généré à partir d'un échec réel et archive sa version précédente. | `true`. |
+| `skill_coverage_threshold` | Score minimal au-delà duquel les skills existants sont jugés suffisants. | `4` (1 à 30). |
+| `max_autonomous_skills_per_execution` | Protection contre la création non bornée de skills par une seule exécution. | `6` (0 à 50). |
 | `workspace_path` | Racine de travail des agents. | Un dossier dédié. |
 | `restrict_to_workspace` | Empêche les accès de fichiers hors de la racine. | `true`. |
 | `allow_subfolders` | Autorise les opérations dans les sous-dossiers. | `true`. |
@@ -330,6 +340,8 @@ Routes principales :
 | `POST /skills/import` | Importe le contenu d'un fichier `SKILL.md`. |
 | `POST /skills/{name}/validate` | Vérifie le format, l'empreinte et la compatibilité d'un skill. |
 | `DELETE /skills/{name}` | Supprime un skill du workspace ; les skills intégrés sont protégés. |
+| `GET /agent-profiles` | Liste les profils spécialisés persistants créés par le moteur. |
+| `GET /evolution` | Affiche les réglages du cycle autonome et les manifests des skills générés. |
 | `POST /artifacts` | Dépose un fichier. |
 | `GET /artifacts/{id}/preview` | Renvoie un aperçu texte ou image local. |
 | `GET` / `POST /memory` | Filtre les mémoires ou crée une entrée. |
@@ -431,7 +443,23 @@ Deux modes de sélection existent :
 1. automatique : GPTMOSS classe les skills selon les mots de la tâche ;
 2. explicite : envoyez `agent_config.skills`, comme dans l'exemple API précédent.
 
-Après ajout ou modification d'un fichier `SKILL.md`, redémarrez le serveur afin de redécouvrir les skills. Pour vérifier le résultat :
+### Création autonome d'agents et de skills
+
+Quand l'option est active, GPTMOSS transforme chaque spécialité précise du plan en profil réutilisable sous `<workspace>/agents/<id>/AGENT.json`. L'identité dépend du nom, du rôle canonique et de l'expertise : une reprise retrouve donc le même profil au lieu d'en créer un autre. Le profil apporte son propre prompt, son expertise, ses skills et ses statistiques de résultats ; le rôle canonique reste seulement le socle d'exécution sécurisé.
+
+Avant une étape, le moteur mesure la couverture du registre. Si elle est sous le seuil, il demande au LLM privé une procédure nouvelle, puis applique le cycle suivant :
+
+```text
+expertise manquante -> synthèse -> validation statique -> essai procédural isolé
+                     -> persistance -> chargement à chaud -> utilisation
+                     -> retour d'échec -> révision + archivage -> nouvel essai
+```
+
+L'essai isolé vérifie que la procédure contient un workflow ordonné, des limites workspace, une gestion d'échec, une vérification et un contrat de preuves. Il n'exécute pas de code fourni par le skill : un skill GPTMOSS est du Markdown injecté dans le prompt. Les noms de capabilities sont filtrés contre les outils réellement enregistrés ; `agent`, `devteam`, les outils inconnus, les contournements d'approbation et les demandes de secrets sont refusés. Un skill ne peut donc pas enregistrer un outil, modifier la politique ou augmenter ses droits. Toute action reste évaluée par le noyau, les refus explicites et le shell sûr.
+
+Les créations acceptées sont placées sous `<workspace>/skills/auto-*/` avec `SKILL.md`, `GENERATED.json` et, après amélioration, `revisions/`. Leur provenance est `llm-autonomous-synthesis`. Le moteur sait créer une procédure à partir des connaissances du LLM et des documents locaux, mais ne peut pas inventer de faits fiables absents de ces sources sur une machine hors ligne.
+
+Les skills enregistrés par l'API et ceux générés automatiquement sont chargés à chaud. Après une modification directe sur disque, redémarrez le serveur afin de forcer une redécouverte complète. Pour vérifier le résultat :
 
 ```powershell
 Invoke-RestMethod http://127.0.0.1:8000/skills

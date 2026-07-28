@@ -8,6 +8,7 @@ from gptmoss.core.constants import DEFAULT_SYSTEM_PROMPT
 from gptmoss.core.observability import TraceRecorder
 from gptmoss.core.skills import SkillRegistry
 from gptmoss.core.artifacts import ArtifactStore
+from gptmoss.core.evolution import AgentProfileRegistry, AutonomousSkillLifecycle
 
 __all__ = [
     "Event",
@@ -24,4 +25,6 @@ __all__ = [
     "TraceRecorder",
     "SkillRegistry",
     "ArtifactStore",
+    "AgentProfileRegistry",
+    "AutonomousSkillLifecycle",
 ]
