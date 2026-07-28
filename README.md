@@ -30,6 +30,12 @@ Ce document est le mode d'emploi complet. Les exemples utilisent PowerShell et l
 - accès réseau à cette API ;
 - Git n'est requis que pour travailler sur le code source.
 
+Le mode hors-ligne signifie que GPTMOSS ne télécharge rien depuis Internet pendant
+l'installation ou l'exécution. Un serveur de modèle compatible OpenAI doit néanmoins
+être démarré sur la machine (`127.0.0.1`) ou accessible sur le réseau local. Le voyant
+de l'interface indique la connexion au serveur GPTMOSS ; utilisez **Tester la
+connexion** dans les paramètres pour vérifier séparément le modèle.
+
 ### Installation Windows
 
 Depuis la racine du projet :
@@ -62,7 +68,7 @@ Après une modification de `requirements-runtime.txt` ou pour actualiser Python,
 .\prepare-offline-source.bat
 ```
 
-Le constructeur télécharge CPython embeddable depuis Python.org, vérifie son SHA-256, résout uniquement les wheels d'exécution compatibles CPython 3.13/Windows amd64, les installe dans `Lib\site-packages`, teste le runtime et écrit `offline-runtime-manifest.json`. Le runtime préparé et le manifeste sont versionnés dans Git afin que les utilisateurs hors-ligne n'aient pas à répéter cette opération. Les outils de test restent séparés dans `requirements.txt` et ne gonflent pas le paquet distribué.
+Le constructeur télécharge CPython embeddable depuis Python.org, vérifie son SHA-256, résout uniquement les wheels d'exécution compatibles CPython 3.13/Windows amd64, les installe dans `Lib\site-packages`, teste le runtime et écrit `offline-runtime-manifest.json`. Le runtime préparé et le manifeste sont versionnés dans Git afin que les utilisateurs hors-ligne n'aient pas à répéter cette opération. `pytest` et `pytest-asyncio` font partie du runtime opérationnel : les agents QA peuvent ainsi tester les projets sans télécharger de paquet.
 
 Ne copiez pas un `venv` entre deux machines : les environnements virtuels ne sont pas portables.
 
@@ -297,6 +303,8 @@ Routes principales :
 | `GET /executions/{id}/unified-feed` | Fil des messages, sous-agents compris. |
 | `GET /executions/{id}/metrics` | Compteurs et durées de télémétrie. |
 | `POST /executions` | Crée une exécution. |
+| `GET /projects` | Liste les projets configurés. |
+| `POST /projects` | Crée atomiquement un projet et son dossier. |
 | `GET` / `POST /executions/{id}/subagents` | Liste ou crée les sous-agents d'une exécution parente. |
 | `DELETE /executions/{id}` | Supprime une exécution et ses descendants de l'état persistant. |
 | `POST /executions/clear-all` | Supprime tout l'historique d'exécution. |
@@ -337,7 +345,17 @@ Le client doit garder la connexion ouverte et peut envoyer un message périodiqu
 
 ## Exécutions, plan et validations
 
-Une tâche est planifiée en étapes reliées par dépendances. Les étapes sans dépendance commune peuvent s'exécuter en parallèle. Si une description d'étape correspond à un rôle (architecte, sécurité, développement, QA, débogage ou documentation), le coordinateur crée un sous-agent ; les sous-agents ne reçoivent pas les capacités `agent` ni `devteam`.
+Une tâche est planifiée en étapes reliées par dépendances. Le plan fournit un rôle
+explicite (`architect`, `security`, `developer`, `qa`, `debugger`, `writer` ou
+`coordinator`) et le moteur valide les identifiants, les références et l'absence de
+cycle avant de démarrer. Les étapes indépendantes s'exécutent en parallèle.
+
+Chaque étape spécialiste possède un seul sous-agent persistant. Son identifiant et
+son résultat sont enregistrés avant et après l'exécution, ce qui empêche une reprise
+ou un double clic de refaire le même travail. Les livraisons des dépendances sont
+transmises explicitement à l'étape suivante. Le coordinateur final reçoit toutes les
+livraisons dans l'ordre du plan, les synthétise sans relancer de sous-agent et expose
+l'ensemble dans le champ `results` de l'exécution.
 
 États possibles :
 

@@ -5,11 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>MOSS - Agent Runtime Console</title>
     <!-- Outfit Font from Google Fonts -->
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
     <!-- Marked.js for markdown rendering -->
-    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
     <style>
         :root {
             --bg-base: #080b11;
@@ -1082,7 +1078,7 @@
             <div class="brand">MOSS Agent</div>
             <div class="ws-badge">
                 <div class="ws-dot disconnected" id="ws-dot"></div>
-                <span id="ws-status">Hors ligne</span>
+                <span id="ws-status">Serveur hors ligne</span>
             </div>
         </div>
         
@@ -1120,7 +1116,7 @@
                 </div>
                 <label class="form-label" for="task-input">Décrivez la tâche à accomplir</label>
                 <input type="file" id="task-attachments" multiple accept=".txt,.md,.json,.csv,.png,.jpg,.jpeg,.webp" style="margin-bottom: 10px; width: 100%; color: var(--text-muted);"><textarea class="task-textarea" id="task-input" placeholder="Ex: Crée un fichier de salutations, ou analyse le dossier actuel..."></textarea>
-                <button class="task-submit-btn" onclick="submitNewTask()">Démarrer l'exécution</button>
+                <button id="task-submit-btn" class="task-submit-btn" onclick="submitNewTask()">Démarrer l'exécution</button>
             </div>
         </div>
 
@@ -1202,6 +1198,8 @@
         let activeFeedTab = "active"; // "active" or "unified"
         let globalExecutions = [];
         let socket = null;
+        let websocketReconnectTimer = null;
+        const selectedLibraryArtifacts = new Set();
 
         function switchFeedTab(tab) {
             activeFeedTab = tab;
@@ -1217,8 +1215,13 @@
             }
         }
 
-        // Configure marked options
-        marked.setOptions({
+        // The UI must remain usable without Internet access. If a local Markdown
+        // parser is not bundled, preserve formatting safely as preformatted text.
+        const markdownParser = window.marked || {
+            setOptions: () => {},
+            parse: value => `<pre>${escapeHTML(String(value || ""))}</pre>`
+        };
+        markdownParser.setOptions({
             gfm: true,
             breaks: true
         });
@@ -1226,7 +1229,7 @@
         // LLM output is untrusted. Render only a small, safe HTML subset from Markdown.
         function renderSafeMarkdown(markdown) {
             const allowedTags = new Set(["A", "BLOCKQUOTE", "BR", "CODE", "DEL", "EM", "H1", "H2", "H3", "H4", "H5", "H6", "HR", "LI", "OL", "P", "PRE", "STRONG", "TABLE", "TBODY", "TD", "TH", "THEAD", "TR", "UL"]);
-            const documentFragment = new DOMParser().parseFromString(marked.parse(markdown || ""), "text/html");
+            const documentFragment = new DOMParser().parseFromString(markdownParser.parse(markdown || ""), "text/html");
             for (const element of Array.from(documentFragment.body.querySelectorAll("*"))) {
                 if (!allowedTags.has(element.tagName)) {
                     element.replaceWith(...Array.from(element.childNodes));
@@ -1514,6 +1517,7 @@
 
         // Connect WebSockets for live status updates
         function setupWebSocket() {
+            if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) return;
             const wsProtocol = window.location.protocol === "https:" ? "wss:" : "ws:";
             socket = new WebSocket(`${wsProtocol}//${API_HOST}/ws/events`);
             
@@ -1521,16 +1525,21 @@
             const text = document.getElementById("ws-status");
 
             socket.onopen = () => {
+                if (websocketReconnectTimer) clearTimeout(websocketReconnectTimer);
+                websocketReconnectTimer = null;
                 dot.className = "ws-dot connected";
-                text.textContent = "Connecté";
+                text.textContent = "Serveur connecté";
             };
 
             socket.onclose = () => {
+                socket = null;
                 dot.className = "ws-dot disconnected";
-                text.textContent = "Hors ligne";
+                text.textContent = "Serveur hors ligne";
                 // Auto-reconnect in 3s
-                setTimeout(setupWebSocket, 3000);
+                if (!websocketReconnectTimer) websocketReconnectTimer = setTimeout(setupWebSocket, 3000);
             };
+
+            socket.onerror = () => socket?.close();
 
             socket.onmessage = (event) => {
                 try {
@@ -1872,19 +1881,23 @@
             const input = document.getElementById("task-input");
             const task = input.value.trim();
             if (!task) return;
+            const submitButton = document.getElementById("task-submit-btn");
+            if (submitButton?.disabled) return;
             
             const projSelect = document.getElementById("task-project-select");
             const project_id = projSelect ? projSelect.value : "proj-default";
             
             try {
-                const res = await fetch("/executions", {
+                if (submitButton) {
+                    submitButton.disabled = true;
+                    submitButton.textContent = "Création en cours…";
+                }
+                const attachment_ids = await uploadSelectedAttachments();
+                const res = await requestApi("/executions", {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ task: task, project_id: project_id, attachment_ids: await uploadSelectedAttachments() })
+                    body: JSON.stringify({ task, project_id, attachment_ids })
                 });
-                
-                if (!res.ok) throw new Error("Could not submit task.");
-                
                 const data = await res.json();
                 const newId = data.execution_id;
                 selectedLibraryArtifacts.clear();
@@ -1897,6 +1910,11 @@
                 fetchExecutions();
             } catch (err) {
                 alert(`Erreur lors de la soumission de la tâche : ${err.message}`);
+            } finally {
+                if (submitButton) {
+                    submitButton.disabled = false;
+                    submitButton.textContent = "Démarrer l'exécution";
+                }
             }
         }
 
@@ -2002,7 +2020,6 @@
         let localProjects = [];
         let availableSkills = [];
         let loadedSettings = {};
-        const selectedLibraryArtifacts = new Set();
         let librarySkills = [];
         let libraryMemories = [];
         let editingMemoryId = null;
@@ -2140,25 +2157,17 @@
 
         async function saveProjectToBackendDirectly(id, name) {
             try {
-                const res = await fetch("/api/settings");
-                if (!res.ok) throw new Error();
-                const data = await res.json();
-                
-                const projects = data.projects || [];
-                projects.push({ id, name });
-                data.projects = projects;
-                data.api_key = "";
-                data.confirm_sensitive = true;
-                
-                await fetch("/api/settings", {
+                await requestApi("/projects", {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify(data)
+                    body: JSON.stringify({ id, name })
                 });
                 showToast(`Projet "${name}" créé et enregistré.`, "success");
                 loadProjectOptions();
             } catch (err) {
                 console.error("Failed to persist new project quick:", err);
+                document.querySelector(`#task-project-select option[value="${CSS.escape(id)}"]`)?.remove();
+                showToast(`Création du projet impossible : ${err.message}`, "error");
             }
         }
 

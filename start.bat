@@ -17,7 +17,7 @@ if !errorlevel! neq 0 (
 )
 
 echo [INFO] Using !GPTMOSS_RUNTIME_KIND! Python: !GPTMOSS_PYTHON!
-"!GPTMOSS_PYTHON!" -B -c "import fastapi, httpx, openai, pydantic, uvicorn, websockets"
+"!GPTMOSS_PYTHON!" -B -c "import fastapi, httpx, openai, pydantic, pytest, uvicorn, websockets"
 if !errorlevel! neq 0 (
     echo [WARNING] Python dependencies are missing. Running setup...
     call "%~dp0install.bat"

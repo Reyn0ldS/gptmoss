@@ -1,1 +1,1 @@
-python-*-embed-amd64/** -text whitespace=-trailing-space
+python-*-embed-amd64/** -text whitespace=-trailing-space conflict-marker-size=32

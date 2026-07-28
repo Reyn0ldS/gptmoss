@@ -342,6 +342,34 @@ def test_api_settings_preserve_secret_and_context_budget(tmp_path):
     invalid["max_context_chars"] = 100
     assert client.post("/api/settings", json=invalid).status_code == 422
 
+    created_project = client.post("/projects", json={"id": "proj-atomic", "name": "Atomic Project"})
+    assert created_project.status_code == 201
+    assert (tmp_path / "projects" / "proj-atomic").is_dir()
+    assert client.post("/projects", json={"id": "proj-atomic", "name": "Duplicate"}).status_code == 409
+    private_config = json.loads((tmp_path / "config.json").read_text(encoding="utf-8"))
+    assert private_config["api_key"] == "secret-key"
+    assert any(project["id"] == "proj-atomic" for project in private_config["projects"])
+
+    # The bootstrap config remains authoritative when agent files move elsewhere.
+    moved_workspace = tmp_path / "agent-files"
+    moved_settings = client.get("/api/settings").json()
+    moved_settings["workspace_path"] = str(moved_workspace)
+    moved_settings["confirm_sensitive"] = True
+    assert client.post("/api/settings", json=moved_settings).status_code == 200
+    assert client.get("/api/settings").json()["workspace_path"] == str(moved_workspace)
+    assert exec_engine.max_step_iterations == 12
+    moved_project = client.post("/projects", json={"id": "proj-moved", "name": "Moved Project"})
+    assert moved_project.status_code == 201
+    assert (moved_workspace / "projects" / "proj-moved").is_dir()
+    assert not (moved_workspace / "config.json").exists()
+    private_config = json.loads((tmp_path / "config.json").read_text(encoding="utf-8"))
+    assert any(project["id"] == "proj-moved" for project in private_config["projects"])
+
+    execution_count = len(state_engine.executions)
+    missing_project = client.post("/executions", json={"task": "Must not start", "project_id": "proj-missing"})
+    assert missing_project.status_code == 404
+    assert len(state_engine.executions) == execution_count
+
 
 def test_gui_uses_sanitized_markdown_renderer():
     from pathlib import Path

@@ -151,6 +151,7 @@ def bootstrap_runtime(workspace_root: str):
         skill_registry=skill_registry,
         artifact_store=artifact_store,
         default_skills=default_skills,
+        max_step_iterations=max_step_iterations,
     )
 
     # Register capabilities

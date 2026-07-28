@@ -27,10 +27,15 @@ logger = logging.getLogger("gptmoss.api")
 
 # Models for request/response validation
 class SubmitTaskRequest(BaseModel):
-    task: str
+    task: str = Field(min_length=1, max_length=50_000)
     agent_config: Optional[Dict[str, Any]] = None
     project_id: Optional[str] = None
-    attachment_ids: List[str] = []
+    attachment_ids: List[str] = Field(default_factory=list)
+
+class ProjectRequest(BaseModel):
+    id: str = Field(pattern=r"^[a-z0-9][a-z0-9_-]{0,63}$")
+    name: str = Field(min_length=1, max_length=200)
+    path: Optional[str] = Field(default=None, max_length=2_000)
 
 class UploadArtifactRequest(BaseModel):
     filename: str
@@ -91,6 +96,7 @@ class AppState:
     event_bus: Optional[EventBus] = None
     flush_task: Optional[asyncio.Task] = None
     subscribed_event_bus: Optional[EventBus] = None
+    config_path: Optional[Path] = None
 
 app_state = AppState()
 
@@ -173,6 +179,48 @@ class ConnectionManager:
 
 manager = ConnectionManager()
 
+DEFAULT_PROJECT = {"id": "proj-default", "name": "Projet Par Défaut"}
+
+def _filesystem_capability():
+    if not app_state.execution_engine:
+        return None
+    return app_state.execution_engine.get_capability("filesystem")
+
+def _runtime_config_path() -> Optional[Path]:
+    if app_state.config_path:
+        return app_state.config_path
+    filesystem = _filesystem_capability()
+    return Path(filesystem.workspace_root).resolve() / "config.json" if filesystem else None
+
+def _load_runtime_config() -> Dict[str, Any]:
+    config_path = _runtime_config_path()
+    if not config_path or not config_path.exists():
+        return {}
+    try:
+        return json.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=500, detail="Runtime configuration is unreadable.") from exc
+
+def _configured_projects() -> List[Dict[str, Any]]:
+    projects = _load_runtime_config().get("projects") or [dict(DEFAULT_PROJECT)]
+    return [project for project in projects if isinstance(project, dict) and project.get("id")]
+
+def _write_runtime_config(config: Dict[str, Any]) -> None:
+    config_path = _runtime_config_path()
+    if not config_path:
+        raise HTTPException(status_code=500, detail="Filesystem capability not initialized.")
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = config_path.with_suffix(".json.tmp")
+    try:
+        temporary.write_text(json.dumps(config, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        os.replace(temporary, config_path)
+    except OSError as exc:
+        temporary.unlink(missing_ok=True)
+        raise HTTPException(status_code=500, detail="Unable to persist runtime configuration.") from exc
+
+def _project_by_id(project_id: str) -> Optional[Dict[str, Any]]:
+    return next((project for project in _configured_projects() if project.get("id") == project_id), None)
+
 @app.get("/", response_class=HTMLResponse)
 async def get_gui():
     if not os.path.exists(GUI_FILE_PATH):
@@ -182,37 +230,62 @@ async def get_gui():
 
 @app.post("/executions", status_code=201)
 async def submit_task(req: SubmitTaskRequest):
-    if not app_state.kernel:
+    if not app_state.kernel or not app_state.state_engine:
         raise HTTPException(status_code=500, detail="Runtime kernel not initialized.")
-    
-    agent_config = req.agent_config or {"system_prompt": DEFAULT_SYSTEM_PROMPT}
-    exec_id = await app_state.kernel.submit_task(req.task, agent_config)
-    
-    state = app_state.state_engine.get_execution(exec_id)
-    if state:
-        project_id = req.project_id or "proj-default"
-        state.variables["project_id"] = project_id
-        state.variables["attachment_ids"] = req.attachment_ids
-        
-        # Resolve and store custom project path from config.json
+    project_id = req.project_id or "proj-default"
+    project = _project_by_id(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail=f"Project '{project_id}' does not exist.")
+
+    filesystem = _filesystem_capability()
+    if req.attachment_ids and (not filesystem or not app_state.execution_engine.artifact_store):
+        raise HTTPException(status_code=500, detail="Artifact storage not initialized.")
+    for attachment_id in dict.fromkeys(req.attachment_ids):
         try:
-            filesystem_cap = app_state.execution_engine.get_capability("filesystem")
-            if filesystem_cap:
-                workspace_root = filesystem_cap.workspace_root
-                config_path = os.path.join(workspace_root, "config.json")
-                if os.path.exists(config_path):
-                    with open(config_path, "r", encoding="utf-8") as f:
-                        config_data = json.load(f)
-                    projects = config_data.get("projects") or []
-                    for p in projects:
-                        if p.get("id") == project_id and p.get("path"):
-                            state.variables["project_path"] = p.get("path")
-                            break
-        except Exception as e:
-            logger = logging.getLogger("gptmoss.api")
-            logger.error(f"Error looking up project custom path: {e}")
-        
+            app_state.execution_engine.artifact_store.get(attachment_id)
+        except (ValueError, FileNotFoundError, OSError, KeyError) as exc:
+            raise HTTPException(status_code=404, detail=f"Attachment '{attachment_id}' does not exist.") from exc
+
+    agent_config = dict(req.agent_config or {})
+    agent_config.setdefault("system_prompt", DEFAULT_SYSTEM_PROMPT)
+    variables = dict(agent_config.get("variables") or {})
+    variables.update({
+        "project_id": project_id,
+        "attachment_ids": list(dict.fromkeys(req.attachment_ids)),
+    })
+    if project.get("path"):
+        variables["project_path"] = str(Path(str(project["path"])).resolve())
+    agent_config["variables"] = variables
+    exec_id = await app_state.kernel.submit_task(req.task.strip(), agent_config)
     return {"execution_id": exec_id, "status": "running"}
+
+@app.get("/projects")
+async def list_projects():
+    return _configured_projects()
+
+@app.post("/projects", status_code=201)
+async def create_project(req: ProjectRequest):
+    if not app_state.execution_engine:
+        raise HTTPException(status_code=500, detail="Engine not initialized.")
+    config = _load_runtime_config()
+    projects = config.get("projects") or [dict(DEFAULT_PROJECT)]
+    if any(isinstance(project, dict) and project.get("id") == req.id for project in projects):
+        raise HTTPException(status_code=409, detail=f"Project '{req.id}' already exists.")
+    project = {"id": req.id, "name": req.name.strip()}
+    if req.path and req.path.strip():
+        path = Path(req.path.strip()).expanduser()
+        if not path.is_absolute():
+            raise HTTPException(status_code=400, detail="A custom project path must be absolute.")
+        project["path"] = str(path.resolve())
+        path.mkdir(parents=True, exist_ok=True)
+    else:
+        filesystem = _filesystem_capability()
+        (Path(filesystem.workspace_root) / "projects" / req.id).mkdir(parents=True, exist_ok=True)
+    projects.append(project)
+    config["projects"] = projects
+    _write_runtime_config(config)
+    await app_state.event_bus.publish(Event(type="ProjectCreated", payload={"project_id": req.id, "name": project["name"]}))
+    return project
 
 @app.post("/artifacts", status_code=201)
 async def upload_artifact(req: UploadArtifactRequest):
@@ -424,6 +497,7 @@ async def get_execution(execution_id: str):
         "current_step": state.current_step,
         "plan": state.current_plan,
         "variables": state.variables,
+        "results": state.results,
         "messages": convo.messages
     }
 
@@ -598,7 +672,7 @@ async def resume_execution(execution_id: str):
     ))
     
     convo = app_state.state_engine.get_conversation(execution_id)
-    task = convo.messages[0]["content"]
+    task = state.variables.get("task") or convo.messages[0]["content"]
     if task.startswith("Task: "):
         task = task[6:]
         
@@ -747,12 +821,9 @@ async def get_settings():
     if not app_state.execution_engine:
         raise HTTPException(status_code=500, detail="Engine not initialized.")
     
-    workspace_root = app_state.execution_engine.get_capability("filesystem").workspace_root
-    config_path = os.path.join(workspace_root, "config.json")
-    
-    if os.path.exists(config_path):
-        with open(config_path, "r", encoding="utf-8") as f:
-            config = json.load(f)
+    config_path = _runtime_config_path()
+    if config_path and config_path.exists():
+        config = _load_runtime_config()
         config.pop("api_key", None)
         config.setdefault("max_step_iterations", 30)
         config.setdefault("max_context_chars", 12_000)
@@ -814,7 +885,9 @@ async def update_settings(req: SettingsRequest):
         raise HTTPException(status_code=500, detail="Engine not initialized.")
         
     workspace_root = app_state.execution_engine.get_capability("filesystem").workspace_root
-    config_path = os.path.join(workspace_root, "config.json")
+    config_path = _runtime_config_path()
+    if not config_path:
+        raise HTTPException(status_code=500, detail="Runtime configuration path is unavailable.")
     _validate_provider_url(req.base_url)
     
     policy = app_state.execution_engine.policy_provider
@@ -837,13 +910,7 @@ async def update_settings(req: SettingsRequest):
     llm = app_state.execution_engine.llm_provider
     # A blank settings form must not erase an existing secret.
     api_key = req.api_key or getattr(llm, "api_key", "")
-    previous: Dict[str, Any] = {}
-    if os.path.exists(config_path):
-        try:
-            with open(config_path, "r", encoding="utf-8") as handle:
-                previous = json.load(handle)
-        except (OSError, json.JSONDecodeError):
-            previous = {}
+    previous: Dict[str, Any] = _load_runtime_config() if config_path.exists() else {}
     config_data = {
         "api_key": api_key,
         "base_url": req.base_url,
@@ -864,8 +931,7 @@ async def update_settings(req: SettingsRequest):
         "default_skills": [skill.lower() for skill in req.default_skills]
     }
     
-    with open(config_path, "w", encoding="utf-8") as f:
-        json.dump(config_data, f, indent=2)
+    _write_runtime_config(config_data)
         
     if hasattr(llm, "update_config"):
         llm.update_config(
@@ -888,6 +954,7 @@ async def update_settings(req: SettingsRequest):
             max_output_chars=req.shell_max_output_chars,
         )
     app_state.execution_engine.default_skills = [skill.lower() for skill in req.default_skills]
+    app_state.execution_engine.max_step_iterations = req.max_step_iterations
         
     for cap_name in ["filesystem", "shell", "agent", "devteam"]:
         cap = app_state.execution_engine.get_capability(cap_name)
@@ -911,4 +978,9 @@ def init_app(kernel: RuntimeKernel, exec_engine: ExecutionEngine, state_engine: 
     app_state.execution_engine = exec_engine
     app_state.state_engine = state_engine
     app_state.event_bus = event_bus
+    if state_engine.persist_path:
+        app_state.config_path = Path(state_engine.persist_path).resolve().parent / "config.json"
+    else:
+        filesystem = exec_engine.get_capability("filesystem")
+        app_state.config_path = Path(filesystem.workspace_root).resolve() / "config.json" if filesystem else None
     return app

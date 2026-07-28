@@ -234,16 +234,14 @@ class DeveloperTeamCapability:
             tester_report = await self._execute_role_task("Testeur QA", tester_prompt, tester_task, parent_id)
             pipeline_log.append(f"✅ Suite de tests rédigée par l'ingénieur QA.\n")
 
-            # Point 4: Auto-install pip requirements.txt dependencies before running tests
+            # Dependencies must be present in the autonomous runtime or an offline
+            # wheelhouse. Never start an implicit network installation here.
             req_file = os.path.join(project_dir, "requirements.txt")
             if os.path.exists(req_file):
-                pipeline_log.append("🔄 **Phase 4.1: Installation des dépendances requises (pip install)...**")
-                shell_cap = self.kernel.execution_engine.get_capability("shell")
-                if shell_cap:
-                    # Run pip install in the active python context
-                    pip_cmd = f"python -m pip install -r {req_file}"
-                    pip_output = shell_cap.execute(pip_cmd)
-                    pipeline_log.append(f"✅ Dépendances installées :\n{pip_output}\n")
+                pipeline_log.append(
+                    "ℹ️ Le projet déclare requirements.txt. L'installation réseau implicite est désactivée ; "
+                    "les dépendances doivent être présentes dans le paquet autonome ou dans un wheelhouse local."
+                )
 
             # Phase 5: Executing & Debugging loop
             pipeline_log.append("🔄 **Phase 5: Exécution des Tests & Correction Automatique...**")
@@ -265,7 +263,7 @@ class DeveloperTeamCapability:
                 # Run tests
                 test_output = shell_cap.execute(test_cmd)
                 
-                if "failed" in test_output.lower() or "error" in test_output.lower() or "traceback" in test_output.lower():
+                if not test_output.startswith("EXIT_CODE: 0"):
                     pipeline_log.append(f"⚠️ Échec des tests. Lancement de l'agent Debugger pour corriger le code...")
                     debugger_task = (
                         f"Corriger le code dans '{project_dir}' pour résoudre ces erreurs de tests:\n\n{test_output}"
@@ -300,7 +298,7 @@ class DeveloperTeamCapability:
                     # Final test check
                     if shell_cap:
                         test_output = shell_cap.execute(test_cmd)
-                        if "failed" in test_output.lower() or "error" in test_output.lower() or "traceback" in test_output.lower():
+                        if not test_output.startswith("EXIT_CODE: 0"):
                             pipeline_log.append("⚠️ Les tests échouent toujours après correction finale. Le projet est livré avec avertissement.")
                         else:
                             pipeline_log.append("✅ Tous les tests passent après corrections finales !")

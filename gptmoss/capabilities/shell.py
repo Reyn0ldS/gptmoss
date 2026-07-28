@@ -1,5 +1,7 @@
 import subprocess
 import os
+import re
+import shlex
 import sys
 from typing import Dict, Any, Optional
 from gptmoss.interfaces.capability import capability, action
@@ -67,6 +69,37 @@ class ShellCapability:
         os.makedirs(target_dir, exist_ok=True)
         return target_dir
 
+    @staticmethod
+    def _unquote_argument(value: str) -> str:
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
+            return value[1:-1]
+        return value
+
+    def _portable_python_command(self, command: str):
+        """Build argv that restores normal project imports for embeddable Python."""
+        match = re.match(r"^python(?:\.exe)?(?:\s+(.*))?$", command, flags=re.IGNORECASE | re.DOTALL)
+        if not match:
+            return None
+        raw_arguments = match.group(1) or ""
+        tokens = [self._unquote_argument(item) for item in shlex.split(raw_arguments, posix=False)]
+        interpreter_options = []
+        while tokens and tokens[0].startswith("-") and tokens[0] not in {"-m", "-c"}:
+            interpreter_options.append(tokens.pop(0))
+
+        bootstrap = "import os,runpy,sys;sys.path.insert(0,os.getcwd());"
+        if len(tokens) >= 2 and tokens[0] == "-m":
+            module = tokens[1]
+            module_arguments = tokens[2:]
+            code = bootstrap + f"sys.argv=[{module!r}]+sys.argv[1:];runpy.run_module({module!r},run_name='__main__')"
+            return [sys.executable, *interpreter_options, "-c", code, *module_arguments]
+        if len(tokens) >= 2 and tokens[0] == "-c":
+            return [sys.executable, *interpreter_options, "-c", bootstrap + tokens[1], *tokens[2:]]
+        if tokens and not tokens[0].startswith("-"):
+            script = tokens[0]
+            code = bootstrap + f"sys.argv=[{script!r}]+sys.argv[1:];runpy.run_path({script!r},run_name='__main__')"
+            return [sys.executable, *interpreter_options, "-c", code, *tokens[1:]]
+        return [sys.executable, *interpreter_options, *tokens]
+
     @action(name="execute", description="Execute a command in the local shell. Returns stdout and stderr.")
     def execute(self, command: str, context: Optional[Dict[str, Any]] = None) -> str:
         """Runs command in subprocess and returns output."""
@@ -86,14 +119,12 @@ class ShellCapability:
                 if "mkdir " in cleaned_cmd:
                     cleaned_cmd = cleaned_cmd.replace("/", "\\")
 
-            if cleaned_cmd.startswith("python ") or cleaned_cmd == "python":
-                cleaned_cmd = f'"{sys.executable}"' + cleaned_cmd[6:]
-            elif cleaned_cmd.startswith("python.exe ") or cleaned_cmd == "python.exe":
-                cleaned_cmd = f'"{sys.executable}"' + cleaned_cmd[10:]
+            portable_python_command = self._portable_python_command(cleaned_cmd)
+            command_to_run = portable_python_command or cleaned_cmd
 
             result = subprocess.run(
-                cleaned_cmd,
-                shell=True,
+                command_to_run,
+                shell=portable_python_command is None,
                 cwd=cwd_dir,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -101,13 +132,13 @@ class ShellCapability:
                 timeout=self.timeout_seconds
             )
             
-            output = ""
+            output = f"EXIT_CODE: {result.returncode}\n"
             if result.stdout:
                 output += f"STDOUT:\n{result.stdout}\n"
             if result.stderr:
                 output += f"STDERR:\n{result.stderr}\n"
-            if not output:
-                output = f"Command finished with exit code {result.returncode} (no output)."
+            if not result.stdout and not result.stderr:
+                output += "Command produced no output."
                 
             if len(output) > self.max_output_chars:
                 output = output[:self.max_output_chars] + "\\n… [output truncated by shell safety limit]"

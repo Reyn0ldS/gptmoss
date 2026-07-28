@@ -34,6 +34,10 @@ class RuntimeKernel:
         Returns:
             The execution ID of the running task.
         """
+        task = str(task or "").strip()
+        if not task:
+            raise ValueError("Task description cannot be empty.")
+        agent_config = dict(agent_config or {})
         execution_id = str(uuid.uuid4())
         
         # Setup agent state
@@ -43,6 +47,13 @@ class RuntimeKernel:
         # Mark state execution as pending
         exec_state = self.state_engine.get_execution(execution_id)
         exec_state.status = "pending"
+        exec_state.variables["task"] = task
+        exec_state.variables["agent_config"] = {
+            key: value for key, value in agent_config.items() if key != "variables"
+        }
+        initial_variables = agent_config.get("variables")
+        if isinstance(initial_variables, dict):
+            exec_state.variables.update(initial_variables)
         if "role_name" in agent_config:
             exec_state.variables["role_name"] = agent_config["role_name"]
         if "parent_execution_id" in agent_config:
