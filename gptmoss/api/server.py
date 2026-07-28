@@ -77,11 +77,14 @@ class SettingsRequest(BaseModel):
     ssl_cert_path: str
     denied_capabilities: List[str]
     approval_required_capabilities: List[str]
+    workspace_full_autonomy: bool = False
+    continue_while_progress: bool = True
     workspace_path: str
     restrict_to_workspace: bool
     allow_subfolders: bool
     projects: List[Dict[str, Any]]
     max_step_iterations: int = Field(default=30, ge=1, le=100)
+    max_step_retries: int = Field(default=2, ge=0, le=5)
     max_context_chars: int = Field(default=12_000, ge=2_000, le=100_000)
     safe_shell_mode: bool = True
     shell_timeout_seconds: int = Field(default=60, ge=1, le=600)
@@ -826,11 +829,14 @@ async def get_settings():
         config = _load_runtime_config()
         config.pop("api_key", None)
         config.setdefault("max_step_iterations", 30)
+        config.setdefault("max_step_retries", 2)
         config.setdefault("max_context_chars", 12_000)
         config.setdefault("safe_shell_mode", True)
         config.setdefault("shell_timeout_seconds", 60)
         config.setdefault("shell_max_output_chars", 12_000)
         config.setdefault("default_skills", [])
+        config.setdefault("workspace_full_autonomy", False)
+        config.setdefault("continue_while_progress", True)
         return config
             
     # Fallback to current memory values
@@ -844,11 +850,14 @@ async def get_settings():
         "ssl_cert_path": "",
         "denied_capabilities": getattr(policy, "denied", []),
         "approval_required_capabilities": getattr(policy, "approval_required", []),
+        "workspace_full_autonomy": getattr(policy, "workspace_full_autonomy", False),
+        "continue_while_progress": getattr(app_state.execution_engine, "continue_while_progress", True),
         "workspace_path": getattr(fs, "workspace_root", "."),
         "restrict_to_workspace": getattr(fs, "restrict_to_workspace", True),
         "allow_subfolders": getattr(fs, "allow_subfolders", True),
         "projects": [{"id": "proj-default", "name": "Projet Par Défaut"}],
         "max_step_iterations": 30,
+        "max_step_retries": 2,
         "max_context_chars": 12_000,
         "safe_shell_mode": True,
         "shell_timeout_seconds": 60,
@@ -899,9 +908,15 @@ async def update_settings(req: SettingsRequest):
         project.get("path") and requested_workspace != Path(str(project["path"])).resolve() and requested_workspace not in Path(str(project["path"])).resolve().parents
         for project in req.projects
     )
+    if req.workspace_full_autonomy and (not req.restrict_to_workspace or outside_project):
+        raise HTTPException(
+            status_code=400,
+            detail="Workspace full autonomy requires workspace restriction and project paths inside that workspace.",
+        )
     sensitive = (
         not req.ssl_verify or not req.restrict_to_workspace or not req.safe_shell_mode
         or "shell" not in requested_approvals or bool(current_approvals - requested_approvals)
+        or req.workspace_full_autonomy != bool(getattr(policy, "workspace_full_autonomy", False))
         or requested_workspace != current_workspace or outside_project
     )
     if sensitive and not req.confirm_sensitive:
@@ -919,11 +934,14 @@ async def update_settings(req: SettingsRequest):
         "ssl_cert_path": req.ssl_cert_path,
         "denied_capabilities": req.denied_capabilities,
         "approval_required_capabilities": req.approval_required_capabilities,
+        "workspace_full_autonomy": req.workspace_full_autonomy,
+        "continue_while_progress": req.continue_while_progress,
         "workspace_path": req.workspace_path,
         "restrict_to_workspace": req.restrict_to_workspace,
         "allow_subfolders": req.allow_subfolders,
         "projects": req.projects,
         "max_step_iterations": req.max_step_iterations,
+        "max_step_retries": req.max_step_retries,
         "max_context_chars": req.max_context_chars,
         "safe_shell_mode": req.safe_shell_mode,
         "shell_timeout_seconds": req.shell_timeout_seconds,
@@ -944,7 +962,8 @@ async def update_settings(req: SettingsRequest):
     if hasattr(policy, "update_policy"):
         policy.update_policy(
             approval_required=req.approval_required_capabilities,
-            denied=req.denied_capabilities
+            denied=req.denied_capabilities,
+            workspace_full_autonomy=req.workspace_full_autonomy,
         )
     shell = app_state.execution_engine.get_capability("shell")
     if shell and hasattr(shell, "update_safety_config"):
@@ -955,6 +974,8 @@ async def update_settings(req: SettingsRequest):
         )
     app_state.execution_engine.default_skills = [skill.lower() for skill in req.default_skills]
     app_state.execution_engine.max_step_iterations = req.max_step_iterations
+    app_state.execution_engine.max_step_retries = req.max_step_retries
+    app_state.execution_engine.continue_while_progress = req.continue_while_progress
         
     for cap_name in ["filesystem", "shell", "agent", "devteam"]:
         cap = app_state.execution_engine.get_capability(cap_name)

@@ -122,6 +122,10 @@ class ShellCapability:
             portable_python_command = self._portable_python_command(cleaned_cmd)
             command_to_run = portable_python_command or cleaned_cmd
 
+            command_environment = os.environ.copy()
+            command_environment.setdefault("PYTHONUTF8", "1")
+            command_environment.setdefault("PYTHONIOENCODING", "utf-8")
+
             result = subprocess.run(
                 command_to_run,
                 shell=portable_python_command is None,
@@ -129,6 +133,9 @@ class ShellCapability:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
+                env=command_environment,
                 timeout=self.timeout_seconds
             )
             

@@ -15,6 +15,8 @@ Instructions given to the agent only when this skill is selected.
 
 Pass explicit skills with `agent_config.skills` when creating an execution. Otherwise GPTMOSS ranks local skills from the task text. A selected skill limits the exposed capability schemas to its declared capabilities. Skills requiring tools that GPTMOSS does not provide remain instructions only and should be adapted rather than executed blindly.
 
+Bundled general skills cover secure Python, architecture, review, testing, and documentation. Bundled domain skills cover requirements/feasibility, computer vision and ML, 3D geometry, digital garments, backend APIs, 3D frontends, integration/delivery, and biometric privacy. Selection uses the exact specialist assignment and expertise, not only the parent task, so sibling agents can receive different instructions.
+
 ## Files and images
 
 Upload text, Markdown, JSON, CSV, PNG, JPEG, or WebP through `POST /artifacts` with `filename`, `content_type`, and base64 `content_base64`. The response contains an artifact id. Pass it in `attachment_ids` to `POST /executions`.

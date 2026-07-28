@@ -1846,6 +1846,9 @@
                             resultHtml = `<div class="step-result" style="color: var(--status-failed); border-color: rgba(248, 113, 113, 0.2);">${escapeHTML(step.error)}</div>`;
                         }
                         
+                        const specialistHtml = step.specialist
+                            ? `<span style="font-size:10px;color:var(--accent-primary);background:rgba(99,102,241,.12);padding:2px 6px;border-radius:4px;font-weight:600;">${escapeHTML(step.specialist)}</span>`
+                            : "";
                         let depsHtml = "";
                         if (step.dependencies && step.dependencies.length > 0) {
                             const depLabels = step.dependencies.map(depId => {
@@ -1860,6 +1863,7 @@
                             <div class="step-content">
                                 <div class="step-desc" style="display: flex; align-items: center; flex-wrap: wrap; gap: 6px;">
                                     <span>${escapeHTML(step.description || 'Étape sans description')}</span>
+                                    ${specialistHtml}
                                     ${depsHtml}
                                 </div>
                                 ${resultHtml}
@@ -2202,7 +2206,10 @@
                 document.getElementById("settings-workspace-path").value = data.workspace_path || "";
                 document.getElementById("settings-restrict-to-workspace").checked = data.restrict_to_workspace !== false;
                 document.getElementById("settings-allow-subfolders").checked = data.allow_subfolders !== false;
+                document.getElementById("settings-workspace-full-autonomy").checked = data.workspace_full_autonomy === true;
+                document.getElementById("settings-continue-while-progress").checked = data.continue_while_progress !== false;
                 document.getElementById("settings-max-step-iterations").value = data.max_step_iterations || 30;
+                document.getElementById("settings-max-step-retries").value = data.max_step_retries ?? 2;
                 document.getElementById("settings-max-context-chars").value = data.max_context_chars || 12000;
                 document.getElementById("settings-safe-shell-mode").checked = data.safe_shell_mode !== false;
                 document.getElementById("settings-shell-timeout").value = data.shell_timeout_seconds || 60;
@@ -2232,11 +2239,14 @@
                 ssl_cert_path: document.getElementById("settings-ssl-cert-path").value.trim(),
                 denied_capabilities: Array.from(document.querySelectorAll("input[name='settings-deny']:checked"), cb => cb.value),
                 approval_required_capabilities: Array.from(document.querySelectorAll("input[name='settings-approval']:checked"), cb => cb.value),
+                workspace_full_autonomy: document.getElementById("settings-workspace-full-autonomy").checked,
+                continue_while_progress: document.getElementById("settings-continue-while-progress").checked,
                 workspace_path: document.getElementById("settings-workspace-path").value.trim(),
                 restrict_to_workspace: document.getElementById("settings-restrict-to-workspace").checked,
                 allow_subfolders: document.getElementById("settings-allow-subfolders").checked,
                 projects: localProjects,
                 max_step_iterations: parseInt(document.getElementById("settings-max-step-iterations").value, 10) || 30,
+                max_step_retries: Math.max(0, parseInt(document.getElementById("settings-max-step-retries").value, 10) || 0),
                 max_context_chars: parseInt(document.getElementById("settings-max-context-chars").value, 10) || 12000,
                 safe_shell_mode: document.getElementById("settings-safe-shell-mode").checked,
                 shell_timeout_seconds: parseInt(document.getElementById("settings-shell-timeout").value, 10) || 60,
@@ -2279,7 +2289,7 @@
                 if (!confirm("Modifications prévues :\n- " + changed.join("\n- ") + "\n\nEnregistrer ces réglages ?")) return;
                 const previousApprovals = new Set(loadedSettings.approval_required_capabilities || []);
                 const approvalsRemoved = Array.from(previousApprovals).some(item => !payload.approval_required_capabilities.includes(item));
-                const sensitive = !payload.ssl_verify || !payload.restrict_to_workspace || !payload.safe_shell_mode || !payload.approval_required_capabilities.includes("shell") || approvalsRemoved || payload.workspace_path !== loadedSettings.workspace_path || payload.projects.some(project => project.path);
+                const sensitive = !payload.ssl_verify || !payload.restrict_to_workspace || !payload.safe_shell_mode || payload.workspace_full_autonomy || !payload.approval_required_capabilities.includes("shell") || approvalsRemoved || payload.workspace_path !== loadedSettings.workspace_path || payload.projects.some(project => project.path);
                 if (sensitive) {
                     const typed = prompt("AVERTISSEMENT : ces réglages réduisent les protections TLS, workspace, shell ou validations humaines. Tapez CONFIRMER pour continuer.");
                     if (typed !== "CONFIRMER") return showToast("Modification sensible annulée.", "warning");
@@ -2421,10 +2431,24 @@
                         <input type="checkbox" id="settings-allow-subfolders"> Autoriser les sous-dossiers
                     </label>
                 </div>
+                <label style="font-size: 11px; display: flex; align-items: flex-start; gap: 6px; margin-top: 8px; padding: 8px; border: 1px solid var(--border-color); border-radius: 4px; cursor: pointer;">
+                    <input type="checkbox" id="settings-workspace-full-autonomy" style="margin-top: 2px;">
+                    <span><strong>Autonomie totale des commandes dans le workspace</strong><br>
+                    Préautorise sans confirmation humaine toutes les commandes shell présentes et futures. Les refus explicites, le workspace du projet et le blocage des commandes système destructrices restent actifs.</span>
+                </label>
                 
                 <div style="display: flex; flex-direction: column; gap: 4px; margin-top: 6px;">
-                    <label style="font-size: 11px; color: var(--text-normal);">Nombre maximum d'itérations par étape (ReAct)</label>
+                    <label style="font-size: 11px; color: var(--text-normal);">Budget d'itérations consécutives sans progrès par étape</label>
                     <input type="number" id="settings-max-step-iterations" class="approval-reason-input" style="margin: 0;" placeholder="30" min="1" max="100">
+                </div>
+                <label style="font-size: 11px; display: flex; align-items: flex-start; gap: 6px; margin-top: 6px; cursor: pointer;">
+                    <input type="checkbox" id="settings-continue-while-progress" style="margin-top: 2px;">
+                    <span><strong>Continuer tant que le travail progresse</strong><br>
+                    Aucune limite globale d'itérations : le budget ci-dessus est remis à zéro lors d'une modification réelle du projet ou d'un nouveau test réussi. Les lectures et erreurs répétées ne le renouvellent pas.</span>
+                </label>
+                <div style="display: flex; flex-direction: column; gap: 4px; margin-top: 6px;">
+                    <label style="font-size: 11px; color: var(--text-normal);">Nouveaux agents autonomes après échec d'une étape</label>
+                    <input type="number" id="settings-max-step-retries" class="approval-reason-input" style="margin: 0;" placeholder="2" min="0" max="5">
                 </div>
                 <div style="display: flex; flex-direction: column; gap: 4px; margin-top: 6px;">
                     <label style="font-size: 11px; color: var(--text-normal);">Budget de contexte (caractères)</label>

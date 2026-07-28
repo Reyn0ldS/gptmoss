@@ -17,7 +17,7 @@ La console Web est accessible sur `http://127.0.0.1:8000/`. Elle propose une vue
 
 ## 2. Le Pipeline Multi-Agent & Rôles Spécialisés
 
-Lorsque vous soumettez une tâche de développement logiciel, le coordinateur planifie un cycle de développement (SDLC) complet composé de rôles spécialisés :
+Lorsque vous soumettez une tâche de développement logiciel, le coordinateur évalue d'abord sa taille et ses domaines, puis construit un DAG adapté. Les rôles ci-dessous sont des familles ; plusieurs profils métier distincts peuvent partager le rôle développeur ou QA :
 
 1. **Architecte** : Rédige le document de conception technique `specs.md` définissant les protocoles, schémas de fichiers et structures globales.
 2. **Analyste Sécurité** : Analyse les spécifications de conception et génère un rapport `security_review.md` contenant des propositions de correctifs de vulnérabilités.
@@ -26,6 +26,8 @@ Lorsque vous soumettez une tâche de développement logiciel, le coordinateur pl
 5. **Débugueur** : Exécute le code et les tests unitaires. En cas d'échec, il lit les journaux d'erreurs et corrige les fichiers sources de manière itérative.
 6. **Rédacteur Technique** : Rédige le fichier de documentation d'utilisation et d'installation `README.md` final du projet.
 7. **Coordinateur** : Réunit les livraisons validées, vérifie leur cohérence et produit la synthèse finale sans répéter le travail des spécialistes.
+
+Chaque profil reçoit sa spécialité, son expertise, ses fichiers obligatoires, ses critères d'acceptation et ses commandes de vérification. Une tâche complexe n'est donc pas limitée à sept agents : GPTMOSS crée les spécialistes nécessaires et rejette un plan manifestement trop petit.
 
 ---
 
@@ -37,6 +39,9 @@ GPT-Moss utilise un moteur d'ordonnancement par graphe orienté acyclique (DAG).
 * **Sécurité antidécurrence** : Le graphe intègre une détection de dépendances cycliques pour éviter les blocages. Si une étape échoue, les autres tâches actives sont annulées de façon propre.
 * **Déduplication** : Une étape garde le même sous-agent lors d'une reprise et un second lancement concurrent de la même exécution est ignoré.
 * **Passage de relais** : Les résultats structurés des dépendances sont injectés dans la tâche du spécialiste suivant, puis toutes les livraisons sont remises au coordinateur final.
+* **Reprise autonome** : Après un échec, un nouveau spécialiste reprend les fichiers partiels et les preuves d'erreur sans recommencer les dépendances validées.
+* **Tâches longues** : Avec « Continuer tant que le travail progresse », il n'y a ni limite globale d'itérations ni timeout global de projet. Le budget configuré mesure seulement les tours consécutifs sans progrès durable. Une commande shell individuelle conserve son propre délai de sécurité.
+* **Panne temporaire du LLM** : Les erreurs réseau, timeouts, limitations de débit et erreurs serveur sont retentés avec un délai progressif. Les artefacts déjà écrits restent dans le workspace. Une erreur d'authentification n'est pas masquée par ces reprises.
 
 ---
 
