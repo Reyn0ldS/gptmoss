@@ -7,7 +7,7 @@ from gptmoss.core.delivery import (
     path_is_owned,
     static_workspace_issues,
 )
-from gptmoss.core.execution import normalize_plan
+from gptmoss.core.execution import merge_inherited_requirements, normalize_plan
 
 
 def _plan():
@@ -109,6 +109,34 @@ def test_automatic_software_traceability_prefers_developer_and_relevant_qa():
 
     assert row["implementation_steps"] == [1]
     assert row["validation_steps"] == [2]
+
+
+def test_delegated_plan_inherits_parent_requirement_identifiers():
+    plan = normalize_plan({
+        "steps": [{
+            "id": 0,
+            "role": "developer",
+            "description": "Implement validated face geometry",
+            "dependencies": [],
+            "requirement_ids": ["REQ-FACE-IMAGE"],
+        }],
+    })
+    inherited = [{
+        "id": "REQ-FACE-IMAGE",
+        "statement": "Derive validated face geometry from an image when vision exists",
+        "priority": "must",
+        "mandatory": True,
+        "source": "user",
+        "acceptance": ["Exported geometry is non-empty"],
+    }]
+
+    contract = build_delivery_contract(
+        merge_inherited_requirements(plan, inherited),
+        "Implement the delegated face geometry adapter",
+    )
+
+    assert contract["requirements"][0]["id"] == "REQ-FACE-IMAGE"
+    assert contract["traceability"][0]["implementation_steps"] == [0]
 
 
 def test_static_assurance_detects_package_identity_and_signature_mismatch(tmp_path):

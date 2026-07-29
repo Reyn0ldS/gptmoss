@@ -35,9 +35,9 @@ class ArtifactStore:
             raise ValueError("Invalid base64 upload payload.") from exc
         if not data or len(data) > self.MAX_BYTES:
             raise ValueError(f"Upload must contain between 1 and {self.MAX_BYTES} bytes.")
-        if content_type == "image/png" and not data.startswith(b"\\x89PNG\\r\\n\\x1a\\n"):
+        if content_type == "image/png" and not data.startswith(b"\x89PNG\r\n\x1a\n"):
             raise ValueError("Invalid PNG data.")
-        if content_type == "image/jpeg" and not data.startswith(b"\\xff\\xd8"):
+        if content_type == "image/jpeg" and not data.startswith(b"\xff\xd8"):
             raise ValueError("Invalid JPEG data.")
         if content_type == "image/webp" and not (data.startswith(b"RIFF") and data[8:12] == b"WEBP"):
             raise ValueError("Invalid WebP data.")
