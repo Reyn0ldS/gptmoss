@@ -514,3 +514,25 @@ def test_gui_contains_complete_management_controls():
         "testLlmConnection", "collectSettingsPayload",
     ):
         assert marker in gui
+
+
+def test_gui_layout_stays_inside_narrow_viewports_and_keeps_scroll_fallbacks():
+    """Key layout containers may shrink, wrap, and scroll instead of being clipped."""
+    from pathlib import Path
+
+    gui = (Path(__file__).parents[1] / "gptmoss" / "api" / "gui.html").read_text(encoding="utf-8")
+
+    for marker in (
+        "height: 100dvh;",
+        "overflow-x: auto;",
+        "width: clamp(220px, 24vw, 320px);",
+        "grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);",
+        ".modal-overlay { max-width:100%; max-height:100%; padding:12px; overflow:auto; }",
+        "max-height:calc(100dvh - 24px);",
+        "scrollbar-gutter: stable;",
+        "@media (max-width: 480px)",
+        ".sidebar-footer .btn-control",
+    ):
+        assert marker in gui
+
+    assert "grid-template-columns: minmax(420px, 3fr) minmax(300px, 2fr);" not in gui

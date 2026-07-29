@@ -40,12 +40,23 @@
             padding: 0;
         }
 
+        html {
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+        }
+
         body {
             background-color: var(--bg-base);
             color: var(--text-main);
             font-family: var(--font-family);
-            overflow: hidden;
+            overflow-x: auto;
+            overflow-y: hidden;
+            width: 100%;
+            max-width: 100%;
             height: 100vh;
+            height: 100dvh;
+            min-width: 0;
             display: flex;
         }
 
@@ -67,7 +78,8 @@
 
         /* Sidebar styling */
         .sidebar {
-            width: 320px;
+            width: clamp(220px, 24vw, 320px);
+            max-width: 100%;
             background-color: var(--bg-sidebar);
             border-right: 1px solid var(--border-color);
             display: flex;
@@ -82,6 +94,8 @@
             display: flex;
             align-items: center;
             justify-content: space-between;
+            gap: 10px;
+            min-width: 0;
         }
 
         .brand {
@@ -91,6 +105,20 @@
             -webkit-background-clip: text;
             -webkit-text-fill-color: transparent;
             letter-spacing: 0.5px;
+            min-width: 0;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .sidebar-footer {
+            flex-wrap: wrap;
+            min-width: 0;
+        }
+
+        .sidebar-footer .btn-control {
+            flex: 1 1 80px;
+            min-width: 0;
+            padding-inline: 8px;
         }
 
         .ws-badge {
@@ -250,6 +278,10 @@
             height: 100%;
             background-color: var(--bg-base);
             position: relative;
+            min-width: 0;
+            min-height: 0;
+            max-width: 100%;
+            overflow: hidden;
         }
 
         .landing-view {
@@ -258,8 +290,11 @@
             flex-direction: column;
             justify-content: center;
             align-items: center;
-            padding: 40px;
+            padding: clamp(16px, 4vw, 40px);
             text-align: center;
+            min-width: 0;
+            min-height: 0;
+            overflow: auto;
         }
 
         .landing-logo {
@@ -300,6 +335,7 @@
             padding: 24px;
             box-shadow: 0 10px 30px rgba(0, 0, 0, 0.3);
             text-align: left;
+            min-width: 0;
         }
 
         .form-label {
@@ -358,6 +394,8 @@
             flex-direction: column;
             height: 100%;
             overflow: hidden;
+            min-width: 0;
+            min-height: 0;
         }
 
         .detail-header {
@@ -367,6 +405,8 @@
             justify-content: space-between;
             align-items: center;
             background-color: rgba(255, 255, 255, 0.01);
+            gap: 12px;
+            min-width: 0;
         }
 
         .detail-title-area {
@@ -395,6 +435,8 @@
         .detail-actions {
             display: flex;
             gap: 10px;
+            flex-wrap: wrap;
+            min-width: 0;
         }
 
         .btn-control {
@@ -408,6 +450,8 @@
             background-color: rgba(255, 255, 255, 0.02);
             color: var(--text-main);
             transition: background-color 0.2s, border-color 0.2s, color 0.2s;
+            max-width: 100%;
+            overflow-wrap: anywhere;
         }
 
         .btn-control:hover {
@@ -442,6 +486,7 @@
             display: flex;
             overflow: hidden;
             min-width: 0;
+            min-height: 0;
         }
 
         .feed-column {
@@ -453,6 +498,7 @@
             background-color: rgba(0, 0, 0, 0.05);
             min-width: 0;
             position: relative;
+            min-height: 0;
         }
 
         .plan-column {
@@ -463,6 +509,7 @@
             padding: 24px;
             background-color: rgba(0, 0, 0, 0.1);
             min-width: 0;
+            min-height: 0;
         }
 
         /* Glowing loader bar representing active background LLM requests */
@@ -514,6 +561,10 @@
             margin: 16px 32px 0 32px;
             border-bottom: 1.5px solid var(--border-color);
             padding-bottom: 10px;
+            min-width: 0;
+            overflow-x: auto;
+            overflow-y: hidden;
+            scrollbar-gutter: stable;
         }
 
         .tab-btn {
@@ -528,6 +579,7 @@
             border-radius: 6px;
             transition: all 0.25s ease;
             outline: none;
+            flex: 0 0 auto;
         }
 
         .tab-btn:hover {
@@ -552,6 +604,9 @@
             flex-direction: column;
             gap: 16px;
             scroll-behavior: smooth;
+            min-width: 0;
+            min-height: 0;
+            scrollbar-gutter: stable;
         }
 
         .message {
@@ -565,6 +620,7 @@
             min-width: 0;
             word-wrap: break-word;
             overflow-wrap: break-word;
+            width: fit-content;
         }
 
         .message.user {
@@ -609,6 +665,15 @@
             word-wrap: break-word;
             overflow-wrap: break-word;
             word-break: break-word;
+            min-width: 0;
+            max-width: 100%;
+        }
+
+        .message-content img,
+        .message-content video,
+        .message-content svg {
+            max-width: 100%;
+            height: auto;
         }
 
         /* Markdown rendered elements inside message-content */
@@ -700,6 +765,9 @@
             gap: 12px;
             animation: slideDown 0.25s ease-out;
             flex-shrink: 0;
+            min-width: 0;
+            max-height: 55%;
+            overflow: auto;
         }
 
         @keyframes slideDown {
@@ -729,6 +797,7 @@
             grid-template-columns: 140px 1fr;
             gap: 6px;
             font-size: 13px;
+            min-width: 0;
         }
 
         .details-label {
@@ -739,6 +808,8 @@
         .details-val {
             font-family: monospace;
             color: var(--status-running);
+            min-width: 0;
+            overflow-wrap: anywhere;
         }
 
         .approval-reason-input {
@@ -760,6 +831,7 @@
         .approval-buttons {
             display: flex;
             gap: 10px;
+            flex-wrap: wrap;
         }
 
         .btn-approval {
@@ -880,6 +952,7 @@
             flex-direction: column;
             gap: 4px;
             flex: 1;
+            min-width: 0;
         }
 
         .step-desc {
@@ -981,10 +1054,10 @@
             overflow-wrap: break-word;
         }
 
-        /* Use a grid so both the conversation and the plan keep a usable width. */
+        /* Let both columns shrink inside the available viewport without clipping. */
         .detail-body {
             display: grid;
-            grid-template-columns: minmax(420px, 3fr) minmax(300px, 2fr);
+            grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
         }
         .feed-column, .plan-column { min-width: 0; }
         .settings-nav { display: flex; flex-wrap: wrap; gap: 6px; padding-bottom: 4px; }
@@ -994,13 +1067,14 @@
         .library-row small { display:block; color:var(--text-muted); overflow-wrap:anywhere; }
         .library-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(240px,1fr)); gap:10px; }
         .library-panel { border:1px solid var(--border-color); border-radius:8px; padding:12px; background:rgba(255,255,255,.015); }
+        .modal-overlay { max-width:100%; max-height:100%; padding:12px; overflow:auto; }
+        .settings-container { min-width:0; max-width:100%; max-height:calc(100dvh - 24px); overflow:auto; }
         .library-panel input:not([type=checkbox]), .library-panel textarea { width:100%; box-sizing:border-box; margin:4px 0; padding:8px; color:var(--text-normal); background:var(--bg-input); border:1px solid var(--border-color); border-radius:5px; }
         .library-panel textarea { min-height:90px; resize:vertical; }
         .diagnostic-output { max-height:300px; overflow:auto; white-space:pre-wrap; overflow-wrap:anywhere; font-size:11px; color:var(--text-muted); }
 
         @media (max-width: 1280px) {
             .sidebar { width: 260px; }
-            .detail-body { grid-template-columns: minmax(360px, 3fr) minmax(280px, 2fr); }
         }
 
         @media (max-width: 1200px) {
@@ -1038,13 +1112,28 @@
                 flex: none;
                 height: auto;
             }
+            .chat-container,
+            .plan-column {
+                padding: 18px 20px;
+            }
+            .feed-tabs {
+                margin-left: 20px;
+                margin-right: 20px;
+            }
         }
 
         @media (max-width: 768px) {
+            html {
+                overflow-x: auto;
+                overflow-y: auto;
+            }
             body {
                 flex-direction: column;
-                overflow-y: auto;
+                overflow-x: auto;
+                overflow-y: visible;
                 height: auto;
+                min-height: 100vh;
+                min-height: 100dvh;
             }
             .sidebar {
                 width: 100%;
@@ -1053,7 +1142,7 @@
                 border-right: none;
                 border-bottom: 1px solid var(--border-color);
             }
-            .main-content { min-height: 60vh; }
+            .main-content { width: 100%; min-height: 60vh; overflow: visible; }
             .detail-view { height: auto; min-height: 60vh; }
             .detail-header { padding: 14px 16px; }
             .detail-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -1067,6 +1156,48 @@
             .library-row { grid-template-columns:1fr; }
             .feed-column {
                 height: 45vh;
+            }
+            .approval-banner {
+                padding: 14px 16px;
+                max-height: none;
+            }
+            .approval-details {
+                grid-template-columns: 1fr;
+            }
+            .chat-container,
+            .plan-column {
+                padding: 16px;
+            }
+            .feed-tabs {
+                margin-left: 16px;
+                margin-right: 16px;
+            }
+        }
+
+        @media (max-width: 480px) {
+            .sidebar-header {
+                padding: 14px 16px;
+            }
+            .executions-list {
+                padding-left: 12px;
+                padding-right: 12px;
+            }
+            .detail-actions {
+                grid-template-columns: 1fr;
+            }
+            .detail-actions .badge {
+                grid-column: 1;
+            }
+            .task-form-container {
+                padding: 14px;
+            }
+            .modal-overlay {
+                padding: 6px;
+            }
+            .settings-container {
+                width: 100% !important;
+                padding: 14px !important;
+                max-height: calc(100dvh - 12px);
             }
         }
     </style>
