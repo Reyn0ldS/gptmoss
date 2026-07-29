@@ -137,6 +137,30 @@ def normalize_plan(plan: Dict[str, Any]) -> Dict[str, Any]:
     return plan
 
 
+def merge_inherited_requirements(
+    plan: Dict[str, Any], inherited: Any
+) -> Dict[str, Any]:
+    """Keep parent requirement identifiers valid in delegated child plans."""
+    if not isinstance(inherited, list) or not inherited:
+        return plan
+    requirements = plan.get("requirements")
+    if not isinstance(requirements, list):
+        requirements = []
+    else:
+        requirements = list(requirements)
+    known = {
+        str(item.get("id"))
+        for item in requirements
+        if isinstance(item, dict) and item.get("id")
+    }
+    requirements.extend(
+        dict(item) for item in inherited
+        if isinstance(item, dict) and item.get("id") and str(item["id"]) not in known
+    )
+    plan["requirements"] = requirements
+    return plan
+
+
 logger = logging.getLogger("gptmoss.execution")
 
 
@@ -1011,6 +1035,9 @@ class ExecutionEngine:
                 delegated_step=state.variables.get("delegated_step"),
             )
             plan_result = normalize_plan(plan_result)
+            plan_result = merge_inherited_requirements(
+                plan_result, state.variables.get("inherited_requirements")
+            )
             self.telemetry.record("plan_generated", execution_id, duration_ms=round((time.perf_counter() - planning_started) * 1000, 2), steps=len(plan_result.get("steps", [])))
             state.current_plan = plan_result
             state.variables["delivery_contract"] = build_delivery_contract(
@@ -1137,6 +1164,15 @@ class ExecutionEngine:
                         if key not in {"id", "dependencies", "status", "assigned_execution_id", "delivery", "result", "error"}
                     }
                     sub_exec.variables["attachment_ids"] = state.variables.get("attachment_ids", [])
+                    parent_requirements = (
+                        state.variables.get("delivery_contract", {}).get("requirements", [])
+                    )
+                    delegated_requirement_ids = set(step.get("requirement_ids", []))
+                    sub_exec.variables["inherited_requirements"] = [
+                        dict(requirement) for requirement in parent_requirements
+                        if isinstance(requirement, dict)
+                        and requirement.get("id") in delegated_requirement_ids
+                    ]
                     sub_exec.variables["agent_config"] = {
                         "system_prompt": f"You are the {role_name}, a domain specialist accountable for verified delivery.",
                         "role_name": role_name,

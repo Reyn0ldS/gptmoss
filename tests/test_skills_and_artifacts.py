@@ -32,3 +32,23 @@ def test_artifact_store_handles_text_and_rejects_invalid_image(tmp_path):
 
     with pytest.raises(ValueError, match="Invalid PNG"):
         store.save_base64("bad.png", payload, "image/png")
+
+
+@pytest.mark.parametrize(
+    ("filename", "content_type", "payload"),
+    [
+        ("reference.png", "image/png", b"\x89PNG\r\n\x1a\nminimal-payload"),
+        ("reference.jpg", "image/jpeg", b"\xff\xd8minimal-payload"),
+        ("reference.webp", "image/webp", b"RIFF\x04\x00\x00\x00WEBP"),
+    ],
+)
+def test_artifact_store_accepts_valid_image_signatures(
+    tmp_path, filename, content_type, payload
+):
+    store = ArtifactStore(str(tmp_path))
+    metadata = store.save_base64(
+        filename, base64.b64encode(payload).decode("ascii"), content_type
+    )
+
+    assert Path(metadata["path"]).read_bytes() == payload
+    assert metadata["content_type"] == content_type
