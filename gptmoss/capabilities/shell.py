@@ -15,16 +15,49 @@ class ShellCapability:
         self.workspace_root = os.path.abspath(workspace_root)
         self.state_engine = state_engine
         self.safe_mode = safe_mode
-        self.timeout_seconds = timeout_seconds
-        self.max_output_chars = max_output_chars
+        self.timeout_seconds = max(0, int(timeout_seconds))
+        self.max_output_chars = max(0, int(max_output_chars))
 
     def update_workspace_config(self, workspace_root: str):
         self.workspace_root = os.path.abspath(workspace_root)
 
     def update_safety_config(self, safe_mode: bool = True, timeout_seconds: int = 60, max_output_chars: int = 12_000):
         self.safe_mode = safe_mode
-        self.timeout_seconds = max(1, min(timeout_seconds, 600))
-        self.max_output_chars = max(1_000, min(max_output_chars, 100_000))
+        self.timeout_seconds = max(0, int(timeout_seconds))
+        self.max_output_chars = max(0, int(max_output_chars))
+
+    def _effective_timeout(self, command: str) -> Optional[int]:
+        """Zero selects an adaptive timeout."""
+        if self.timeout_seconds:
+            return self.timeout_seconds
+        normalized = command.lower()
+        if any(marker in normalized for marker in ("pytest", "unittest", " test", " build", "compile")):
+            return 900
+        if any(marker in normalized for marker in ("download", "install", "pip ", "npm ", "cargo ")):
+            return 1_800
+        return 120
+
+    @staticmethod
+    def _has_shell_operators(command: str) -> bool:
+        """Detect operators outside quotes so Python argv rewriting stays safe."""
+        quote = None
+        escaped = False
+        for character in command:
+            if escaped:
+                escaped = False
+                continue
+            if character == "\\" and quote:
+                escaped = True
+                continue
+            if character in {'"', "'"}:
+                if quote == character:
+                    quote = None
+                elif quote is None:
+                    quote = character
+                continue
+            if quote is None and character in "|&><":
+                return True
+        return False
 
     def _blocked_command_reason(self, command: str) -> Optional[str]:
         if not self.safe_mode:
@@ -77,6 +110,8 @@ class ShellCapability:
 
     def _portable_python_command(self, command: str):
         """Build argv that restores normal project imports for embeddable Python."""
+        if self._has_shell_operators(command):
+            return None
         match = re.match(r"^python(?:\.exe)?(?:\s+(.*))?$", command, flags=re.IGNORECASE | re.DOTALL)
         if not match:
             return None
@@ -120,7 +155,26 @@ class ShellCapability:
                     cleaned_cmd = cleaned_cmd.replace("/", "\\")
 
             portable_python_command = self._portable_python_command(cleaned_cmd)
-            command_to_run = portable_python_command or cleaned_cmd
+            if portable_python_command is None and self._has_shell_operators(cleaned_cmd):
+                cleaned_cmd = re.sub(
+                    r"^python(?:\.exe)?\b",
+                    lambda _: f'"{sys.executable}"',
+                    cleaned_cmd,
+                    count=1,
+                    flags=re.IGNORECASE,
+                )
+            if portable_python_command is not None:
+                command_to_run = portable_python_command
+                use_shell = False
+            elif sys.platform == "win32":
+                # Passing a quoted pipeline as the final item of a cmd.exe argv
+                # list triggers cmd's special /C quote stripping. Let
+                # subprocess construct the command line instead.
+                command_to_run = "chcp 65001>NUL & " + cleaned_cmd
+                use_shell = True
+            else:
+                command_to_run = cleaned_cmd
+                use_shell = True
 
             command_environment = os.environ.copy()
             command_environment.setdefault("PYTHONUTF8", "1")
@@ -128,7 +182,7 @@ class ShellCapability:
 
             result = subprocess.run(
                 command_to_run,
-                shell=portable_python_command is None,
+                shell=use_shell,
                 cwd=cwd_dir,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -136,7 +190,7 @@ class ShellCapability:
                 encoding="utf-8",
                 errors="replace",
                 env=command_environment,
-                timeout=self.timeout_seconds
+                timeout=self._effective_timeout(cleaned_cmd)
             )
             
             output = f"EXIT_CODE: {result.returncode}\n"
@@ -147,10 +201,10 @@ class ShellCapability:
             if not result.stdout and not result.stderr:
                 output += "Command produced no output."
                 
-            if len(output) > self.max_output_chars:
-                output = output[:self.max_output_chars] + "\\n… [output truncated by shell safety limit]"
+            if self.max_output_chars and len(output) > self.max_output_chars:
+                output = output[:self.max_output_chars] + "\n… [output truncated by shell safety limit]"
             return output
         except subprocess.TimeoutExpired:
-            return f"Error: Command execution timed out ({self.timeout_seconds}s)."
+            return f"Error: Command execution timed out ({self._effective_timeout(command)}s)."
         except Exception as e:
             return f"Error executing command: {e}"

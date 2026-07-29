@@ -250,8 +250,15 @@ def test_sub_agent_capabilities_filtering():
     
     child_schemas = engine.get_capabilities_schemas(is_sub_agent=True)
     child_actions = [s["function"]["name"] for s in child_schemas]
-    assert not any("agent__" in act for act in child_actions)
+    assert any("agent__spawn" in act for act in child_actions)
     assert any("filesystem__read" in act for act in child_actions)
+
+    engine.allow_nested_delegation = False
+    restricted_child_actions = [
+        schema["function"]["name"]
+        for schema in engine.get_capabilities_schemas(is_sub_agent=True)
+    ]
+    assert not any("agent__" in action for action in restricted_child_actions)
 
 
 def test_debugger_role_wins_over_test_word_and_invalid_dag_is_rejected():

@@ -138,7 +138,7 @@ async def test_failed_final_assurance_reopens_only_repair_and_auditor(tmp_path):
     assert children[0].variables["plan_step_id"] == 1
 
 
-def test_avatar_request_is_very_high_complexity_and_has_rich_safe_fallback():
+def test_cross_domain_request_has_rich_engine_agnostic_fallback():
     analysis = analyze_task_complexity(AVATAR_PROMPT)
     plan = SimplePlanner._fallback_plan(AVATAR_PROMPT, analysis)
 
@@ -146,34 +146,27 @@ def test_avatar_request_is_very_high_complexity_and_has_rich_safe_fallback():
     assert len(plan["steps"]) >= 12
     specialists = [step["specialist"] for step in plan["steps"]]
     assert len(set(specialists)) == len(specialists)
-    assert sum(step["role"] == "developer" for step in plan["steps"]) >= 5
-    assert any("Face Reconstruction" in name for name in specialists)
-    assert any("Garment Reconstruction" in name for name in specialists)
-    assert any("End-to-End" in name for name in specialists)
-    assert "no claim" in plan["analysis"]["mvp_boundary"]
-    qa_step = next(step for step in plan["steps"] if step["specialist"] == "Geometry & ML Contract Test Engineer")
-    assert "pytest.ini" in qa_step["required_artifacts"]
-    assert "never src.avatar3d" in qa_step["description"]
+    assert sum(step["role"] == "developer" for step in plan["steps"]) >= 4
+    assert "External Tool Contract Engineer" in specialists
+    assert "Independent Contract Test Engineer" in specialists
+    assert "Clean-Process Acceptance Engineer" in specialists
+    external_step = next(step for step in plan["steps"] if step["specialist"] == "External Tool Contract Engineer")
+    assert "execution_routines" in external_step["description"]
+    assert "Do not claim GUI operation" in external_step["description"]
+    qa_step = next(step for step in plan["steps"] if step["specialist"] == "Independent Contract Test Engineer")
     assert qa_step["verification_commands"] == ["python -m pytest --collect-only -q"]
-    first_repair = next(step for step in plan["steps"] if step["specialist"] == "Autonomous Unit & Integration Repair Engineer")
+    first_repair = next(step for step in plan["steps"] if step["specialist"] == "Autonomous Integration Repair Engineer")
     assert qa_step["id"] in first_repair["dependencies"]
     assert first_repair["verification_commands"] == ["python -m pytest -q"]
     assert plan["steps"][-2]["role"] == "writer"
     assert plan["steps"][-1]["role"] == "coordinator"
-    assert {item["id"] for item in plan["requirements"]} == {
-        "REQ-AVATAR-PROGRAM", "REQ-FACE-IMAGE", "REQ-FULL-BODY",
-        "REQ-GARMENT-IMAGE", "REQ-MULTI-AVATAR-FIT",
-    }
-    body_step = next(step for step in plan["steps"] if step["specialist"] == "Parametric Body & Geometry Engineer")
-    garment_step = next(step for step in plan["steps"] if step["specialist"] == "Garment Reconstruction Engineer")
-    fitting_step = next(step for step in plan["steps"] if step["specialist"] == "Virtual Try-On & Rigging Engineer")
-    assert body_step["requirement_ids"] == ["REQ-FULL-BODY"]
-    assert garment_step["requirement_ids"] == ["REQ-GARMENT-IMAGE"]
-    assert fitting_step["requirement_ids"] == ["REQ-MULTI-AVATAR-FIT"]
-    assert plan["scope_changes"][0]["requirement_ids"] == [
-        "REQ-FACE-IMAGE", "REQ-FULL-BODY", "REQ-GARMENT-IMAGE",
-        "REQ-MULTI-AVATAR-FIT",
-    ]
+    assert {item["id"] for item in plan["requirements"]} == {"REQ-DELIVERY"}
+    assert all(step["requirement_ids"] == ["REQ-DELIVERY"] for step in plan["steps"])
+    assert not any(
+        str(path).startswith("src/avatar3d")
+        for step in plan["steps"] for path in step["required_artifacts"]
+    )
+    assert plan["scope_changes"] == []
 
 
 def test_plan_contract_preserves_specialist_quality_fields_and_rejects_bad_lists():
@@ -398,6 +391,7 @@ async def test_parent_replaces_failed_specialist_and_completes_from_partial_work
     }))
     engine, state = _engine(tmp_path, llm, max_iterations=2)
     engine.max_step_retries = 1
+    engine.adaptive_resource_management = False
     parent = state.get_execution("retry-parent")
     parent.current_plan = {"steps": [{
         "id": 0, "role": "developer", "specialist": "Recovery Engineer",
@@ -455,12 +449,14 @@ def test_rescue_strips_prefixed_fence_and_rejects_mock_random_tests():
 
     bad = "import numpy as np\nclass MockMesh: pass\ndef test_fake(): np.random.rand(2)\n"
     issues = ExecutionEngine._rescue_content_issues("tests/test_fake.py", bad)
-    assert any("actual avatar3d" in issue for issue in issues)
     assert any("mocks" in issue for issue in issues)
+
+    empty_test = ExecutionEngine._rescue_content_issues("tests/test_empty.py", "VALUE = 1\n")
+    assert any("pytest test function" in issue for issue in empty_test)
 
     wrong_identity = "from src.avatar3d.body import Body\ndef test_body(): assert Body\n"
     identity_issues = ExecutionEngine._rescue_content_issues("tests/test_identity.py", wrong_identity)
-    assert any("canonical avatar3d" in issue for issue in identity_issues)
+    assert any("canonical package identity" in issue for issue in identity_issues)
 
 
 def test_integration_gate_rejects_duplicate_src_package_identity_and_bad_pytest_option(tmp_path):
@@ -475,5 +471,5 @@ def test_integration_gate_rejects_duplicate_src_package_identity_and_bad_pytest_
 
     issues = engine._integration_contract_issues("identity")
 
-    assert any("single canonical avatar3d" in issue for issue in issues)
+    assert any("canonical installed package identity" in issue for issue in issues)
     assert any("pythonpath" in issue for issue in issues)

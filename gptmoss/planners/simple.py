@@ -88,158 +88,87 @@ class SimplePlanner(PlannerProvider):
         self.llm_provider = llm_provider
 
     @staticmethod
-    def _avatar_3d_fallback(task: str, analysis: Dict[str, Any]) -> Dict[str, Any]:
-        requirements = [
-            {
-                "id": "REQ-AVATAR-PROGRAM",
-                "statement": "Deliver a runnable local program exposing the complete avatar and garment workflow.",
-                "priority": "must", "mandatory": True, "source": "user",
-                "acceptance": ["A clean-process local smoke workflow exits successfully."],
-            },
-            {
-                "id": "REQ-FACE-IMAGE",
-                "statement": "Ingest a face image and derive validated 3D face geometry attached to the avatar.",
-                "priority": "must", "mandatory": True, "source": "user",
-                "acceptance": ["Valid face media is accepted, invalid media is rejected, and exported geometry is non-empty."],
-            },
-            {
-                "id": "REQ-FULL-BODY",
-                "statement": "Produce a coherent neutral undressed full-body 3D avatar rather than only a head mesh.",
-                "priority": "must", "mandatory": True, "source": "user",
-                "acceptance": ["The exported full-body mesh is valid, deterministic, and connected to the reconstructed face contract."],
-            },
-            {
-                "id": "REQ-GARMENT-IMAGE",
-                "statement": "Ingest a garment image and derive a validated, exportable 3D garment representation.",
-                "priority": "must", "mandatory": True, "source": "user",
-                "acceptance": ["Garment output has valid deterministic topology, dimensions, anchors, and provenance."],
-            },
-            {
-                "id": "REQ-MULTI-AVATAR-FIT",
-                "statement": "Fit the same reconstructed garment coherently onto multiple different full-body avatars.",
-                "priority": "must", "mandatory": True, "source": "user",
-                "acceptance": ["Cross-avatar fitting is deterministic and validates deformation, anchors, and collisions."],
-            },
-        ]
-        mvp_boundary = (
-            "Without supplied validated pretrained checkpoints, the offline delivery is deterministic procedural geometry "
-            "plus explicit model adapters; there is no claim of photorealistic learned single-view reconstruction."
-        )
+    def _cross_domain_fallback(task: str, analysis: Dict[str, Any]) -> Dict[str, Any]:
+        """Build a sizeable fallback without assuming a package, engine, or desktop tool."""
+        domains = sorted(set(analysis.get("domains", [])))
+        domain_text = ", ".join(domains) or "general"
+        requirements = [{
+            "id": "REQ-DELIVERY",
+            "statement": str(task).strip(),
+            "priority": "must",
+            "mandatory": True,
+            "source": "user",
+            "acceptance": ["Every requested outcome is traced to implementation or an explicitly approved scope change."],
+        }]
         steps = [
-            _step(0, "architect", "Product & Feasibility Analyst",
-                  "Define user journeys, honest MVP boundaries, input assumptions, measurable acceptance criteria, and unavailable model/checkpoint constraints in specs/requirements.md.",
-                  [], ["requirements engineering", "ML feasibility", "product scope"],
-                  ["specs/requirements.md"], ["MVP and production-grade capabilities are explicitly distinguished."]),
-            _step(1, "architect", "3D/ML Systems Architect",
-                  "Design the end-to-end modular architecture, data contracts, coordinate systems, model adapters, and offline deployment strategy in specs/architecture.md.",
-                  [0], ["3D reconstruction", "ML systems", "geometry pipelines"],
-                  ["specs/architecture.md"], ["Every requested workflow maps to concrete modules and interfaces."]),
-            _step(2, "security", "Biometric Privacy & Safety Specialist",
-                  "Specify consent, biometric data retention, access controls, path/input validation, and safe handling of body representations.",
-                  [0], ["biometric privacy", "GDPR", "secure media ingestion"],
-                  ["specs/security.md"], ["Face and body data risks have actionable mitigations."]),
-            _step(3, "developer", "Face Reconstruction Engineer",
-                  "Implement a runnable face-image ingestion and avatar reconstruction adapter with deterministic local fallback, validation, and mesh export.",
-                  [1, 2], ["computer vision", "face reconstruction", "mesh export"],
-                  ["src/avatar3d/face.py"], ["Module runs without silently returning random or fake geometry."]),
-            _step(4, "developer", "Parametric Body & Geometry Engineer",
-                  "Implement canonical body/avatar geometry, coordinate conventions, mesh validation, and the face-to-body attachment contract.",
-                  [1, 2], ["SMPL-X adapters", "mesh topology", "3D transforms"],
-                  ["src/avatar3d/body.py", "src/avatar3d/geometry.py"], ["A coherent deterministic body mesh can be exported locally."]),
-            _step(5, "developer", "Garment Reconstruction Engineer",
-                  "Implement garment-image ingestion, segmentation/reconstruction adapter interfaces, deterministic garment geometry, metadata, and export.",
-                  [1, 2], ["garment segmentation", "single-view reconstruction", "mesh processing"],
-                  ["src/avatar3d/garment.py"], ["Garment output has validated non-random topology and sizing metadata."]),
-            _step(6, "developer", "Virtual Try-On & Rigging Engineer",
-                  "Implement garment fitting to canonical avatars, deformation/rigging contracts, collision checks, and composed scene export.",
-                  [4, 5], ["skinning", "cloth fitting", "collision detection"],
-                  ["src/avatar3d/fitting.py"], ["The same garment fits deterministically to multiple avatar parameters."]),
-            _step(7, "developer", "Backend/API Engineer",
-                  "Implement the service and local CLI workflows for face import, garment import, avatar generation, fitting, status, and export.",
-                  [3, 4, 5, 6], ["Python API design", "job orchestration", "file validation"],
-                  ["src/avatar3d/service.py", "src/avatar3d/cli.py"], ["All core workflows are reachable through a runnable local interface."]),
-            _step(8, "developer", "3D User Experience Engineer",
-                  "Implement a dependency-light local viewer/demo exposing avatar and garment workflows and previewing OBJ scenes.",
-                  [7], ["3D UX", "web UI", "OBJ visualization"],
-                  ["demo/index.html"], ["The demo works without CDN dependencies."]),
-            _step(9, "qa", "Geometry & ML Contract Test Engineer",
-                  "Create deterministic root tests for media validation, mesh validity, transforms, body variation, garment fitting, and adapter failures. For a src/avatar3d layout, import avatar3d (never src.avatar3d), set pytest.ini testpaths=tests and pythonpath=src, and do not place tests inside the source package.",
-                  [3, 4, 5, 6], ["property testing", "mesh invariants", "ML adapter contracts"],
-                  ["pytest.ini", "tests/test_geometry.py", "tests/test_pipeline.py"], ["Tests import the real package and reject random, empty, NaN, and invalid-index meshes."],
+            _step(0, "architect", "Requirements & Feasibility Analyst",
+                  "Extract exact outcomes, constraints, unavailable assets, risks, and measurable acceptance criteria.",
+                  [], ["requirements engineering", *domains], ["specs/requirements.md"],
+                  ["Requirements preserve the user's requested scope and identify external dependencies."]),
+            _step(1, "architect", "Cross-Domain Systems Architect",
+                  "Design project modules, interfaces, data flow, formats, coordinate or unit conventions, and recovery boundaries.",
+                  [0], ["systems architecture", *domains], ["specs/architecture.md"],
+                  ["Every requirement maps to a concrete producer, consumer, and independently verifiable output."]),
+            _step(2, "architect", "External Tool Contract Engineer",
+                  "Describe project-specific engines, runtimes, models, and desktop tools as configuration-driven external_tools and execution_routines: availability probes, parameters, exact non-interactive commands or APIs, outputs, rollback, and validation. Do not claim GUI operation or execution without evidence.",
+                  [0, 1], ["tool integration", "configuration management", "operational runbooks"],
+                  ["specs/external-tools.md"], ["A human can configure and run each external dependency without GPTMOSS assuming direct control."]),
+            _step(3, "security", "Data Safety & Privacy Reviewer",
+                  "Review inputs, generated artifacts, credentials, personal data, filesystem boundaries, and dependency risks.",
+                  [0, 1], ["privacy", "threat modeling", "safe file handling"], ["specs/safety.md"],
+                  ["Risks have actionable controls appropriate to the detected domains."]),
+            _step(4, "developer", "Core Domain Implementation Engineer",
+                  "Implement deterministic validated domain models and transformations behind explicit public interfaces; never substitute random, mocked, or fabricated capability.",
+                  [1, 3], ["domain implementation", *domains], [],
+                  ["Core behavior is runnable and rejects invalid or non-finite data."]),
+            _step(5, "developer", "Input & Output Pipeline Engineer",
+                  "Implement validated import/export paths, provenance, units, schema checks, and transactional failure handling for requested formats.",
+                  [1, 3, 4], ["data pipelines", "artifact validation", *domains], [],
+                  ["Requested outputs are structurally valid and independently inspectable."]),
+            _step(6, "developer", "Adapter & Configuration Engineer",
+                  "Implement adapter boundaries and configuration templates for optional models, engines, hardware, or services while keeping the local core truthful when they are absent.",
+                  [2, 4, 5], ["adapter design", "runtime configuration"], [],
+                  ["Unavailable external capability yields an actionable routine, not a false success."]),
+            _step(7, "developer", "Interface & Workflow Engineer",
+                  "Expose the requested API, CLI, UI, or automation workflows through the same validated implementation.",
+                  [4, 5, 6], ["workflow integration", "public interfaces"], [],
+                  ["All requested entry points use coherent shared contracts."]),
+            _step(8, "qa", "Independent Contract Test Engineer",
+                  "Create boundary, format, interface, determinism, failure, and regression tests against public modules without replicated implementation or mocks of the subject.",
+                  [4, 5, 6], ["contract testing", "property testing", *domains],
+                  ["tests/test_acceptance.py"], ["Tests reject empty, malformed, non-finite, inconsistent, and unsupported outputs."],
                   ["python -m pytest --collect-only -q"]),
-            _step(10, "debugger", "Autonomous Unit & Integration Repair Engineer",
-                  "Run the unit and integration suite, inspect concrete failures, fix root causes across source modules and test contract mistakes, and rerun until the complete suite passes.",
-                  [7, 8, 9], ["root-cause analysis", "cross-module integration", "dependency minimization"],
-                  [], ["The unit and integration suite exits with code 0."], ["python -m pytest -q"]),
-            _step(11, "qa", "End-to-End Acceptance Engineer",
-                  "Create and run an end-to-end smoke workflow with generated local fixtures, verify exports, and record repeatable evidence.",
-                  [10], ["E2E testing", "CLI testing", "artifact validation"],
-                  ["tests/test_end_to_end.py"], ["A clean offline-compatible smoke run exits successfully."],
+            _step(9, "debugger", "Autonomous Integration Repair Engineer",
+                  "Run the complete unit and integration suite, inspect concrete failures, repair root causes, and rerun until green.",
+                  [7, 8], ["root-cause analysis", "cross-component integration"], [],
+                  ["The complete unit and integration suite exits with code 0."], ["python -m pytest -q"]),
+            _step(10, "qa", "Clean-Process Acceptance Engineer",
+                  "Run complete public user journeys in a fresh process with representative fixtures and independently validate all generated artifacts that can be checked locally.",
+                  [9], ["end-to-end testing", "artifact inspection", *domains],
+                  ["tests/test_end_to_end.py"], ["Local acceptance produces repeatable evidence without pretending to operate unavailable external tools."],
                   ["python -m pytest -q"]),
-            _step(12, "debugger", "Final Autonomous Acceptance Repair Engineer",
-                  "Repair only failures introduced or exposed by end-to-end acceptance, then rerun the complete suite and leave no known failure.",
-                  [11], ["acceptance debugging", "regression repair", "evidence validation"],
-                  [], ["The complete test suite exits with code 0."], ["python -m pytest -q"]),
-            _step(13, "writer", "Technical Documentation & Model Operations Writer",
-                  "Document installation, offline operation, demo/CLI usage, architecture, model adapter/checkpoint integration, limitations, privacy, and production next steps.",
-                  [7, 8, 11], ["technical writing", "ML model operations", "offline deployment"],
-                  ["README.md"], ["A new user can install, run, test, and understand MVP limitations."]),
-            _step(14, "coordinator", "Final Delivery Auditor",
-                  "Audit every requested outcome against actual artifacts and executed evidence; report completed scope, limitations, risks, and exact next actions without overstating capability.",
-                  [12, 13], ["delivery audit", "acceptance management", "evidence synthesis"],
-                  [], ["No capability is claimed without an artifact or successful execution evidence."]),
+            _step(11, "writer", "Configuration & Operations Writer",
+                  "Document setup, adaptive parameters, external tool routines, exact commands, expected outputs, troubleshooting, rollback, limitations, and manual validation steps.",
+                  [2, 7, 10], ["technical writing", "operations", *domains], ["README.md"],
+                  ["A new user can reproduce local checks and perform deferred external-tool checks."]),
+            _step(12, "coordinator", "Final Requirement Traceability Auditor",
+                  "Audit requirements against files, structural validators, executed commands, and approved scope changes; report uncertainty without overstating quality.",
+                  [10, 11], ["delivery audit", "traceability"], [],
+                  ["No completion or quality claim lacks concrete evidence."]),
         ]
-        requirement_map = {
-            3: ["REQ-FACE-IMAGE"],
-            4: ["REQ-FULL-BODY"],
-            5: ["REQ-GARMENT-IMAGE"],
-            6: ["REQ-MULTI-AVATAR-FIT"],
-            7: [
-                "REQ-AVATAR-PROGRAM", "REQ-FACE-IMAGE", "REQ-FULL-BODY",
-                "REQ-GARMENT-IMAGE", "REQ-MULTI-AVATAR-FIT",
-            ],
-            8: ["REQ-AVATAR-PROGRAM"],
-            9: [
-                "REQ-FACE-IMAGE", "REQ-FULL-BODY", "REQ-GARMENT-IMAGE",
-                "REQ-MULTI-AVATAR-FIT",
-            ],
-            10: [
-                "REQ-AVATAR-PROGRAM", "REQ-FACE-IMAGE", "REQ-FULL-BODY",
-                "REQ-GARMENT-IMAGE", "REQ-MULTI-AVATAR-FIT",
-            ],
-            11: [
-                "REQ-AVATAR-PROGRAM", "REQ-FACE-IMAGE", "REQ-FULL-BODY",
-                "REQ-GARMENT-IMAGE", "REQ-MULTI-AVATAR-FIT",
-            ],
-            12: [
-                "REQ-AVATAR-PROGRAM", "REQ-FACE-IMAGE", "REQ-FULL-BODY",
-                "REQ-GARMENT-IMAGE", "REQ-MULTI-AVATAR-FIT",
-            ],
-            14: [
-                "REQ-AVATAR-PROGRAM", "REQ-FACE-IMAGE", "REQ-FULL-BODY",
-                "REQ-GARMENT-IMAGE", "REQ-MULTI-AVATAR-FIT",
-            ],
-        }
         for step in steps:
-            step["requirement_ids"] = requirement_map.get(step["id"], [])
+            step["requirement_ids"] = ["REQ-DELIVERY"]
         return {
-            "analysis": {
-                **analysis,
-                "workstreams": [step["specialist"] for step in steps],
-                "mvp_boundary": mvp_boundary,
-            },
+            "analysis": {**analysis, "workstreams": [step["specialist"] for step in steps]},
             "requirements": requirements,
-            "scope_changes": [{
-                "kind": "mvp_boundary",
-                "statement": mvp_boundary,
-                "requirement_ids": [
-                    "REQ-FACE-IMAGE", "REQ-FULL-BODY", "REQ-GARMENT-IMAGE",
-                    "REQ-MULTI-AVATAR-FIT",
-                ],
-                "reason": "Validated model weights are external assets and cannot be fabricated by an agent.",
-            }],
+            "scope_changes": [],
+            "interfaces": [],
+            "external_tools": [],
+            "execution_routines": [],
+            "artifact_validations": [],
+            "launch_commands": [],
             "steps": steps,
-            "rationale": "Deterministic cross-domain fallback preserves the real size and dependencies of the request.",
+            "rationale": f"Generic adaptive fallback for {domain_text}; no project package or external engine is assumed.",
         }
 
     @staticmethod
@@ -247,7 +176,7 @@ class SimplePlanner(PlannerProvider):
         analysis = analysis or analyze_task_complexity(task)
         domains = set(analysis["domains"])
         if {"computer-vision", "3d-graphics", "human-avatar", "digital-garments"} <= domains:
-            return SimplePlanner._avatar_3d_fallback(task, analysis)
+            return SimplePlanner._cross_domain_fallback(task, analysis)
         if "software-engineering" in domains:
             steps = [
                 _step(0, "architect", "Requirements & Feasibility Analyst", "Analyze requirements, constraints, assumptions, risks, and acceptance criteria.", [], ["requirements engineering"], ["specs/requirements.md"], ["Requested outcomes are testable."]),
@@ -402,7 +331,8 @@ class SimplePlanner(PlannerProvider):
             "You are GPTMOSS's adaptive planning engine. Produce a realistic specialist DAG, not a generic seven-role checklist.\n"
             "First assess the final deliverable's true size, domains, workstreams, dependencies, unavailable assets, risks, and MVP boundary.\n"
             f"Deterministic complexity hints (minimum safeguards, not a ceiling): {json.dumps(analysis, ensure_ascii=False)}\n"
-            f"User task: {task}\nAvailable capabilities: {json.dumps(capabilities_list)}\n\n"
+            f"User task: {task}\nAvailable capabilities: {json.dumps(capabilities_list)}\n"
+            f"Detected capability gaps: {json.dumps((context or {}).get('variables', {}).get('capability_gaps', []), ensure_ascii=False)}\n\n"
             f"Delivery environment: platform={os.name}; dependencies and model weights may not be downloaded during offline execution. "
             "Use portable Python/pytest verification commands and dependency-light implementations.\n"
             "Use canonical roles only from architect, security, developer, qa, debugger, writer, coordinator, but create as many distinct domain specialists as required. "
@@ -415,11 +345,13 @@ class SimplePlanner(PlannerProvider):
             "Array fields must be arrays; artifacts are concrete relative file paths.\n"
             "Implementation must be runnable and must not silently substitute random/mock behavior. If weights, hardware, datasets, or services are unavailable, build a truthful deterministic prototype and explicit adapter contract, document the limitation, and test both paths.\n"
             "Do not list pretrained checkpoint files as artifacts an agent can create. For a human avatar plus clothing task, reconstruct a coherent canonical full body and fit garments to that body; a face/head mesh alone is not an avatar that can wear clothing.\n"
+            "For unavailable or project-specific engines and desktop tools, do not pretend to run them. Declare top-level external_tools and execution_routines containing availability probes, installation/configuration parameters, exact commands or API calls, expected outputs, rollback guidance, and independent validation. "
+            "Declare top-level artifact_validations with path, validator, required, and machine-readable constraints. Built-in validators include json, obj, and glb; projects may register more.\n"
             "End with autonomous repair after acceptance testing and a final delivery auditor that cannot claim success without evidence.\n"
             "Acceptance must be independent of implementation: include clean-room launch/CLI/API user journeys and interface/signature checks, not only tests written by implementation agents. "
             "Any MVP boundary, unsupported feature, mock, deferred work, or reduction of a mandatory user requirement must be listed in top-level scope_changes with statement, kind, reason, and requirement_ids. It requires user approval. "
             "Each interfaces item has module, symbol (function or Class.method), parameters, returns, and consumers (relative source paths). "
-            "Return raw JSON with keys analysis, requirements, scope_changes, interfaces, launch_commands, steps, rationale. analysis includes level, domains, workstreams, assumptions, risks, mvp_boundary, out_of_scope. No prose."
+            "Return raw JSON with keys analysis, requirements, scope_changes, interfaces, external_tools, execution_routines, artifact_validations, launch_commands, steps, rationale. analysis includes level, domains, workstreams, assumptions, risks, mvp_boundary, out_of_scope. No prose."
         )
         try:
             response = await self.llm_provider.completion(
@@ -435,6 +367,9 @@ class SimplePlanner(PlannerProvider):
                 plan_data["scope_changes"] = []
             if not isinstance(plan_data.get("interfaces"), list):
                 plan_data["interfaces"] = []
+            for field in ("external_tools", "execution_routines", "artifact_validations"):
+                if not isinstance(plan_data.get(field), list):
+                    plan_data[field] = []
             plan_data["launch_commands"] = self._coerce_string_array(
                 plan_data.get("launch_commands", []), ("command", "cmd", "description")
             )

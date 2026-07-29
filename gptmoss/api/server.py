@@ -29,7 +29,7 @@ logger = logging.getLogger("gptmoss.api")
 
 # Models for request/response validation
 class SubmitTaskRequest(BaseModel):
-    task: str = Field(min_length=1, max_length=50_000)
+    task: str = Field(min_length=1)
     agent_config: Optional[Dict[str, Any]] = None
     project_id: Optional[str] = None
     attachment_ids: List[str] = Field(default_factory=list)
@@ -54,7 +54,7 @@ class SkillRequest(BaseModel):
     allowed_capabilities: List[str] = Field(default_factory=list)
 
 class SkillImportRequest(BaseModel):
-    content: str = Field(min_length=1, max_length=262_144)
+    content: str = Field(min_length=1)
 
 class MemoryRequest(BaseModel):
     value: Any
@@ -64,9 +64,9 @@ class MemoryRequest(BaseModel):
     ttl_seconds: Optional[float] = Field(default=None, ge=1, le=31_536_000)
 
 class SubAgentRequest(BaseModel):
-    task: str = Field(min_length=1, max_length=50_000)
+    task: str = Field(min_length=1)
     role_name: str = Field(default="Sous-agent", min_length=1, max_length=100)
-    system_prompt: str = Field(default="You are a helpful MOSS sub-agent assisting a parent agent.", min_length=1, max_length=20_000)
+    system_prompt: str = Field(default="You are a helpful MOSS sub-agent assisting a parent agent.", min_length=1)
 
 class ConfirmationRequest(BaseModel):
     confirm: bool = False
@@ -75,27 +75,34 @@ class SettingsRequest(BaseModel):
     api_key: str = ""
     base_url: str
     model_name: str
+    vision_mode: str = Field(default="auto", pattern=r"^(auto|enabled|disabled)$")
     ssl_verify: bool
     ssl_cert_path: str
     denied_capabilities: List[str]
     approval_required_capabilities: List[str]
     workspace_full_autonomy: bool = False
     continue_while_progress: bool = True
+    adaptive_resource_management: bool = True
+    strict_skill_capabilities: bool = False
+    allow_nested_delegation: bool = True
+    max_delegation_depth: int = Field(default=0, ge=0)
     autonomous_specialization: bool = True
     autonomous_skill_creation: bool = True
     autonomous_skill_improvement: bool = True
-    skill_coverage_threshold: int = Field(default=4, ge=1, le=30)
-    max_autonomous_skills_per_execution: int = Field(default=6, ge=0, le=50)
+    skill_coverage_threshold: int = Field(default=4, ge=1)
+    max_autonomous_skills_per_execution: int = Field(default=0, ge=0)
     workspace_path: str
     restrict_to_workspace: bool
     allow_subfolders: bool
     projects: List[Dict[str, Any]]
-    max_step_iterations: int = Field(default=30, ge=1, le=100)
-    max_step_retries: int = Field(default=2, ge=0, le=5)
-    max_context_chars: int = Field(default=12_000, ge=2_000, le=100_000)
+    max_step_iterations: int = Field(default=30, ge=1)
+    max_step_retries: int = Field(default=2, ge=0)
+    max_context_chars: int = Field(default=12_000, ge=1)
+    max_upload_bytes: int = Field(default=0, ge=0)
+    max_attachment_text_chars: int = Field(default=0, ge=0)
     safe_shell_mode: bool = True
-    shell_timeout_seconds: int = Field(default=60, ge=1, le=600)
-    shell_max_output_chars: int = Field(default=12_000, ge=1_000, le=100_000)
+    shell_timeout_seconds: int = Field(default=0, ge=0)
+    shell_max_output_chars: int = Field(default=12_000, ge=0)
     default_skills: List[str] = Field(default_factory=list)
     confirm_sensitive: bool = False
 
@@ -199,6 +206,19 @@ def _filesystem_capability():
     if not app_state.execution_engine:
         return None
     return app_state.execution_engine.get_capability("filesystem")
+
+def _artifact_store() -> Optional[ArtifactStore]:
+    if not app_state.execution_engine:
+        return None
+    store = app_state.execution_engine.artifact_store
+    if store:
+        return store
+    filesystem = _filesystem_capability()
+    if not filesystem:
+        return None
+    store = ArtifactStore(filesystem.workspace_root)
+    app_state.execution_engine.artifact_store = store
+    return store
 
 def _runtime_config_path() -> Optional[Path]:
     if app_state.config_path:
@@ -309,7 +329,10 @@ async def upload_artifact(req: UploadArtifactRequest):
     if not filesystem:
         raise HTTPException(status_code=500, detail="Filesystem capability not initialized.")
     try:
-        metadata = ArtifactStore(filesystem.workspace_root).save_base64(
+        store = _artifact_store()
+        if not store:
+            raise HTTPException(status_code=500, detail="Artifact storage not initialized.")
+        metadata = store.save_base64(
             req.filename, req.content_base64, req.content_type
         )
     except ValueError as exc:
@@ -320,7 +343,9 @@ async def upload_artifact(req: UploadArtifactRequest):
 @app.get("/artifacts")
 async def list_artifacts():
     filesystem = app_state.execution_engine.get_capability("filesystem")
-    store = ArtifactStore(filesystem.workspace_root)
+    store = _artifact_store()
+    if not store:
+        raise HTTPException(status_code=500, detail="Artifact storage not initialized.")
     items = []
     for path in store.root.glob("*.json"):
         try:
@@ -337,12 +362,14 @@ async def preview_artifact(artifact_id: str):
     filesystem = app_state.execution_engine.get_capability("filesystem")
     if not filesystem:
         raise HTTPException(status_code=500, detail="Filesystem capability not initialized.")
-    store = ArtifactStore(filesystem.workspace_root)
+    store = _artifact_store()
+    if not store:
+        raise HTTPException(status_code=500, detail="Artifact storage not initialized.")
     try:
         metadata = store.get(artifact_id)
         path = Path(metadata["path"])
         if metadata["content_type"] in ArtifactStore.TEXT_TYPES:
-            return {"id": metadata["id"], "filename": metadata["filename"], "preview_type": "text", "content_type": metadata["content_type"], "text": path.read_text(encoding="utf-8", errors="replace")[:50_000]}
+            return {"id": metadata["id"], "filename": metadata["filename"], "preview_type": "text", "content_type": metadata["content_type"], "text": path.read_text(encoding="utf-8", errors="replace")}
         encoded = base64.b64encode(path.read_bytes()).decode("ascii")
         return {"id": metadata["id"], "filename": metadata["filename"], "preview_type": "image", "content_type": metadata["content_type"], "data_url": f"data:{metadata['content_type']};base64,{encoded}"}
     except (ValueError, FileNotFoundError, OSError, KeyError) as exc:
@@ -351,7 +378,9 @@ async def preview_artifact(artifact_id: str):
 @app.delete("/artifacts/{artifact_id}")
 async def delete_artifact(artifact_id: str):
     filesystem = app_state.execution_engine.get_capability("filesystem")
-    store = ArtifactStore(filesystem.workspace_root)
+    store = _artifact_store()
+    if not store:
+        raise HTTPException(status_code=500, detail="Artifact storage not initialized.")
     try:
         metadata = store.get(artifact_id)
         Path(metadata["path"]).unlink(missing_ok=True)
@@ -576,6 +605,9 @@ async def get_diagnostics():
         "model": getattr(engine.llm_provider, "default_model", ""),
         "base_url": getattr(engine.llm_provider, "base_url", ""),
         "supports_vision": bool(getattr(engine.llm_provider, "supports_vision", False)),
+        "vision_mode": getattr(engine.llm_provider, "vision_mode", "auto"),
+        "native_tool_calling": getattr(engine.llm_provider, "_native_tools_supported", None),
+        "learned_context_chars": getattr(engine.llm_provider, "_learned_context_chars", None),
         "capabilities": capabilities,
         "execution_statuses": statuses,
         "metrics": engine.telemetry.metrics(),
@@ -873,19 +905,26 @@ async def get_settings():
         config = _load_runtime_config()
         config.pop("api_key", None)
         config.setdefault("max_step_iterations", 30)
+        config.setdefault("vision_mode", "auto")
         config.setdefault("max_step_retries", 2)
         config.setdefault("max_context_chars", 12_000)
+        config.setdefault("max_upload_bytes", 0)
+        config.setdefault("max_attachment_text_chars", 0)
         config.setdefault("safe_shell_mode", True)
-        config.setdefault("shell_timeout_seconds", 60)
+        config.setdefault("shell_timeout_seconds", 0)
         config.setdefault("shell_max_output_chars", 12_000)
         config.setdefault("default_skills", [])
         config.setdefault("workspace_full_autonomy", False)
         config.setdefault("continue_while_progress", True)
+        config.setdefault("adaptive_resource_management", True)
+        config.setdefault("strict_skill_capabilities", False)
+        config.setdefault("allow_nested_delegation", True)
+        config.setdefault("max_delegation_depth", 0)
         config.setdefault("autonomous_specialization", True)
         config.setdefault("autonomous_skill_creation", True)
         config.setdefault("autonomous_skill_improvement", True)
         config.setdefault("skill_coverage_threshold", 4)
-        config.setdefault("max_autonomous_skills_per_execution", 6)
+        config.setdefault("max_autonomous_skills_per_execution", 0)
         return config
             
     # Fallback to current memory values
@@ -895,27 +934,34 @@ async def get_settings():
     return {
         "base_url": getattr(llm, "base_url", ""),
         "model_name": getattr(llm, "default_model", ""),
+        "vision_mode": getattr(llm, "vision_mode", "auto"),
         "ssl_verify": False,
         "ssl_cert_path": "",
         "denied_capabilities": getattr(policy, "denied", []),
         "approval_required_capabilities": getattr(policy, "approval_required", []),
         "workspace_full_autonomy": getattr(policy, "workspace_full_autonomy", False),
         "continue_while_progress": getattr(app_state.execution_engine, "continue_while_progress", True),
+        "adaptive_resource_management": getattr(app_state.execution_engine, "adaptive_resource_management", True),
+        "strict_skill_capabilities": getattr(app_state.execution_engine, "strict_skill_capabilities", False),
+        "allow_nested_delegation": getattr(app_state.execution_engine, "allow_nested_delegation", True),
+        "max_delegation_depth": getattr(app_state.execution_engine, "max_delegation_depth", 0),
         "autonomous_specialization": getattr(app_state.execution_engine, "autonomous_specialization", True),
         "autonomous_skill_creation": getattr(getattr(app_state.execution_engine, "skill_lifecycle", None), "creation_enabled", True),
         "autonomous_skill_improvement": getattr(getattr(app_state.execution_engine, "skill_lifecycle", None), "improvement_enabled", True),
         "skill_coverage_threshold": getattr(getattr(app_state.execution_engine, "skill_lifecycle", None), "coverage_threshold", 4),
-        "max_autonomous_skills_per_execution": getattr(getattr(app_state.execution_engine, "skill_lifecycle", None), "max_skills_per_execution", 6),
+        "max_autonomous_skills_per_execution": getattr(getattr(app_state.execution_engine, "skill_lifecycle", None), "max_skills_per_execution", 0),
         "workspace_path": getattr(fs, "workspace_root", "."),
         "restrict_to_workspace": getattr(fs, "restrict_to_workspace", True),
         "allow_subfolders": getattr(fs, "allow_subfolders", True),
         "projects": [{"id": "proj-default", "name": "Projet Par Défaut"}],
-        "max_step_iterations": 30,
-        "max_step_retries": 2,
-        "max_context_chars": 12_000,
+        "max_step_iterations": getattr(app_state.execution_engine, "max_step_iterations", 30),
+        "max_step_retries": getattr(app_state.execution_engine, "max_step_retries", 2),
+        "max_context_chars": getattr(app_state.execution_engine.context_engine, "max_history_chars", 12_000),
+        "max_upload_bytes": getattr(_artifact_store(), "max_bytes", 0),
+        "max_attachment_text_chars": getattr(_artifact_store(), "max_text_chars", 0),
         "safe_shell_mode": True,
-        "shell_timeout_seconds": 60,
-        "shell_max_output_chars": 12_000,
+        "shell_timeout_seconds": getattr(app_state.execution_engine.get_capability("shell"), "timeout_seconds", 0),
+        "shell_max_output_chars": getattr(app_state.execution_engine.get_capability("shell"), "max_output_chars", 12_000),
         "default_skills": []
     }
 
@@ -984,12 +1030,17 @@ async def update_settings(req: SettingsRequest):
         "api_key": api_key,
         "base_url": req.base_url,
         "model_name": req.model_name,
+        "vision_mode": req.vision_mode,
         "ssl_verify": req.ssl_verify,
         "ssl_cert_path": req.ssl_cert_path,
         "denied_capabilities": req.denied_capabilities,
         "approval_required_capabilities": req.approval_required_capabilities,
         "workspace_full_autonomy": req.workspace_full_autonomy,
         "continue_while_progress": req.continue_while_progress,
+        "adaptive_resource_management": req.adaptive_resource_management,
+        "strict_skill_capabilities": req.strict_skill_capabilities,
+        "allow_nested_delegation": req.allow_nested_delegation,
+        "max_delegation_depth": req.max_delegation_depth,
         "autonomous_specialization": req.autonomous_specialization,
         "autonomous_skill_creation": req.autonomous_skill_creation,
         "autonomous_skill_improvement": req.autonomous_skill_improvement,
@@ -1002,6 +1053,8 @@ async def update_settings(req: SettingsRequest):
         "max_step_iterations": req.max_step_iterations,
         "max_step_retries": req.max_step_retries,
         "max_context_chars": req.max_context_chars,
+        "max_upload_bytes": req.max_upload_bytes,
+        "max_attachment_text_chars": req.max_attachment_text_chars,
         "safe_shell_mode": req.safe_shell_mode,
         "shell_timeout_seconds": req.shell_timeout_seconds,
         "shell_max_output_chars": req.shell_max_output_chars,
@@ -1018,6 +1071,8 @@ async def update_settings(req: SettingsRequest):
             ssl_cert_path=req.ssl_cert_path,
             model_name=req.model_name
         )
+    if hasattr(llm, "set_vision_mode"):
+        llm.set_vision_mode(req.vision_mode)
     if hasattr(policy, "update_policy"):
         policy.update_policy(
             approval_required=req.approval_required_capabilities,
@@ -1035,8 +1090,24 @@ async def update_settings(req: SettingsRequest):
     app_state.execution_engine.max_step_iterations = req.max_step_iterations
     app_state.execution_engine.max_step_retries = req.max_step_retries
     app_state.execution_engine.continue_while_progress = req.continue_while_progress
-    app_state.execution_engine.autonomous_specialization = req.autonomous_specialization
+    app_state.execution_engine.adaptive_resource_management = req.adaptive_resource_management
+    app_state.execution_engine.strict_skill_capabilities = req.strict_skill_capabilities
+    app_state.execution_engine.allow_nested_delegation = req.allow_nested_delegation
+    app_state.execution_engine.max_delegation_depth = req.max_delegation_depth
+    app_state.execution_engine.context_engine.adaptive = req.adaptive_resource_management
     workspace_changed = Path(workspace_root).resolve() != Path(req.workspace_path).resolve()
+    if workspace_changed:
+        app_state.execution_engine.artifact_store = ArtifactStore(
+            req.workspace_path,
+            max_bytes=req.max_upload_bytes,
+            max_text_chars=req.max_attachment_text_chars,
+        )
+    elif app_state.execution_engine.artifact_store:
+        app_state.execution_engine.artifact_store.update_limits(
+            req.max_upload_bytes,
+            req.max_attachment_text_chars,
+        )
+    app_state.execution_engine.autonomous_specialization = req.autonomous_specialization
     if workspace_changed or not app_state.execution_engine.agent_profile_registry:
         app_state.execution_engine.agent_profile_registry = AgentProfileRegistry(req.workspace_path)
     lifecycle = app_state.execution_engine.skill_lifecycle

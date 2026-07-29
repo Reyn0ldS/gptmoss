@@ -96,8 +96,14 @@ def test_generated_skill_validator_rejects_escalation_and_prompt_override():
     assert report["valid"] is False
     assert any("Unknown" in error for error in report["errors"])
     assert any("Unsafe" in error for error in report["errors"])
-    assert ExecutionEngine._allowed_capabilities([]) is None
-    assert ExecutionEngine._allowed_capabilities([
+    engine = object.__new__(ExecutionEngine)
+    engine.strict_skill_capabilities = False
+    assert engine._allowed_capabilities([]) is None
+    assert engine._allowed_capabilities([
+        SimpleNamespace(allowed_capabilities=[]),
+    ]) is None
+    engine.strict_skill_capabilities = True
+    assert engine._allowed_capabilities([
         SimpleNamespace(allowed_capabilities=[]),
     ]) == set()
 

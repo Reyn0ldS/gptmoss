@@ -124,19 +124,25 @@ La configuration active est `workspace/config.json`. Au démarrage, GPTMOSS la n
   ],
   "workspace_full_autonomy": false,
   "continue_while_progress": true,
+  "adaptive_resource_management": true,
+  "strict_skill_capabilities": false,
+  "allow_nested_delegation": true,
+  "max_delegation_depth": 0,
   "autonomous_specialization": true,
   "autonomous_skill_creation": true,
   "autonomous_skill_improvement": true,
   "skill_coverage_threshold": 4,
-  "max_autonomous_skills_per_execution": 6,
+  "max_autonomous_skills_per_execution": 0,
   "workspace_path": "./workspace",
   "restrict_to_workspace": true,
   "allow_subfolders": true,
   "max_context_chars": 12000,
+  "max_upload_bytes": 0,
+  "max_attachment_text_chars": 0,
   "max_step_iterations": 30,
   "max_step_retries": 2,
   "safe_shell_mode": true,
-  "shell_timeout_seconds": 60,
+  "shell_timeout_seconds": 0,
   "shell_max_output_chars": 12000,
   "default_skills": [],
   "projects": [
@@ -156,21 +162,27 @@ La configuration active est `workspace/config.json`. Au démarrage, GPTMOSS la n
 | `approval_required_capabilities` | Capacités ou actions nécessitant une décision humaine. | Conserver `shell` et le quality gate. |
 | `workspace_full_autonomy` | Préautorise toutes les actions shell présentes et futures, uniquement dans les projets du workspace. Les refus explicites et le shell sûr restent prioritaires. | `false`, ou `true` sur un workspace isolé et de confiance. |
 | `continue_while_progress` | Supprime la limite globale de tours d'une étape tant qu'un progrès durable est détecté. | `true` pour les tâches longues. |
+| `adaptive_resource_management` | Transforme contexte, stagnation, reprises et sorties d'outils en budgets qui grandissent avec le contrat réel. | `true`. |
+| `strict_skill_capabilities` | Si activé, les skills sélectionnés réduisent aussi les outils exposés. Par défaut un skill ajoute une procédure sans retirer les capacités générales. | `false`. |
+| `allow_nested_delegation` | Autorise une sous-tâche réellement nouvelle à déléguer à son tour. Les cycles exacts sont refusés. | `true`. |
+| `max_delegation_depth` | Profondeur explicite de délégation ; `0` signifie aucune limite numérique arbitraire. | `0`. |
 | `autonomous_specialization` | Crée et conserve un profil d'agent propre à chaque spécialiste inédit du plan. | `true`. |
 | `autonomous_skill_creation` | Génère un skill procédural lorsqu'aucun skill chargé ne couvre suffisamment l'expertise. | `true`. |
 | `autonomous_skill_improvement` | Révise un skill généré à partir d'un échec réel et archive sa version précédente. | `true`. |
-| `skill_coverage_threshold` | Score minimal au-delà duquel les skills existants sont jugés suffisants. | `4` (1 à 30). |
-| `max_autonomous_skills_per_execution` | Protection contre la création non bornée de skills par une seule exécution. | `6` (0 à 50). |
+| `skill_coverage_threshold` | Score minimal au-delà duquel les skills existants sont jugés suffisants. | `4`, sans plafond fixe. |
+| `max_autonomous_skills_per_execution` | Limite explicite de création de skills ; `0` laisse le plan fini déterminer le nombre nécessaire. | `0`. |
 | `workspace_path` | Racine de travail des agents. | Un dossier dédié. |
 | `restrict_to_workspace` | Empêche les accès de fichiers hors de la racine. | `true`. |
 | `allow_subfolders` | Autorise les opérations dans les sous-dossiers. | `true`. |
-| `max_context_chars` | Budget du contexte conversationnel. Borné entre 2 000 et 100 000. | `12000`. |
-| `max_step_iterations` | Avec le mode progrès actif : nombre de tours consécutifs sans progrès avant échec/reprise. Sinon : limite totale de tours. | `30` (1 à 100). |
-| `max_step_retries` | Nombre de nouveaux spécialistes autonomes après l'échec d'une étape. | `2` (0 à 5). |
+| `max_context_chars` | Plancher du contexte. En mode adaptatif, il grandit avec la tâche et le plan puis s'ajuste à la limite réelle du fournisseur. | `12000`, sans plafond applicatif fixe. |
+| `max_upload_bytes` | Plafond applicatif d’un dépôt ; `0` laisse seulement les capacités mémoire/disque et l’infrastructure HTTP s’appliquer. | `0` en environnement local contrôlé. |
+| `max_attachment_text_chars` | Budget explicite par texte joint ; `0` utilise le budget contextuel adaptatif de la tâche. | `0`. |
+| `max_step_iterations` | Budget de base de stagnation. En mode adaptatif il grandit avec le contrat ; tout progrès réel permet de continuer. | `30`, sans plafond fixe. |
+| `max_step_retries` | Base de reprises autonomes, augmentée selon la taille du contrat en mode adaptatif. | `2`, sans plafond fixe. |
 | `projects` | Projets proposés dans l'interface. | Voir ci-dessous. |
 | `safe_shell_mode` | Active le blocage des commandes destructrices connues. | `true`. |
-| `shell_timeout_seconds` | Délai maximal d'une commande shell. | `60` (1 à 600). |
-| `shell_max_output_chars` | Taille maximale de sortie shell conservée. | `12000` (1 000 à 100 000). |
+| `shell_timeout_seconds` | Délai explicite ; `0` sélectionne automatiquement un budget selon test, build, installation ou commande générale. | `0`. |
+| `shell_max_output_chars` | Taille conservée ; `0` garde la sortie complète. | `12000` ou `0`, sans plafond fixe. |
 | `default_skills` | Skills appliqués par défaut. | `[]` pour la sélection automatique. |
 
 Les variables d'environnement `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `OPENAI_MODEL_NAME` et `DASHSCOPE_API_KEY` servent de valeurs de secours quand le champ équivalent n'est pas renseigné. `main.py` charge `.env` au démarrage.
@@ -219,8 +231,10 @@ Invoke-RestMethod http://127.0.0.1:8000/api/settings
 | Adresse API | URL compatible OpenAI du fournisseur. | Inclure `/v1` si le fournisseur l’exige. |
 | Clé API | Secret du fournisseur. Le champ reste vide à la réouverture pour ne pas l’exposer. | Laisser vide si la clé actuelle doit être conservée. |
 | Modèle par défaut | Modèle utilisé pour les nouvelles étapes. | Utiliser le nom exact fourni par l’API. |
+| Capacité vision | `auto` détecte les modèles vision/omni/VL ; les modes forcés reflètent la capacité réelle du serveur. | `auto`, puis vérifier le diagnostic. |
 | Vérifier le certificat SSL | Active la validation TLS ; le chemin de certificat apparaît si nécessaire. | Laisser activé. |
-| Budget de contexte | Nombre de caractères de conversation donnés au modèle. | 12 000 est un bon départ ; augmenter si les tâches longues perdent du contexte. |
+| Budget de contexte | Plancher adaptatif ; le runtime le développe avec le plan et apprend les erreurs de limite du fournisseur. | 12 000 est un bon départ. |
+| Gestion adaptative | Ajuste contexte, stagnation, reprises et sorties utiles à partir du contrat effectif. | Activée. |
 | Continuer tant que le travail progresse | Autorise une étape à dépasser tout nombre total de tours lorsque fichiers, livrables ou nouveaux tests réussis évoluent réellement. | Activé pour les projets longs. |
 | Budget sans progrès | Nombre de tours consécutifs sans modification durable ni nouvelle preuve avant reprise ou échec. | 20 à 40 ; ce n'est pas une durée maximale. |
 | Reprises autonomes | Nombre de nouveaux spécialistes chargés de reprendre les artefacts et preuves d'une tentative échouée. | 2 est un bon départ. |
@@ -230,8 +244,8 @@ Invoke-RestMethod http://127.0.0.1:8000/api/settings
 | Réglage GUI | Effet | Recommandation |
 |---|---|---|
 | Mode shell sécurisé | Bloque des motifs de commandes destructrices connus. | Toujours activé. |
-| Délai shell | Interrompt une commande trop longue (1 à 600 secondes). | 60 secondes. |
-| Sortie shell maximale | Tronque les sorties trop volumineuses (1 000 à 100 000 caractères). | 12 000 caractères. |
+| Délai shell | Valeur explicite sans plafond fixe ; `0` applique un budget automatique adapté au type de commande. | `0`. |
+| Sortie shell maximale | Valeur explicite sans plafond fixe ; `0` conserve toute la sortie. | 12 000, ou `0`. |
 | Validation humaine | Demande une confirmation avant les capacités cochées. | Conserver `shell` et le quality gate. |
 | Capacités interdites | Refuse la capacité, même si le modèle la demande. | Bloquer `filesystem` ou `shell` pour un agent d’analyse seule. |
 | Restriction du workspace | Empêche les accès hors du dossier de travail. | Toujours activée. |
@@ -242,7 +256,7 @@ Il n'existe pas de timeout global de projet. `shell_timeout_seconds` reste un ga
 
 #### Panneau Skills
 
-La liste affiche les skills détectés localement. Cocher un ou plusieurs skills les applique par défaut aux nouvelles exécutions et limite les capacités disponibles à celles qu’ils déclarent. Ne rien cocher conserve la sélection automatique selon le texte de la tâche.
+La liste affiche les skills détectés localement. Cocher un ou plusieurs skills ajoute leurs procédures aux nouvelles exécutions sans retirer les capacités générales. La réduction des outils aux seules déclarations des skills n’a lieu que si `strict_skill_capabilities` est explicitement activé.
 
 Exemple : cochez `code-review` pour les revues, `test-and-debug` pour corriger une suite de tests, ou `documentation` pour générer une documentation. Utilisez **Enregistrer**, puis soumettez une nouvelle tâche : les exécutions déjà démarrées ne changent pas de skill.
 
@@ -389,6 +403,10 @@ Après un échec, un nouveau spécialiste peut reprendre le même workspace sans
 
 Le pipeline logiciel ne bloque plus l'agent de réparation derrière une suite déjà verte : l'auteur QA doit d'abord produire des tests réellement importables et collectables, puis un agent de réparation exécute et corrige la suite unité/intégration. L'acceptation E2E ajoute ensuite ses scénarios, suivie d'une réparation finale des seules régressions restantes. Une indisponibilité temporaire du fournisseur LLM est retentée avec attente progressive sans effacer les fichiers du projet ; les erreurs permanentes d'authentification restent immédiates.
 
+Les moteurs de jeu, Blender et autres applications propres à un projet restent des outils externes. Le plan fournit `external_tools` et `execution_routines` avec sondes de disponibilité, paramètres, étapes opérateur, commandes ou appels API non interactifs, sorties attendues, validation, dépannage et retour arrière. GPTMOSS ne prétend pas piloter une interface graphique qu’il n’a pas réellement exécutée.
+
+Les sorties déclarées dans `artifact_validations` sont contrôlées même si elles sont produites plus tard par un opérateur. Les validateurs intégrés inspectent JSON, OBJ et GLB : structure, nombres finis, indices, références glTF, buffers, hiérarchie de nœuds, géométrie dégénérée, topologie et contraintes dimensionnelles. Cela ne prouve ni le photoréalisme, ni le rendu Blender, ni la qualité artistique ; ces points restent dans la routine manuelle avec des critères explicites.
+
 États possibles :
 
 | État | Signification |
@@ -407,9 +425,9 @@ Une règle de politique peut viser une capacité entière (`shell`) ou une actio
 | Capacité | Actions | Utilisation et limites |
 |---|---|---|
 | `filesystem` | `read`, `write`, `list_dir`, `delete` | Les chemins sont résolus par rapport au projet de l'exécution. `write` écrase un fichier existant ; `delete` ne supprime un dossier que s'il est vide. |
-| `shell` | `execute` | Lance une commande dans le dossier du projet. Délai par défaut : 60 s ; sortie limitée à 12 000 caractères. La commande `python` utilise l'interpréteur courant. |
-| `agent` | `spawn`, `status`, `execute_subtask` | Crée ou suit un sous-agent. Non disponible aux sous-agents. |
-| `devteam` | `build_project`, `approve_quality_gate` | Pipeline de développement : architecture, revue sécurité, code, vérification, tests, débogage et documentation. Non disponible aux sous-agents. |
+| `shell` | `execute` | Lance une commande dans le projet. Avec un délai à `0`, le runtime choisit un budget par catégorie ; une sortie maximale à `0` est conservée entièrement. `python` utilise l'interpréteur courant, y compris dans les pipelines Windows. |
+| `agent` | `spawn`, `status`, `execute_subtask` | Crée ou suit une sous-tâche. La délégation imbriquée accepte une tâche nouvelle ; la répétition d’une tâche ancêtre est bloquée. |
+| `devteam` | `build_project`, `approve_quality_gate` | Pipeline de développement avec les mêmes règles de délégation et d’approbation. |
 
 Le shell bloque en mode sûr plusieurs motifs destructifs évidents (`rm -rf /`, `format`, `diskpart`, `shutdown`, `reg delete`, etc.). Ce filtrage est intentionnellement limité : une politique stricte et un environnement isolé restent nécessaires.
 
@@ -471,7 +489,7 @@ Consultez aussi [SKILLS.md](SKILLS.md) pour les règles de compatibilité de ski
 
 Les artefacts sont stockés sous `<workspace>/uploads/`. Un fichier reçoit un identifiant UUID, un fichier de métadonnées et une empreinte SHA-256.
 
-Types acceptés : `text/plain`, `text/markdown`, `application/json`, `text/csv`, `image/png`, `image/jpeg`, `image/webp`. Taille maximale : 10 Mio. Les noms sont assainis ; PNG, JPEG et WebP sont contrôlés par signature. PDF et DOCX ne sont pas pris en charge actuellement.
+Types acceptés : `text/plain`, `text/markdown`, `application/json`, `text/csv`, `image/png`, `image/jpeg`, `image/webp`. La taille est pilotée par `max_upload_bytes` ; `0` retire l’ancien plafond fixe de 10 Mio. Les noms sont assainis ; PNG, JPEG et WebP sont contrôlés par signature. PDF et DOCX ne sont pas pris en charge actuellement.
 
 ### Déposer un fichier puis le joindre à une tâche
 
@@ -494,7 +512,7 @@ Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8000/executions `
   -ContentType 'application/json' -Body $task
 ```
 
-Le texte est ajouté au contexte, avec une limite de 50 000 caractères par artefact. Une image est envoyée au modèle seulement si son nom contient `vision`, `-vl` ou `omni`; sinon l'agent reçoit une notice et les métadonnées. Cette détection est une heuristique : vérifiez la compatibilité réelle de votre modèle.
+Le texte est ajouté au contexte et compacté selon le budget adaptatif global. Une image est envoyée lorsque la capacité vision est détectée ou explicitement activée. Si une pièce jointe exige une capacité absente, le plan déclare une lacune et une routine de configuration au lieu de fabriquer une analyse.
 
 ## Mémoire, contexte et traces
 
@@ -506,7 +524,7 @@ Le texte est ajouté au contexte, avec une limite de 50 000 caractères par arte
 | Télémétrie | `telemetry.jsonl` | Événements horodatés et données assainies. |
 | Artefacts | `uploads/` | Fichiers déposés et métadonnées. |
 
-Le contexte conversationnel est compacté au-delà de `max_context_chars`; les sorties d'outils individuelles sont limitées à 3 000 caractères dans le contexte. Les recherches de mémoire automatique ne réutilisent que les entrées validées et non expirées. Les traces masquent les champs sensibles connus (`api_key`, `authorization`, `token`, `password`, `secret`).
+`max_context_chars` est un plancher lorsque la gestion adaptative est active : le budget grandit avec la tâche, les exigences et les étapes. Les sorties d’outils utilisent elles aussi un budget croissant, sans modifier la trace complète sauvegardée. Si le fournisseur refuse encore la taille, GPTMOSS apprend une enveloppe plus petite, conserve le système et l’ordre récent des outils, puis retente. Les recherches de mémoire automatique ne réutilisent que les entrées validées et non expirées. Les traces masquent les champs sensibles connus (`api_key`, `authorization`, `token`, `password`, `secret`).
 
 ## Sécurité
 
