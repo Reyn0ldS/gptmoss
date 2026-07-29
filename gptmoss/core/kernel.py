@@ -38,6 +38,33 @@ class RuntimeKernel:
         if not task:
             raise ValueError("Task description cannot be empty.")
         agent_config = dict(agent_config or {})
+        parent_execution_id = agent_config.get("parent_execution_id")
+        parent_state = (
+            self.state_engine.executions.get(parent_execution_id)
+            if parent_execution_id else None
+        )
+        normalized_task = " ".join(task.lower().split())
+        delegation_depth = 0
+        delegation_lineage = [normalized_task]
+        if parent_state:
+            delegation_depth = int(parent_state.variables.get("delegation_depth", 0)) + 1
+            delegation_lineage = list(parent_state.variables.get("delegation_lineage") or [])
+            if not delegation_lineage:
+                delegation_lineage = [
+                    " ".join(str(parent_state.variables.get("task") or "").lower().split())
+                ]
+            if normalized_task in delegation_lineage:
+                raise ValueError(
+                    "Recursive delegation cycle rejected: this normalized task already exists in its ancestry."
+                )
+            maximum_depth = int(
+                getattr(self.execution_engine, "max_delegation_depth", 0) or 0
+            )
+            if maximum_depth and delegation_depth > maximum_depth:
+                raise ValueError(
+                    f"Delegation depth {delegation_depth} exceeds the configured maximum {maximum_depth}."
+                )
+            delegation_lineage.append(normalized_task)
         execution_id = str(uuid.uuid4())
         
         # Setup agent state
@@ -48,6 +75,8 @@ class RuntimeKernel:
         exec_state = self.state_engine.get_execution(execution_id)
         exec_state.status = "pending"
         exec_state.variables["task"] = task
+        exec_state.variables["delegation_depth"] = delegation_depth
+        exec_state.variables["delegation_lineage"] = delegation_lineage
         exec_state.variables["agent_config"] = {
             key: value for key, value in agent_config.items() if key != "variables"
         }

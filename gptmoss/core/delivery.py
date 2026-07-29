@@ -10,6 +10,7 @@ import os
 import re
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
+from gptmoss.core.artifact_validation import validate_artifact
 
 
 SCHEMA_VERSION = 1
@@ -302,12 +303,126 @@ def normalize_ownership(plan: Dict[str, Any]) -> List[Dict[str, Any]]:
     return claims
 
 
+def normalize_artifact_validations(plan: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Normalize extensible validation specifications declared by the planner."""
+    raw = plan.get("artifact_validations") or []
+    if not isinstance(raw, list):
+        raise ValueError("artifact_validations must be a list.")
+    normalized = []
+    seen = set()
+    for index, item in enumerate(raw):
+        if not isinstance(item, dict):
+            raise ValueError(f"Artifact validation {index} must be an object.")
+        path = str(item.get("path") or "").strip().replace("\\", "/")
+        validator = str(item.get("validator") or Path(path).suffix).strip().lower().lstrip(".")
+        constraints = item.get("constraints") or {}
+        if (
+            not path or path.startswith("/") or ".." in Path(path).parts
+            or path in seen or not isinstance(constraints, dict)
+        ):
+            raise ValueError(f"Artifact validation {index} is invalid.")
+        seen.add(path)
+        normalized.append({
+            "path": path,
+            "validator": validator,
+            "constraints": constraints,
+            "required": bool(item.get("required", True)),
+        })
+    plan["artifact_validations"] = normalized
+    return normalized
+
+
+def _routine_steps(value: Any) -> List[str]:
+    if not isinstance(value, list):
+        return []
+    normalized = []
+    for item in value:
+        if isinstance(item, str):
+            text = item
+        elif isinstance(item, dict):
+            text = str(
+                item.get("command") or item.get("action")
+                or item.get("description") or json.dumps(item, ensure_ascii=False)
+            )
+        else:
+            text = str(item)
+        if text.strip():
+            normalized.append(text.strip())
+    return normalized
+
+
+def normalize_external_tools(plan: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Freeze truthful setup contracts for project-specific external tools."""
+    raw = plan.get("external_tools") or []
+    if not isinstance(raw, list):
+        raise ValueError("external_tools must be a list.")
+    normalized = []
+    for index, item in enumerate(raw):
+        if not isinstance(item, dict):
+            raise ValueError(f"External tool {index} must be an object.")
+        name = str(item.get("name") or item.get("tool") or "").strip()
+        purpose = str(item.get("purpose") or item.get("description") or "").strip()
+        configuration = item.get("configuration") or item.get("parameters") or {}
+        if not name or not purpose or not isinstance(configuration, dict):
+            raise ValueError(f"External tool {index} requires name, purpose, and configuration.")
+        normalized.append({
+            "name": name,
+            "purpose": purpose,
+            "required": bool(item.get("required", False)),
+            "availability_probe": str(item.get("availability_probe") or "").strip(),
+            "configuration": configuration,
+            "setup": _routine_steps(item.get("setup") or item.get("installation") or []),
+            "commands": _routine_steps(item.get("commands") or []),
+            "expected_outputs": _strings(item.get("expected_outputs") or item.get("outputs")),
+            "validation": _routine_steps(item.get("validation") or []),
+            "rollback": _routine_steps(item.get("rollback") or []),
+        })
+    plan["external_tools"] = normalized
+    return normalized
+
+
+def normalize_execution_routines(plan: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Normalize reusable operator-run routines without executing desktop tools."""
+    raw = plan.get("execution_routines") or []
+    if not isinstance(raw, list):
+        raise ValueError("execution_routines must be a list.")
+    normalized = []
+    for index, item in enumerate(raw):
+        if not isinstance(item, dict):
+            raise ValueError(f"Execution routine {index} must be an object.")
+        name = str(item.get("name") or "").strip()
+        purpose = str(item.get("purpose") or item.get("description") or "").strip()
+        configuration = item.get("configuration") or item.get("parameters") or {}
+        steps = _routine_steps(item.get("steps") or item.get("commands") or [])
+        if not name or not purpose or not isinstance(configuration, dict) or not steps:
+            raise ValueError(
+                f"Execution routine {index} requires name, purpose, configuration, and steps."
+            )
+        normalized.append({
+            "name": name,
+            "purpose": purpose,
+            "prerequisites": _strings(item.get("prerequisites")),
+            "configuration": configuration,
+            "steps": steps,
+            "expected_outputs": _strings(item.get("expected_outputs") or item.get("outputs")),
+            "validation": _routine_steps(item.get("validation") or []),
+            "failure_handling": _routine_steps(
+                item.get("failure_handling") or item.get("rollback") or []
+            ),
+        })
+    plan["execution_routines"] = normalized
+    return normalized
+
+
 def build_delivery_contract(plan: Dict[str, Any], task: str) -> Dict[str, Any]:
     """Enrich a normalized plan and freeze the user-owned delivery contract."""
     requirements = normalize_requirements(plan, task)
     traceability = map_requirements(plan, requirements)
     scope_changes = normalize_scope_changes(plan)
     ownership = normalize_ownership(plan)
+    artifact_validations = normalize_artifact_validations(plan)
+    external_tools = normalize_external_tools(plan)
+    execution_routines = normalize_execution_routines(plan)
     commands = []
     for step in plan.get("steps", []):
         for command in _strings(step.get("verification_commands")):
@@ -332,6 +447,9 @@ def build_delivery_contract(plan: Dict[str, Any], task: str) -> Dict[str, Any]:
         "verification_commands": commands,
         "launch_commands": _strings(plan.get("launch_commands")),
         "interfaces": plan.get("interfaces") if isinstance(plan.get("interfaces"), list) else [],
+        "artifact_validations": artifact_validations,
+        "external_tools": external_tools,
+        "execution_routines": execution_routines,
         "software_delivery": software_delivery,
     }
     frozen = json.dumps(contract, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
@@ -579,6 +697,52 @@ def evaluate_delivery(
     if missing_artifacts:
         failures.append("missing artifacts: " + ", ".join(sorted(set(missing_artifacts))))
     checks.append({"name": "required_artifacts", "passed": not missing_artifacts})
+
+    validation_specs = {
+        str(item.get("path") or "").replace("\\", "/"): item
+        for item in contract.get("artifact_validations", [])
+        if isinstance(item, dict)
+    }
+    artifact_reports = []
+    validation_failures = []
+    validation_targets = {
+        artifact.replace("\\", "/")
+        for step in steps
+        for artifact in _strings(step.get("required_artifacts"))
+    }
+    validation_targets.update(validation_specs)
+    for normalized in sorted(validation_targets):
+        candidate = (workspace / normalized).resolve()
+        try:
+            candidate.relative_to(workspace)
+        except ValueError:
+            validation_failures.append(f"{normalized}: path is outside the workspace")
+            continue
+        specification = validation_specs.get(normalized, {})
+        if not candidate.is_file():
+            if specification.get("required", False):
+                validation_failures.append(f"{normalized}: required validation target is missing")
+            continue
+        report = validate_artifact(
+            candidate,
+            validator=specification.get("validator"),
+            constraints=specification.get("constraints"),
+        )
+        report["artifact"] = normalized
+        artifact_reports.append(report)
+        if not report.get("valid", False):
+            validation_failures.extend(
+                f"{normalized}: {message}" for message in report.get("failures", [])
+            )
+    if validation_failures:
+        failures.append(
+            "artifact validation failed: " + "; ".join(validation_failures[:20])
+        )
+    checks.append({
+        "name": "artifact_structure_and_constraints",
+        "passed": not validation_failures,
+        "reports": artifact_reports,
+    })
 
     static_issues = (
         static_workspace_issues(workspace) if contract.get("software_delivery") else []

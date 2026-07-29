@@ -2344,6 +2344,7 @@
                 document.getElementById("settings-base-url").value = data.base_url || "";
                 document.getElementById("settings-api-key").value = data.api_key || "";
                 document.getElementById("settings-model-name").value = data.model_name || "qwen-turbo";
+                document.getElementById("settings-vision-mode").value = data.vision_mode || "auto";
                 
                 const sslVerify = data.ssl_verify || false;
                 document.getElementById("settings-ssl-verify").checked = sslVerify;
@@ -2367,17 +2368,23 @@
                 document.getElementById("settings-allow-subfolders").checked = data.allow_subfolders !== false;
                 document.getElementById("settings-workspace-full-autonomy").checked = data.workspace_full_autonomy === true;
                 document.getElementById("settings-continue-while-progress").checked = data.continue_while_progress !== false;
+                document.getElementById("settings-adaptive-resource-management").checked = data.adaptive_resource_management !== false;
+                document.getElementById("settings-strict-skill-capabilities").checked = data.strict_skill_capabilities === true;
+                document.getElementById("settings-allow-nested-delegation").checked = data.allow_nested_delegation !== false;
+                document.getElementById("settings-max-delegation-depth").value = data.max_delegation_depth ?? 0;
                 document.getElementById("settings-autonomous-specialization").checked = data.autonomous_specialization !== false;
                 document.getElementById("settings-autonomous-skill-creation").checked = data.autonomous_skill_creation !== false;
                 document.getElementById("settings-autonomous-skill-improvement").checked = data.autonomous_skill_improvement !== false;
                 document.getElementById("settings-skill-coverage-threshold").value = data.skill_coverage_threshold || 4;
-                document.getElementById("settings-max-autonomous-skills").value = data.max_autonomous_skills_per_execution ?? 6;
+                document.getElementById("settings-max-autonomous-skills").value = data.max_autonomous_skills_per_execution ?? 0;
                 document.getElementById("settings-max-step-iterations").value = data.max_step_iterations || 30;
                 document.getElementById("settings-max-step-retries").value = data.max_step_retries ?? 2;
                 document.getElementById("settings-max-context-chars").value = data.max_context_chars || 12000;
+                document.getElementById("settings-max-upload-bytes").value = data.max_upload_bytes ?? 0;
+                document.getElementById("settings-max-attachment-text-chars").value = data.max_attachment_text_chars ?? 0;
                 document.getElementById("settings-safe-shell-mode").checked = data.safe_shell_mode !== false;
-                document.getElementById("settings-shell-timeout").value = data.shell_timeout_seconds || 60;
-                document.getElementById("settings-shell-output").value = data.shell_max_output_chars || 12000;
+                document.getElementById("settings-shell-timeout").value = data.shell_timeout_seconds ?? 0;
+                document.getElementById("settings-shell-output").value = data.shell_max_output_chars ?? 12000;
 
                 // Projects list
                 localProjects = data.projects || [{"id": "proj-default", "name": "Projet Par Défaut"}];
@@ -2399,12 +2406,17 @@
                 api_key: document.getElementById("settings-api-key").value,
                 base_url: document.getElementById("settings-base-url").value.trim(),
                 model_name: document.getElementById("settings-model-name").value.trim(),
+                vision_mode: document.getElementById("settings-vision-mode").value,
                 ssl_verify: document.getElementById("settings-ssl-verify").checked,
                 ssl_cert_path: document.getElementById("settings-ssl-cert-path").value.trim(),
                 denied_capabilities: Array.from(document.querySelectorAll("input[name='settings-deny']:checked"), cb => cb.value),
                 approval_required_capabilities: Array.from(document.querySelectorAll("input[name='settings-approval']:checked"), cb => cb.value),
                 workspace_full_autonomy: document.getElementById("settings-workspace-full-autonomy").checked,
                 continue_while_progress: document.getElementById("settings-continue-while-progress").checked,
+                adaptive_resource_management: document.getElementById("settings-adaptive-resource-management").checked,
+                strict_skill_capabilities: document.getElementById("settings-strict-skill-capabilities").checked,
+                allow_nested_delegation: document.getElementById("settings-allow-nested-delegation").checked,
+                max_delegation_depth: Math.max(0, parseInt(document.getElementById("settings-max-delegation-depth").value, 10) || 0),
                 autonomous_specialization: document.getElementById("settings-autonomous-specialization").checked,
                 autonomous_skill_creation: document.getElementById("settings-autonomous-skill-creation").checked,
                 autonomous_skill_improvement: document.getElementById("settings-autonomous-skill-improvement").checked,
@@ -2417,9 +2429,11 @@
                 max_step_iterations: parseInt(document.getElementById("settings-max-step-iterations").value, 10) || 30,
                 max_step_retries: Math.max(0, parseInt(document.getElementById("settings-max-step-retries").value, 10) || 0),
                 max_context_chars: parseInt(document.getElementById("settings-max-context-chars").value, 10) || 12000,
+                max_upload_bytes: Math.max(0, parseInt(document.getElementById("settings-max-upload-bytes").value, 10) || 0),
+                max_attachment_text_chars: Math.max(0, parseInt(document.getElementById("settings-max-attachment-text-chars").value, 10) || 0),
                 safe_shell_mode: document.getElementById("settings-safe-shell-mode").checked,
-                shell_timeout_seconds: parseInt(document.getElementById("settings-shell-timeout").value, 10) || 60,
-                shell_max_output_chars: parseInt(document.getElementById("settings-shell-output").value, 10) || 12000,
+                shell_timeout_seconds: Math.max(0, parseInt(document.getElementById("settings-shell-timeout").value, 10) || 0),
+                shell_max_output_chars: Math.max(0, parseInt(document.getElementById("settings-shell-output").value, 10) || 0),
                 default_skills: Array.from(document.querySelectorAll("input[name='settings-default-skill']:checked"), cb => cb.value),
                 confirm_sensitive: false,
             };
@@ -2569,6 +2583,14 @@
                     <label style="font-size: 11px; color: var(--text-normal);">Modèle par défaut</label>
                     <input type="text" id="settings-model-name" class="approval-reason-input" style="margin: 0;" placeholder="qwen-turbo">
                 </div>
+                <div style="display: flex; flex-direction: column; gap: 4px;">
+                    <label style="font-size: 11px; color: var(--text-normal);">Capacité vision</label>
+                    <select id="settings-vision-mode" class="approval-reason-input" style="margin:0">
+                        <option value="auto">Détection automatique</option>
+                        <option value="enabled">Activée explicitement</option>
+                        <option value="disabled">Désactivée explicitement</option>
+                    </select>
+                </div>
 
                 <!-- SSL Certificate Settings -->
                 <div style="display: flex; align-items: center; gap: 8px; margin-top: 4px;">
@@ -2608,37 +2630,51 @@
                 
                 <div style="display: flex; flex-direction: column; gap: 4px; margin-top: 6px;">
                     <label style="font-size: 11px; color: var(--text-normal);">Budget d'itérations consécutives sans progrès par étape</label>
-                    <input type="number" id="settings-max-step-iterations" class="approval-reason-input" style="margin: 0;" placeholder="30" min="1" max="100">
+                    <input type="number" id="settings-max-step-iterations" class="approval-reason-input" style="margin: 0;" placeholder="30" min="1">
                 </div>
                 <label style="font-size: 11px; display: flex; align-items: flex-start; gap: 6px; margin-top: 6px; cursor: pointer;">
                     <input type="checkbox" id="settings-continue-while-progress" style="margin-top: 2px;">
                     <span><strong>Continuer tant que le travail progresse</strong><br>
                     Aucune limite globale d'itérations : le budget ci-dessus est remis à zéro lors d'une modification réelle du projet ou d'un nouveau test réussi. Les lectures et erreurs répétées ne le renouvellent pas.</span>
                 </label>
+                <label style="font-size: 11px; display: flex; align-items: flex-start; gap: 6px; margin-top: 6px; cursor: pointer;">
+                    <input type="checkbox" id="settings-adaptive-resource-management" style="margin-top: 2px;">
+                    <span><strong>Dimensionnement adaptatif</strong><br>
+                    Les valeurs numériques deviennent des bases. GPTMOSS augmente le contexte, la stagnation tolérée et les reprises selon la taille réelle du contrat, sans plafond arbitraire.</span>
+                </label>
+                <div style="padding: 9px; border: 1px solid var(--border-color); border-radius: 4px; display: grid; gap: 7px;">
+                    <label style="font-size: 11px; display: flex; gap: 6px;"><input type="checkbox" id="settings-allow-nested-delegation">Autoriser les sous-agents à déléguer des sous-tâches spécialisées.</label>
+                    <label style="font-size:11px">Profondeur de délégation (0 = sans plafond numérique)<input type="number" id="settings-max-delegation-depth" class="approval-reason-input" min="0" style="margin:4px 0 0;width:100%"></label>
+                    <small style="color:var(--text-muted)">Les cycles de tâches normalisées restent détectés et bloqués, quelle que soit la profondeur.</small>
+                </div>
                 <div style="padding: 9px; border: 1px solid var(--border-color); border-radius: 4px; display: grid; gap: 7px;">
                     <strong style="font-size: 12px; color: var(--text-normal);">Agents et skills autonomes sur mesure</strong>
                     <label style="font-size: 11px; display: flex; gap: 6px;"><input type="checkbox" id="settings-autonomous-specialization">Créer et conserver un profil spécialisé inédit pour chaque expertise du plan.</label>
                     <label style="font-size: 11px; display: flex; gap: 6px;"><input type="checkbox" id="settings-autonomous-skill-creation">Détecter les expertises non couvertes, générer un skill, le valider, le tester de façon isolée et le charger à chaud.</label>
                     <label style="font-size: 11px; display: flex; gap: 6px;"><input type="checkbox" id="settings-autonomous-skill-improvement">Améliorer uniquement les skills générés après un échec concret.</label>
                     <div style="display:flex;gap:10px;flex-wrap:wrap">
-                        <label style="font-size:11px;flex:1">Seuil de couverture<input type="number" id="settings-skill-coverage-threshold" class="approval-reason-input" min="1" max="30" style="margin:4px 0 0;width:100%"></label>
-                        <label style="font-size:11px;flex:1">Nouveaux skills max./exécution<input type="number" id="settings-max-autonomous-skills" class="approval-reason-input" min="0" max="50" style="margin:4px 0 0;width:100%"></label>
+                        <label style="font-size:11px;flex:1">Seuil de couverture<input type="number" id="settings-skill-coverage-threshold" class="approval-reason-input" min="1" style="margin:4px 0 0;width:100%"></label>
+                        <label style="font-size:11px;flex:1">Nouveaux skills max./exécution (0 = plan)<input type="number" id="settings-max-autonomous-skills" class="approval-reason-input" min="0" style="margin:4px 0 0;width:100%"></label>
                     </div>
                     <small style="color:var(--text-muted)">Un skill généré reste une procédure Markdown : il ne peut ni créer un outil exécutable, ni augmenter les permissions du noyau.</small>
                 </div>
                 <div style="display: flex; flex-direction: column; gap: 4px; margin-top: 6px;">
                     <label style="font-size: 11px; color: var(--text-normal);">Nouveaux agents autonomes après échec d'une étape</label>
-                    <input type="number" id="settings-max-step-retries" class="approval-reason-input" style="margin: 0;" placeholder="2" min="0" max="5">
+                    <input type="number" id="settings-max-step-retries" class="approval-reason-input" style="margin: 0;" placeholder="2" min="0">
                 </div>
                 <div style="display: flex; flex-direction: column; gap: 4px; margin-top: 6px;">
                     <label style="font-size: 11px; color: var(--text-normal);">Budget de contexte (caractères)</label>
-                    <input type="number" id="settings-max-context-chars" class="approval-reason-input" style="margin: 0;" placeholder="12000" min="2000" max="100000">
+                    <input type="number" id="settings-max-context-chars" class="approval-reason-input" style="margin: 0;" placeholder="12000" min="1">
+                </div>
+                <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:6px">
+                    <label style="font-size:11px;flex:1 1 180px">Taille de dépôt max. en octets (0 = sans plafond applicatif)<input type="number" id="settings-max-upload-bytes" class="approval-reason-input" min="0" style="margin:4px 0 0;width:100%"></label>
+                    <label style="font-size:11px;flex:1 1 180px">Texte joint max. (0 = budget contextuel adaptatif)<input type="number" id="settings-max-attachment-text-chars" class="approval-reason-input" min="0" style="margin:4px 0 0;width:100%"></label>
                 </div>
 
                 <div style="display: flex; gap: 12px; flex-wrap: wrap; margin-top: 8px;">
                     <label style="font-size: 11px; display: inline-flex; align-items: center; gap: 4px; cursor: pointer;"><input type="checkbox" id="settings-safe-shell-mode"> Mode shell sécurisé</label>
-                    <label style="font-size: 11px; flex: 1 1 120px;">Délai shell (s)<input type="number" id="settings-shell-timeout" class="approval-reason-input" min="1" max="600" style="margin: 4px 0 0; width: 100%;"></label>
-                    <label style="font-size: 11px; flex: 1 1 150px;">Sortie shell max.<input type="number" id="settings-shell-output" class="approval-reason-input" min="1000" max="100000" style="margin: 4px 0 0; width: 100%;"></label>
+                    <label style="font-size: 11px; flex: 1 1 120px;">Délai shell (s, 0 = auto)<input type="number" id="settings-shell-timeout" class="approval-reason-input" min="0" style="margin: 4px 0 0; width: 100%;"></label>
+                    <label style="font-size: 11px; flex: 1 1 150px;">Sortie shell max. (0 = complète)<input type="number" id="settings-shell-output" class="approval-reason-input" min="0" style="margin: 4px 0 0; width: 100%;"></label>
                 </div>
                 <div style="display: flex; flex-direction: column; gap: 8px; margin-top: 8px;">
                     <div style="font-size: 12px; color: var(--text-normal); font-weight: 500;">Capacités nécessitant une validation humaine :</div>
@@ -2669,7 +2705,8 @@
 
                 <hr style="border: 0; border-top: 1px solid var(--border-color); margin: 8px 0;">
                 <div id="settings-skills-section" class="settings-section" style="font-weight: 600; font-size: 12px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px;">Skills activés par défaut</div>
-                <div style="font-size: 11px; color: var(--text-muted);">Les skills cochés limitent les capacités exposées à l'agent. Aucun choix laisse la sélection automatique active.</div>
+                <div style="font-size: 11px; color: var(--text-muted);">Les skills cochés ajoutent leurs procédures sans retirer les autres capacités. Le mode strict ci-dessous permet volontairement de les transformer en sandbox.</div>
+                <label style="font-size: 11px; display: flex; gap: 6px; margin: 6px 0;"><input type="checkbox" id="settings-strict-skill-capabilities">Limiter volontairement les capacités à celles déclarées par les skills actifs.</label>
                 <div id="settings-skills-list" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 8px;"></div>
 
                 <!-- Projects Configuration -->
@@ -2700,5 +2737,98 @@
         <section class="library-panel"><h4>Journal d'audit des réglages sensibles</h4><pre id="library-audit" class="diagnostic-output"></pre></section>
       </div>
     </div>
+    <script>
+        function applyGPTMOSSLayoutAuditFixture() {
+            const mode = new URLSearchParams(location.search).get("layout_audit");
+            if (!mode) return;
+            const longToken = "very-long-unbroken-content-".repeat(35);
+            if (mode === "content" || mode === "approval") {
+                const detail = document.getElementById("detail-view");
+                if (detail) detail.style.display = "flex";
+                const chat = document.getElementById("chat-container");
+                if (chat) chat.innerHTML = `
+                    <div class="message"><div class="message-content">${longToken}</div></div>
+                    <div class="message"><pre>${longToken}\n${longToken}</pre></div>`;
+                const plan = document.getElementById("plan-steps");
+                if (plan) plan.innerHTML = Array.from({length: 12}, (_, index) =>
+                    `<div class="plan-step"><div class="plan-step-desc">Step ${index}: ${longToken}</div></div>`
+                ).join("");
+            }
+            if (mode === "approval") {
+                const banner = document.getElementById("approval-banner");
+                if (banner) banner.style.display = "flex";
+                const argumentsBox = document.getElementById("approval-args");
+                if (argumentsBox) argumentsBox.textContent = longToken;
+            }
+            if (mode === "settings") {
+                const modal = document.getElementById("settings-modal");
+                if (modal) modal.style.display = "flex";
+            }
+            if (mode === "library") {
+                const modal = document.getElementById("library-modal");
+                if (modal) modal.style.display = "flex";
+                const diagnostics = document.getElementById("library-diagnostics");
+                if (diagnostics) diagnostics.textContent = longToken;
+            }
+        }
+
+        function auditGPTMOSSLayout() {
+            const root = document.documentElement;
+            const viewportWidth = root.clientWidth;
+            const viewportHeight = root.clientHeight;
+            const offenders = [];
+            const insideHorizontalScroller = element => {
+                let parent = element.parentElement;
+                while (parent && parent !== document.body) {
+                    const style = getComputedStyle(parent);
+                    if ((style.overflowX === "auto" || style.overflowX === "scroll") &&
+                        parent.scrollWidth > parent.clientWidth + 1) return true;
+                    parent = parent.parentElement;
+                }
+                return false;
+            };
+            document.body.querySelectorAll("*").forEach(element => {
+                const style = getComputedStyle(element);
+                if (style.display === "none" || style.visibility === "hidden" ||
+                    style.position === "fixed" || insideHorizontalScroller(element)) return;
+                const rect = element.getBoundingClientRect();
+                if (!rect.width || !rect.height) return;
+                if (rect.left < -1 || rect.right > viewportWidth + 1) {
+                    offenders.push({
+                        tag: element.tagName.toLowerCase(),
+                        id: element.id || "",
+                        className: String(element.className || "").slice(0, 160),
+                        left: Math.round(rect.left),
+                        right: Math.round(rect.right),
+                    });
+                }
+            });
+            const report = {
+                viewport: {width: viewportWidth, height: viewportHeight},
+                document: {width: root.scrollWidth, height: root.scrollHeight},
+                globalHorizontalOverflow: root.scrollWidth > viewportWidth + 1,
+                offenders: offenders.slice(0, 100),
+            };
+            window.__gptmossLayoutAudit = report;
+            document.body.dataset.layoutGlobalOverflow =
+                report.globalHorizontalOverflow ? "true" : "false";
+            document.body.dataset.layoutOffenderCount = String(offenders.length);
+            return report;
+        }
+        let layoutAuditTimer;
+        const scheduleLayoutAudit = () => {
+            clearTimeout(layoutAuditTimer);
+            layoutAuditTimer = setTimeout(auditGPTMOSSLayout, 150);
+        };
+        window.addEventListener("resize", scheduleLayoutAudit);
+        window.addEventListener("load", () => {
+            setTimeout(applyGPTMOSSLayoutAuditFixture, 600);
+            setTimeout(scheduleLayoutAudit, 900);
+        });
+        setTimeout(() => {
+            applyGPTMOSSLayoutAuditFixture();
+            scheduleLayoutAudit();
+        }, 1_200);
+    </script>
 </body>
 </html>

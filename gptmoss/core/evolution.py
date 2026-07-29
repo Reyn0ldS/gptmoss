@@ -222,8 +222,10 @@ class AutonomousSkillLifecycle:
         self.skills_root = self.workspace_root / "skills"
         self.evolution_root = self.workspace_root / "evolution"
         self.registry = registry
-        self.coverage_threshold = max(1, min(int(coverage_threshold), 30))
-        self.max_skills_per_execution = max(0, min(int(max_skills_per_execution), 50))
+        self.coverage_threshold = max(1, int(coverage_threshold))
+        # Zero means automatic: the finite execution plan, not an arbitrary
+        # numeric ceiling, determines how many expertise gaps may be covered.
+        self.max_skills_per_execution = max(0, int(max_skills_per_execution))
         self.creation_enabled = bool(creation_enabled)
         self.improvement_enabled = bool(improvement_enabled)
         self._generated_by_execution: Dict[str, set[str]] = {}
@@ -269,7 +271,7 @@ class AutonomousSkillLifecycle:
             if skill_name in self.registry.skills:
                 return {"created": False, "coverage": coverage, "skill_names": [skill_name], "reused": True}
             generated = self._generated_by_execution.setdefault(execution_id, set())
-            if len(generated) >= self.max_skills_per_execution:
+            if self.max_skills_per_execution and len(generated) >= self.max_skills_per_execution:
                 return {"created": False, "coverage": coverage, "skill_names": [], "budget_exhausted": True}
             generated.add(skill_name)
             safe_capabilities = sorted({str(item).lower() for item in registered_capabilities} - {"agent", "devteam"})

@@ -24,6 +24,7 @@ from gptmoss.core.delivery import (
     evaluate_delivery,
     path_is_owned,
 )
+from gptmoss.core.adaptive import AdaptiveRuntimePolicy, tool_call_fingerprint
 
 ROLE_DISPLAY_NAMES = {
     "architect": "Architecte",
@@ -195,6 +196,10 @@ class ExecutionEngine:
         agent_profile_registry: Optional[AgentProfileRegistry] = None,
         skill_lifecycle: Optional[AutonomousSkillLifecycle] = None,
         autonomous_specialization: bool = True,
+        adaptive_resource_management: bool = True,
+        strict_skill_capabilities: bool = False,
+        allow_nested_delegation: bool = True,
+        max_delegation_depth: int = 0,
     ):
         self.event_bus = event_bus
         self.state_engine = state_engine
@@ -206,9 +211,18 @@ class ExecutionEngine:
         self.skill_registry = skill_registry
         self.artifact_store = artifact_store
         self.default_skills = [str(skill).lower() for skill in (default_skills or [])]
-        self.max_step_iterations = max(1, min(int(max_step_iterations), 100))
-        self.max_step_retries = max(0, min(int(max_step_retries), 5))
+        self.max_step_iterations = max(1, int(max_step_iterations))
+        self.max_step_retries = max(0, int(max_step_retries))
         self.continue_while_progress = bool(continue_while_progress)
+        self.adaptive_resource_management = bool(adaptive_resource_management)
+        self.strict_skill_capabilities = bool(strict_skill_capabilities)
+        self.allow_nested_delegation = bool(allow_nested_delegation)
+        self.max_delegation_depth = max(0, int(max_delegation_depth))
+        self.runtime_policy = AdaptiveRuntimePolicy(
+            baseline_stagnation_iterations=self.max_step_iterations,
+            baseline_retries=self.max_step_retries,
+            adaptive=self.adaptive_resource_management,
+        )
         self.agent_profile_registry = agent_profile_registry
         self.skill_lifecycle = skill_lifecycle
         self.autonomous_specialization = bool(autonomous_specialization)
@@ -321,13 +335,27 @@ class ExecutionEngine:
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
 
-    def get_capabilities_schemas(self, is_sub_agent: bool = False, allowed_capabilities: Optional[set[str]] = None) -> List[Dict[str, Any]]:
+    def get_capabilities_schemas(
+        self,
+        is_sub_agent: bool = False,
+        allowed_capabilities: Optional[set[str]] = None,
+        delegation_depth: int = 0,
+        suppress_delegation: bool = False,
+    ) -> List[Dict[str, Any]]:
         """Generate JSON schemas for all registered capabilities."""
         schemas = []
         for name, inst in self._capabilities.items():
             if allowed_capabilities is not None and name.lower() not in allowed_capabilities:
                 continue
-            if is_sub_agent and name.lower() in ("agent", "devteam"):
+            delegation_blocked = (
+                suppress_delegation
+                or (is_sub_agent and not self.allow_nested_delegation)
+                or (
+                    bool(self.max_delegation_depth)
+                    and int(delegation_depth) >= self.max_delegation_depth
+                )
+            )
+            if delegation_blocked and name.lower() in ("agent", "devteam"):
                 continue
             for act_name, method in inst.actions.items():
                 schemas.append(generate_action_schema(name, act_name, method))
@@ -406,11 +434,34 @@ class ExecutionEngine:
                 execution_id, profile_id, step.get("autonomous_skill_names", []), success, feedback,
             )
 
-    @staticmethod
-    def _allowed_capabilities(skills) -> Optional[set[str]]:
-        if not skills:
+    def _allowed_capabilities(self, skills) -> Optional[set[str]]:
+        # Skills describe useful procedures. They only become capability
+        # sandboxes when the operator explicitly opts into strict mode.
+        if not skills or not self.strict_skill_capabilities:
             return None
         return set().union(*(set(skill.allowed_capabilities) for skill in skills))
+
+    def _step_stagnation_budget(self, task: str, step: Dict[str, Any]) -> int:
+        self.runtime_policy.baseline_stagnation_iterations = self.max_step_iterations
+        self.runtime_policy.adaptive = self.adaptive_resource_management
+        return self.runtime_policy.stagnation_budget(task, step)
+
+    def _step_retry_budget(self, task: str, step: Dict[str, Any]) -> int:
+        self.runtime_policy.baseline_retries = self.max_step_retries
+        self.runtime_policy.adaptive = self.adaptive_resource_management
+        return self.runtime_policy.retry_budget(task, step)
+
+    @staticmethod
+    def _cached_approval_decision(state, capability: str, action: str, arguments: Dict[str, Any]):
+        fingerprint = tool_call_fingerprint(capability, action, arguments)
+        cached = state.variables.get("approval_decisions", {}).get(fingerprint)
+        if cached in ("allow", "reject"):
+            return fingerprint, PolicyDecision(
+                decision="allow" if cached == "allow" else "deny",
+                reason="Reused the human decision for this exact normalized action.",
+                details={"cached_human_decision": True},
+            )
+        return fingerprint, None
 
     def _artifact_exists(self, execution_id: str, path: str) -> bool:
         filesystem = self.get_capability("filesystem")
@@ -425,6 +476,32 @@ class ExecutionEngine:
     def _missing_artifacts(self, execution_id: str, step: Dict[str, Any]) -> List[str]:
         return [path for path in step.get("required_artifacts", [])
                 if not self._artifact_exists(execution_id, path)]
+
+    def _capability_gaps(self, state) -> List[Dict[str, Any]]:
+        """Describe unavailable input modalities without pretending to use them."""
+        gaps = []
+        if not self.artifact_store:
+            return gaps
+        image_attachments = []
+        for artifact_id in state.variables.get("attachment_ids", []):
+            try:
+                metadata = self.artifact_store.get(artifact_id)
+            except (ValueError, FileNotFoundError, OSError, KeyError):
+                continue
+            if str(metadata.get("content_type") or "").startswith("image/"):
+                image_attachments.append(metadata.get("filename"))
+        if image_attachments and not getattr(self.llm_provider, "supports_vision", False):
+            gaps.append({
+                "capability": "vision",
+                "required_for": "Interpret attached image content",
+                "inputs": image_attachments,
+                "available": False,
+                "resolution": (
+                    "Configure a vision-capable provider, or restrict execution to "
+                    "documented adapters, configuration, routines, and validators."
+                ),
+            })
+        return gaps
 
     def _progress_signature(self, execution_id: str, step: Dict[str, Any]) -> tuple:
         """Fingerprint durable work without counting repeated reads or failed commands."""
@@ -557,9 +634,18 @@ class ExecutionEngine:
         if not filesystem or not hasattr(filesystem, "_get_workspace_for_execution"):
             return []
         root = filesystem._get_workspace_for_execution(execution_id)
-        suspicious = ("numpy", "torch", "cv2", "trimesh", "pillow", "scipy")
-        return [name for name in suspicious
-                if os.path.isfile(os.path.join(root, name, "__init__.py"))]
+        try:
+            from importlib.metadata import packages_distributions
+            installed_imports = set(packages_distributions())
+        except (ImportError, OSError):
+            installed_imports = set()
+        installed_imports.update({"numpy", "torch", "cv2", "trimesh", "PIL", "scipy"})
+        return sorted(
+            entry.name for entry in os.scandir(root)
+            if entry.is_dir()
+            and entry.name in installed_imports
+            and os.path.isfile(os.path.join(entry.path, "__init__.py"))
+        )
 
     def _integration_contract_issues(self, execution_id: str) -> List[str]:
         """Detect package-layout defects that can create duplicate Python class identities."""
@@ -570,8 +656,16 @@ class ExecutionEngine:
             root = filesystem._get_workspace_for_execution(execution_id)
         except (OSError, PermissionError, ValueError):
             return []
-        package_root = os.path.join(root, "src", "avatar3d")
-        if not os.path.isdir(package_root):
+        source_root = os.path.join(root, "src")
+        if not os.path.isdir(source_root):
+            return []
+
+        packages = sorted(
+            name for name in os.listdir(source_root)
+            if os.path.isdir(os.path.join(source_root, name))
+            and os.path.isfile(os.path.join(source_root, name, "__init__.py"))
+        )
+        if not packages:
             return []
 
         issues = []
@@ -587,11 +681,14 @@ class ExecutionEngine:
                         content = source.read()
                 except (OSError, UnicodeError):
                     continue
-                if re.search(r"(?:from|import)\s+src\.avatar3d\b", content):
+                if any(
+                    re.search(rf"(?:from|import)\s+src\.{re.escape(package)}\b", content)
+                    for package in packages
+                ):
                     invalid_imports.append(os.path.relpath(full_path, root).replace(os.sep, "/"))
         if invalid_imports:
             issues.append(
-                "replace src.avatar3d imports with the single canonical avatar3d package identity in: "
+                "replace src.<package> imports with the canonical installed package identity in: "
                 + ", ".join(sorted(invalid_imports)[:20])
             )
 
@@ -690,15 +787,14 @@ class ExecutionEngine:
         normalized_path = path.replace(chr(92), "/").lower()
         if normalized_path.startswith("tests/") or "/tests/" in normalized_path:
             lower = content.lower()
-            if not re.search(r"(?:from|import)\s+avatar3d", lower):
-                issues.append("tests do not import the actual avatar3d implementation")
-            if re.search(r"(?:from|import)\s+src\.avatar3d", lower):
-                issues.append("tests import src.avatar3d instead of the canonical avatar3d package")
+            if re.search(r"(?:from|import)\s+src\.[a-z_]\w*", lower):
+                issues.append("tests import src.<package> instead of the canonical package identity")
             if any(marker in lower for marker in ("mockmesh", "magicmock", "unittest.mock", "# mocking", "np.random")):
                 issues.append("tests contain mocks, replicated implementation, or random data")
             if "def test_" not in lower:
                 issues.append("test file contains no pytest test function")
-        if any(name in normalized_path for name in ("face.py", "body.py", "garment.py", "geometry.py", "fitting.py")):
+        geometry_markers = re.search(r"\b(?:mesh|geometry|vertex|vertices|face|faces|topology)\b", content, re.IGNORECASE)
+        if geometry_markers:
             if re.search(r"\b(?:np\.random|numpy\.random|random\.random|random\.randint)\b", content):
                 issues.append("geometry implementation uses random output")
         return issues
@@ -980,6 +1076,7 @@ class ExecutionEngine:
         self.telemetry.record("execution_started", execution_id, task=task)
         skills = self._active_skills(state, task)
         allowed_capabilities = self._allowed_capabilities(skills)
+        state.variables["capability_gaps"] = self._capability_gaps(state)
 
         # 1. Initialize states if new
         if state.status == "pending":
@@ -1014,7 +1111,11 @@ class ExecutionEngine:
         # 2. Plan generation (if not already planned)
         if not state.current_plan:
             is_sub_agent = state.variables.get("parent_execution_id") is not None
-            schemas = self.get_capabilities_schemas(is_sub_agent=is_sub_agent, allowed_capabilities=allowed_capabilities)
+            schemas = self.get_capabilities_schemas(
+                is_sub_agent=is_sub_agent,
+                allowed_capabilities=allowed_capabilities,
+                delegation_depth=int(state.variables.get("delegation_depth", 0)),
+            )
             context = await self.context_engine.compile_context(
                 execution_id=execution_id,
                 conversation_id=execution_id,
@@ -1038,6 +1139,55 @@ class ExecutionEngine:
             plan_result = merge_inherited_requirements(
                 plan_result, state.variables.get("inherited_requirements")
             )
+            if state.variables.get("capability_gaps"):
+                scope_changes = plan_result.setdefault("scope_changes", [])
+                known_statements = {
+                    str(item.get("statement") or "") for item in scope_changes
+                    if isinstance(item, dict)
+                }
+                for gap in state.variables["capability_gaps"]:
+                    statement = (
+                        f"Execution cannot consume the unavailable {gap['capability']} "
+                        "capability; it is limited to configuration, adapter routines, "
+                        "and independently verifiable outputs until that capability is configured."
+                    )
+                    if statement not in known_statements:
+                        scope_changes.append({
+                            "kind": "capability_gap",
+                            "statement": statement,
+                            "reason": gap["resolution"],
+                            "requirement_ids": [],
+                        })
+                    routine_name = f"configure-{gap['capability']}-capability"
+                    routines = plan_result.setdefault("execution_routines", [])
+                    if not any(
+                        isinstance(item, dict) and item.get("name") == routine_name
+                        for item in routines
+                    ):
+                        routines.append({
+                            "name": routine_name,
+                            "purpose": gap["required_for"],
+                            "prerequisites": ["Provider credentials and a compatible model/service"],
+                            "configuration": {
+                                "base_url": "<provider OpenAI-compatible base URL>",
+                                "model_name": "<model identifier supporting the required modality>",
+                                "capability_mode": "enabled",
+                            },
+                            "steps": [
+                                "Open GPTMOSS settings and configure the provider endpoint and model.",
+                                "Set the capability mode explicitly or retain auto-detection when metadata is reliable.",
+                                "Run the provider connection test and save the configuration.",
+                                "Confirm the capability is available in the diagnostics panel before resuming the project.",
+                            ],
+                            "expected_outputs": ["Saved runtime configuration", "Positive capability diagnostic"],
+                            "validation": [
+                                f"Diagnostics report {gap['capability']} as available.",
+                                "A minimal representative input is consumed without a capability-gap warning.",
+                            ],
+                            "failure_handling": [
+                                "Keep the project paused or approve only an adapter/configuration deliverable.",
+                            ],
+                        })
             self.telemetry.record("plan_generated", execution_id, duration_ms=round((time.perf_counter() - planning_started) * 1000, 2), steps=len(plan_result.get("steps", [])))
             state.current_plan = plan_result
             state.variables["delivery_contract"] = build_delivery_contract(
@@ -1144,6 +1294,14 @@ class ExecutionEngine:
                     sub_exec.variables["role_key"] = role_key
                     sub_exec.variables["generic_role_name"] = generic_role_name
                     sub_exec.variables["parent_execution_id"] = execution_id
+                    sub_exec.variables["delegation_depth"] = (
+                        int(state.variables.get("delegation_depth", 0)) + 1
+                    )
+                    lineage = list(state.variables.get("delegation_lineage") or [])
+                    normalized_subtask = " ".join(sub_task.lower().split())
+                    if normalized_subtask not in lineage:
+                        lineage.append(normalized_subtask)
+                    sub_exec.variables["delegation_lineage"] = lineage
                     sub_exec.variables["project_id"] = state.variables.get("project_id", "proj-default")
                     sub_exec.variables["parent_task"] = state.variables.get("parent_task") or task
                     sub_exec.variables["task"] = sub_exec.variables.get("task") or sub_task
@@ -1227,6 +1385,36 @@ class ExecutionEngine:
                         if parent_state.status == "running" and sub_state.status == "paused" and not sub_state.variables.get("pending_approval"):
                             sub_state.status = "running"
                             asyncio.create_task(self.execute_task(sub_id, sub_exec.variables["task"]))
+
+                        if sub_state.status == "paused" and sub_state.variables.get("pending_approval"):
+                            pending_child = dict(sub_state.variables["pending_approval"])
+                            pending_child["child_execution_id"] = sub_id
+                            pending_child["child_role_name"] = sub_state.variables.get("role_name")
+                            parent_state.status = "paused"
+                            parent_state.variables["pending_approval"] = pending_child
+                            step["status"] = "pending"
+                            self.state_engine.save_to_disk()
+                            await self.event_bus.publish(Event(
+                                type="ApprovalRequested",
+                                payload={
+                                    "execution_id": execution_id,
+                                    "child_execution_id": sub_id,
+                                    "tool_call_id": pending_child.get("tool_call_id"),
+                                    "capability": pending_child.get("capability"),
+                                    "action": pending_child.get("action"),
+                                    "arguments": pending_child.get("arguments", {}),
+                                    "reason": "A delegated specialist is waiting for this authorization.",
+                                },
+                            ))
+                            await self.event_bus.publish(Event(
+                                type="ExecutionPaused",
+                                payload={
+                                    "execution_id": execution_id,
+                                    "reason": "child_approval",
+                                    "child_execution_id": sub_id,
+                                },
+                            ))
+                            return "suspended"
 
                         if sub_state.status == "waiting_provider":
                             parent_state.status = "waiting_provider"
@@ -1315,7 +1503,8 @@ class ExecutionEngine:
                 if not sub_id:
                     self._record_specialization_outcome(execution_id, step, False, str(e))
                 retry_count = int(step.get("retry_count", 0))
-                if sub_id and retry_count < self.max_step_retries and state.status not in ("cancelled", "paused"):
+                retry_budget = self._step_retry_budget(task, step)
+                if sub_id and retry_count < retry_budget and state.status not in ("cancelled", "paused"):
                     step["retry_count"] = retry_count + 1
                     step.setdefault("failed_attempts", []).append({
                         "execution_id": sub_id, "attempt": retry_count + 1, "error": str(e),
@@ -1408,7 +1597,11 @@ class ExecutionEngine:
                              if canonical_step_role(item.get("role")) == "debugger"),
                             None,
                         )
-                        if repair_step is not None and repair_round < self.max_step_retries:
+                        repair_budget = (
+                            self._step_retry_budget(task, repair_step)
+                            if repair_step is not None else self.max_step_retries
+                        )
+                        if repair_step is not None and repair_round < repair_budget:
                             state.variables["assurance_repair_round"] = repair_round + 1
                             repair_step["status"] = "pending"
                             repair_step.pop("assigned_execution_id", None)
@@ -1586,18 +1779,28 @@ class ExecutionEngine:
                 reuse_instruction = " Reuse the validated prerequisite outputs supplied in the task; do not repeat their work."
             convo.messages.append({"role": "system", "content": f"Current Step objectives: {step_desc}.{reuse_instruction} Generate thought and select tools if needed.", "timestamp": time.time()})
 
-        iteration = 0
-        stagnant_iterations = 0
+        runtime_key = str(step.get("id"))
+        runtime = state.variables.setdefault("step_runtime", {}).setdefault(
+            runtime_key, {"iterations": 0, "stagnant_iterations": 0}
+        )
+        iteration = int(runtime.get("iterations", 0))
+        stagnant_iterations = int(runtime.get("stagnant_iterations", 0))
+        stagnation_budget = self._step_stagnation_budget(
+            str(state.variables.get("parent_task") or state.variables.get("task") or ""),
+            step,
+        )
         previous_progress = self._progress_signature(execution_id, step)
+        observed_iteration = False
 
         while True:
             current_progress = self._progress_signature(execution_id, step)
-            if iteration:
+            if observed_iteration:
                 improved, improvement_kind = self._quality_improved(
                     execution_id, previous_progress, current_progress
                 )
                 if improved:
                     stagnant_iterations = 0
+                    runtime["stagnant_iterations"] = 0
                     self.telemetry.record(
                         "step_quality_improved", execution_id,
                         improvement=improvement_kind, iteration=iteration,
@@ -1608,16 +1811,17 @@ class ExecutionEngine:
                             "execution_id": execution_id,
                             "iteration": iteration,
                             "improvement": improvement_kind,
-                            "remaining_stagnation_budget": self.max_step_iterations,
+                            "remaining_stagnation_budget": stagnation_budget,
                         },
                     ))
                 else:
                     stagnant_iterations += 1
+                    runtime["stagnant_iterations"] = stagnant_iterations
             previous_progress = current_progress
             if self.continue_while_progress:
-                if stagnant_iterations >= self.max_step_iterations:
+                if stagnant_iterations >= stagnation_budget:
                     break
-            elif iteration >= self.max_step_iterations:
+            elif iteration >= stagnation_budget:
                 break
 
             if state.status == "cancelled":
@@ -1627,6 +1831,8 @@ class ExecutionEngine:
             if state.status == "paused" and not state.variables.get("pending_approval", {}).get("decision"):
                 return f"Execution suspended with status: {state.status}."
             iteration += 1
+            runtime["iterations"] = iteration
+            observed_iteration = True
 
             # Check if there is a pending approval we just resumed
             pending_app = state.variables.get("pending_approval")
@@ -1638,6 +1844,10 @@ class ExecutionEngine:
                 
                 # Check if user decision is approved
                 decision = pending_app.get("decision", "reject")
+                fingerprint = pending_app.get("fingerprint") or tool_call_fingerprint(
+                    pending_app["capability"], pending_app["action"], pending_app["arguments"]
+                )
+                state.variables.setdefault("approval_decisions", {})[fingerprint] = decision
                 completed_tool_calls = state.variables.setdefault("completed_tool_calls", {})
                 if tool_call_id in completed_tool_calls:
                     result_str = completed_tool_calls[tool_call_id]
@@ -1683,8 +1893,10 @@ class ExecutionEngine:
                 for item in (state.current_plan or {}).get("steps", [])
             )
             schemas = self.get_capabilities_schemas(
-                is_sub_agent=is_sub_agent or delegated_plan,
+                is_sub_agent=is_sub_agent,
                 allowed_capabilities=allowed_capabilities,
+                delegation_depth=int(state.variables.get("delegation_depth", 0)),
+                suppress_delegation=delegated_plan,
             )
 
             # Compile context
@@ -1695,8 +1907,13 @@ class ExecutionEngine:
                 capabilities_schemas=schemas
             )
             if self.artifact_store and state.variables.get("attachment_ids"):
+                attachment_text_budget = self.artifact_store.max_text_chars
+                if not attachment_text_budget and self.adaptive_resource_management:
+                    attachment_text_budget = int(context.get("context_budget_chars") or 0)
                 context["attachments"] = self.artifact_store.context_items(
-                    state.variables["attachment_ids"], getattr(self.llm_provider, "supports_vision", False)
+                    state.variables["attachment_ids"],
+                    getattr(self.llm_provider, "supports_vision", False),
+                    max_text_chars=attachment_text_budget,
                 )
 
             # Request LLM completion
@@ -1770,6 +1987,9 @@ class ExecutionEngine:
                 f"\nVerification commands: {json.dumps(step.get('verification_commands', []), ensure_ascii=False)}."
                 f"\nRequirement IDs: {json.dumps(step.get('requirement_ids', []), ensure_ascii=False)}."
                 f"\nOwned paths: {json.dumps(step.get('owned_paths', []), ensure_ascii=False)}."
+                f"\nExternal tool declarations: {json.dumps((state.current_plan or {}).get('external_tools', []), ensure_ascii=False)}."
+                f"\nExecution routines: {json.dumps((state.current_plan or {}).get('execution_routines', []), ensure_ascii=False)}."
+                f"\nArtifact validation specifications: {json.dumps((state.current_plan or {}).get('artifact_validations', []), ensure_ascii=False)}."
                 "\nAct autonomously inside the project workspace: inspect existing prerequisite artifacts, implement the assignment, "
                 "run relevant checks, diagnose failures, fix root causes, and rerun checks before finishing. Do not merely describe "
                 "what should be done. Do not redo validated dependency work. Never claim an artifact or successful test that you did not create or execute."
@@ -1910,13 +2130,17 @@ class ExecutionEngine:
                 args = self._normalize_tool_arguments(cap_name, act_name, args)
 
                 # Evaluate policy
-                policy_desc = await self.policy_provider.check_action(
-                    execution_id=execution_id,
-                    capability=cap_name,
-                    action=act_name,
-                    arguments=args,
-                    context=context
+                fingerprint, policy_desc = self._cached_approval_decision(
+                    state, cap_name, act_name, args
                 )
+                if policy_desc is None:
+                    policy_desc = await self.policy_provider.check_action(
+                        execution_id=execution_id,
+                        capability=cap_name,
+                        action=act_name,
+                        arguments=args,
+                        context=context
+                    )
 
                 await self.event_bus.publish(Event(
                     type="ToolCalled",
@@ -1951,6 +2175,7 @@ class ExecutionEngine:
                         "capability": cap_name,
                         "action": act_name,
                         "arguments": args,
+                        "fingerprint": fingerprint,
                     }
                     await self.event_bus.publish(Event(
                         type="ApprovalRequested",
@@ -2024,10 +2249,10 @@ class ExecutionEngine:
         raise RuntimeError(
             (
                 f"Step '{step_desc}' did not satisfy its delivery gates after "
-                f"{self.max_step_iterations} consecutive stagnant iterations."
+                f"{stagnation_budget} consecutive stagnant iterations."
                 if self.continue_while_progress else
                 f"Step '{step_desc}' did not satisfy its delivery gates within "
-                f"{self.max_step_iterations} iterations."
+                f"{stagnation_budget} iterations."
             )
         )
 
@@ -2194,6 +2419,40 @@ class ExecutionEngine:
         pending_app = state.variables.get("pending_approval")
         if not pending_app:
             raise ValueError(f"No pending approval found for execution {execution_id}.")
+
+        child_execution_id = pending_app.get("child_execution_id")
+        if child_execution_id:
+            child_state = self.state_engine.get_execution(child_execution_id)
+            child_pending = child_state.variables.get("pending_approval")
+            if child_state.status != "paused" or not isinstance(child_pending, dict):
+                raise ValueError(
+                    f"Delegated execution {child_execution_id} has no pending approval."
+                )
+            child_pending["decision"] = decision
+            child_pending["reason"] = reason or ""
+            fingerprint = child_pending.get("fingerprint") or tool_call_fingerprint(
+                child_pending["capability"], child_pending["action"], child_pending["arguments"]
+            )
+            child_state.variables.setdefault("approval_decisions", {})[fingerprint] = decision
+            child_state.status = "running"
+            state.variables.pop("pending_approval", None)
+            state.status = "running"
+            self.state_engine.save_to_disk()
+            await self.event_bus.publish(Event(
+                type="ExecutionResumed",
+                payload={
+                    "execution_id": execution_id,
+                    "child_execution_id": child_execution_id,
+                    "decision": decision,
+                },
+            ))
+            asyncio.create_task(self.execute_task(
+                child_execution_id, str(child_state.variables.get("task") or "")
+            ))
+            asyncio.create_task(self.execute_task(
+                execution_id, str(state.variables.get("task") or "")
+            ))
+            return
 
         pending_app["decision"] = decision
         pending_app["reason"] = reason or ""

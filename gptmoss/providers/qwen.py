@@ -1,6 +1,5 @@
 import hashlib
 import html
-import hashlib
 import json
 import os
 import logging
@@ -27,8 +26,10 @@ class QwenProvider(LLMProvider):
         # DashScope OpenAI-compatible endpoint or local host
         self.base_url = base_url or os.getenv("OPENAI_BASE_URL") or "https://dashscope.aliyuncs.com/compatible-mode/v1"
         self.default_model = default_model
-        self.supports_vision = any(marker in default_model.lower() for marker in ("vision", "-vl", "omni"))
+        self.vision_mode = "auto"
+        self.supports_vision = self._infer_vision(default_model)
         self._native_tools_supported: Optional[bool] = None
+        self._learned_context_chars: Optional[int] = None
         
         logger.info(f"Initializing QwenProvider calling base_url={self.base_url} with default_model={self.default_model}")
         import httpx
@@ -37,6 +38,23 @@ class QwenProvider(LLMProvider):
         http_client = httpx.AsyncClient(verify=True)
         self.client = AsyncOpenAI(api_key=self.api_key, base_url=self.base_url, http_client=http_client,
                                   max_retries=5, timeout=90.0)
+
+    @staticmethod
+    def _infer_vision(model_name: str) -> bool:
+        return any(
+            marker in str(model_name).lower()
+            for marker in ("vision", "-vl", "omni", "multimodal")
+        )
+
+    def set_vision_mode(self, mode: str = "auto") -> None:
+        normalized = str(mode or "auto").strip().lower()
+        if normalized not in {"auto", "enabled", "disabled"}:
+            raise ValueError("vision_mode must be auto, enabled, or disabled.")
+        self.vision_mode = normalized
+        self.supports_vision = (
+            self._infer_vision(self.default_model)
+            if normalized == "auto" else normalized == "enabled"
+        )
 
     @staticmethod
     def _log_completion_error(error: Exception):
@@ -50,8 +68,12 @@ class QwenProvider(LLMProvider):
         self.api_key = api_key
         self.base_url = base_url
         self.default_model = model_name
-        self.supports_vision = any(marker in model_name.lower() for marker in ("vision", "-vl", "omni"))
+        self.supports_vision = (
+            self._infer_vision(model_name)
+            if self.vision_mode == "auto" else self.vision_mode == "enabled"
+        )
         self._native_tools_supported = None
+        self._learned_context_chars = None
         
         import httpx
         if ssl_verify:
@@ -63,6 +85,103 @@ class QwenProvider(LLMProvider):
         self.client = AsyncOpenAI(api_key=self.api_key, base_url=self.base_url, http_client=http_client,
                                   max_retries=5, timeout=90.0)
         logger.info(f"QwenProvider config updated. base_url={self.base_url}, ssl_verify={ssl_verify}, ssl_cert_path={ssl_cert_path}")
+
+    @staticmethod
+    def _is_context_limit_error(error: Exception) -> bool:
+        text = (error.__class__.__name__ + " " + str(error)).lower()
+        return any(marker in text for marker in (
+            "context length", "context_length", "maximum context",
+            "max context", "too many tokens", "token limit",
+            "prompt is too long", "input length",
+        ))
+
+    @staticmethod
+    def _message_chars(messages: List[Dict[str, Any]]) -> int:
+        return sum(len(json.dumps(message, ensure_ascii=False, default=str)) for message in messages)
+
+    @classmethod
+    def _compact_messages(
+        cls, messages: List[Dict[str, Any]], target_chars: int
+    ) -> List[Dict[str, Any]]:
+        """Drop oldest complete context items while preserving instructions and recent tool ordering."""
+        items = [dict(message) for message in messages]
+        if cls._message_chars(items) <= target_chars:
+            return items
+        preserved_first = items[0] if items[0].get("role") == "system" else None
+        body = items[1:] if preserved_first else items
+        omitted = 0
+        while len(body) > 4 and cls._message_chars(
+            ([preserved_first] if preserved_first else []) + body
+        ) > target_chars:
+            body.pop(0)
+            omitted += 1
+            while body and body[0].get("role") == "tool":
+                body.pop(0)
+                omitted += 1
+        compacted = ([preserved_first] if preserved_first else [])
+        if omitted:
+            compacted.append({
+                "role": "system",
+                "content": (
+                    f"{omitted} older context message(s) were compacted after "
+                    "the provider reported its context limit. Durable execution "
+                    "state and the current plan remain authoritative."
+                ),
+            })
+        compacted.extend(body)
+        while cls._message_chars(compacted) > target_chars:
+            candidates = [
+                (len(str(message.get("content") or "")), index)
+                for index, message in enumerate(compacted)
+                if message is not preserved_first and str(message.get("content") or "")
+            ]
+            if not candidates:
+                break
+            _, index = max(candidates)
+            content = str(compacted[index].get("content") or "")
+            without_content = [dict(message) for message in compacted]
+            without_content[index]["content"] = ""
+            # Leave room for JSON escaping and message serialization overhead,
+            # then re-evaluate in the loop.
+            available = max(1, target_chars - cls._message_chars(without_content) - 64)
+            if len(content) <= available:
+                break
+            notice = "\n… [message compacted at provider context boundary] …\n"
+            payload = max(0, available - len(notice))
+            head = (payload * 2) // 3
+            tail = payload - head
+            compacted[index]["content"] = (
+                content[:head] + notice + (content[-tail:] if tail else "")
+            )
+        return compacted
+
+    async def _create_with_context_recovery(self, arguments: Dict[str, Any]):
+        """Learn a provider's effective context size and recover without losing task state."""
+        request = dict(arguments)
+        messages = [dict(item) for item in request.get("messages") or []]
+        if self._learned_context_chars:
+            messages = self._compact_messages(messages, self._learned_context_chars)
+        for attempt in range(5):
+            request["messages"] = messages
+            try:
+                return await self.client.chat.completions.create(**request)
+            except Exception as error:
+                if not self._is_context_limit_error(error) or attempt >= 4:
+                    raise
+                current_size = self._message_chars(messages)
+                learned = max(2_000, int(current_size * 0.7))
+                self._learned_context_chars = (
+                    learned if self._learned_context_chars is None
+                    else min(self._learned_context_chars, learned)
+                )
+                compacted = self._compact_messages(messages, self._learned_context_chars)
+                if compacted == messages:
+                    raise
+                messages = compacted
+                logger.warning(
+                    "Provider context limit reached; retrying with %s learned characters.",
+                    self._learned_context_chars,
+                )
 
     async def completion(
         self,
@@ -78,11 +197,11 @@ class QwenProvider(LLMProvider):
             # Standard chat completion without tool schema
             logger.debug(f"Calling LLM: {model} with {len(messages)} messages (no tools)")
             try:
-                response = await self.client.chat.completions.create(
-                    model=model,
-                    messages=messages,
-                    **kwargs
-                )
+                response = await self._create_with_context_recovery({
+                    "model": model,
+                    "messages": messages,
+                    **kwargs,
+                })
                 return self._parse_openai_response(response)
             except Exception as e:
                 self._log_completion_error(e)
@@ -104,14 +223,18 @@ class QwenProvider(LLMProvider):
         logger.debug(f"Calling LLM: {model} with {len(messages)} messages and {len(tools)} tools (trying native first)")
 
         try:
-            response = await self.client.chat.completions.create(**client_kwargs)
+            response = await self._create_with_context_recovery(client_kwargs)
             parsed = self._parse_openai_response(response)
             self._native_tools_supported = True
             return parsed
         except Exception as e:
             err_msg = str(e).lower()
             # If native tool calling fails because auto tool choice is disabled on remote server, fall back
-            if "tool_choice" in err_msg or "tool-call-parser" in err_msg or "tool_call" in err_msg or "400" in err_msg:
+            if (
+                "tool_choice" in err_msg or "tool-call-parser" in err_msg
+                or "tool_call" in err_msg
+                or ("400" in err_msg and not self._is_context_limit_error(e))
+            ):
                 logger.warning("Native tool calling failed/not supported by remote endpoint, falling back to prompt-based tool calling.")
                 self._native_tools_supported = False
                 return await self._prompt_based_tool_calling(messages, tools, model, **kwargs)
@@ -307,11 +430,11 @@ class QwenProvider(LLMProvider):
             fallback_messages.insert(0, {"role": "system", "content": system_instruction})
         
         # Make a standard chat completion call
-        response = await self.client.chat.completions.create(
-            model=model,
-            messages=fallback_messages,
-            **kwargs
-        )
+        response = await self._create_with_context_recovery({
+            "model": model,
+            "messages": fallback_messages,
+            **kwargs,
+        })
         
         choice = response.choices[0]
         content = choice.message.content or ""

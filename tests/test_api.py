@@ -339,7 +339,7 @@ def test_api_settings_preserve_secret_and_context_budget(tmp_path):
     assert '"max_context_chars": 24000' in persisted
 
     invalid = dict(public_settings)
-    invalid["max_context_chars"] = 100
+    invalid["max_context_chars"] = 0
     assert client.post("/api/settings", json=invalid).status_code == 422
 
     created_project = client.post("/projects", json={"id": "proj-atomic", "name": "Atomic Project"})
@@ -532,6 +532,9 @@ def test_gui_layout_stays_inside_narrow_viewports_and_keeps_scroll_fallbacks():
         "scrollbar-gutter: stable;",
         "@media (max-width: 480px)",
         ".sidebar-footer .btn-control",
+        "auditGPTMOSSLayout",
+        "layoutGlobalOverflow",
+        "layoutOffenderCount",
     ):
         assert marker in gui
 
