@@ -6,7 +6,7 @@ indexing and agent workflows do not need to know each source format.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from hashlib import sha256
 from html.parser import HTMLParser
 from pathlib import Path, PurePosixPath
@@ -75,6 +75,22 @@ class DocumentProvenance:
     page_number: int | None = None
     slide_number: int | None = None
 
+    @classmethod
+    def from_dict(cls, value: dict[str, Any]) -> "DocumentProvenance":
+        return cls(
+            source_name=str(value["source_name"]),
+            block_index=int(value["block_index"]),
+            locator=str(value["locator"]),
+            page_number=(
+                int(value["page_number"]) if value.get("page_number") is not None else None
+            ),
+            slide_number=(
+                int(value["slide_number"])
+                if value.get("slide_number") is not None
+                else None
+            ),
+        )
+
     def to_dict(self) -> dict[str, Any]:
         result: dict[str, Any] = {
             "source_name": self.source_name,
@@ -97,6 +113,18 @@ class DocumentBlock:
     heading_path: tuple[str, ...]
     provenance: DocumentProvenance
     metadata: dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def from_dict(cls, value: dict[str, Any]) -> "DocumentBlock":
+        return cls(
+            id=str(value["id"]),
+            kind=str(value["kind"]),
+            text=str(value["text"]),
+            order=int(value["order"]),
+            heading_path=tuple(str(part) for part in value.get("heading_path", [])),
+            provenance=DocumentProvenance.from_dict(value["provenance"]),
+            metadata=dict(value.get("metadata") or {}),
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -121,6 +149,21 @@ class NormalizedDocument:
     blocks: tuple[DocumentBlock, ...]
     metadata: dict[str, Any] = field(default_factory=dict)
 
+    @classmethod
+    def from_dict(cls, value: dict[str, Any]) -> "NormalizedDocument":
+        return cls(
+            id=str(value["id"]),
+            filename=str(value["filename"]),
+            content_type=str(value["content_type"]),
+            title=str(value.get("title") or ""),
+            parser=str(value["parser"]),
+            parser_version=str(value["parser_version"]),
+            blocks=tuple(
+                DocumentBlock.from_dict(block) for block in value.get("blocks", [])
+            ),
+            metadata=dict(value.get("metadata") or {}),
+        )
+
     @property
     def text(self) -> str:
         return "\n\n".join(block.text for block in self.blocks if block.text)
@@ -142,9 +185,24 @@ class NormalizedDocument:
             self.to_dict(), ensure_ascii=False, sort_keys=True, separators=(",", ":")
         )
 
+    def with_filename(self, filename: str) -> "NormalizedDocument":
+        """Return the same document with a user-facing filename and provenance."""
+
+        updated_blocks = tuple(
+            replace(
+                block,
+                provenance=replace(block.provenance, source_name=filename),
+            )
+            for block in self.blocks
+        )
+        title = self.title
+        if self.metadata.get("title_generated"):
+            title = Path(filename).stem
+        return replace(self, filename=filename, title=title, blocks=updated_blocks)
+
     def to_markdown(self) -> str:
         output: list[str] = []
-        if self.title and not (
+        if self.title and not self.metadata.get("title_generated") and not (
             self.blocks
             and self.blocks[0].kind == "heading"
             and self.blocks[0].text == self.title
@@ -392,6 +450,7 @@ class PlainTextParser:
             self,
             builder,
             encoding=encoding,
+            title_generated=not bool(title),
         )
 
 
@@ -549,6 +608,7 @@ class HTMLDocumentParser:
             builder,
             encoding=encoding,
             external_resources_loaded=False,
+            title_generated=not bool(title),
         )
 
 
@@ -722,6 +782,7 @@ class DOCXDocumentParser:
             builder,
             archive_format="OOXML",
             external_resources_loaded=False,
+            title_generated=not bool(title),
         )
 
 
@@ -833,6 +894,7 @@ class PPTXDocumentParser:
             archive_format="OOXML",
             slide_count=slide_count,
             external_resources_loaded=False,
+            title_generated=not bool(document_title),
         )
 
 

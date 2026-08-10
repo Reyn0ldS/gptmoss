@@ -1,10 +1,26 @@
 import base64
+from io import BytesIO
 from pathlib import Path
+from zipfile import ZIP_DEFLATED, ZipFile
 
 import pytest
 
 from gptmoss.core.artifacts import ArtifactStore
 from gptmoss.core.skills import SkillRegistry
+
+
+def _minimal_docx_bytes() -> bytes:
+    payload = BytesIO()
+    document_xml = """<?xml version="1.0" encoding="UTF-8"?>
+    <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+      <w:body>
+        <w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Exigences locales</w:t></w:r></w:p>
+        <w:p><w:r><w:t>Les sources restent sur le poste.</w:t></w:r></w:p>
+      </w:body>
+    </w:document>"""
+    with ZipFile(payload, "w", ZIP_DEFLATED) as archive:
+        archive.writestr("word/document.xml", document_xml)
+    return payload.getvalue()
 
 
 def test_skill_registry_discovers_and_selects_builtin_skill():
@@ -32,6 +48,40 @@ def test_artifact_store_handles_text_and_rejects_invalid_image(tmp_path):
 
     with pytest.raises(ValueError, match="Invalid PNG"):
         store.save_base64("bad.png", payload, "image/png")
+
+
+def test_artifact_store_normalizes_docx_and_reuses_cached_structure(tmp_path):
+    store = ArtifactStore(str(tmp_path))
+    metadata = store.save_base64(
+        "requirements.bin",
+        base64.b64encode(_minimal_docx_bytes()).decode("ascii"),
+        "application/octet-stream",
+    )
+
+    assert metadata["content_type"].endswith("wordprocessingml.document")
+    assert metadata["document_title"] == "Exigences locales"
+    assert metadata["document_blocks"] == 2
+    assert Path(metadata["document_path"]).is_file()
+
+    document = store.document(metadata["id"])
+    context = store.context_items([metadata["id"]])
+    assert document.title == "Exigences locales"
+    assert "Les sources restent sur le poste." in store.preview_text(metadata["id"])
+    assert context[0]["document"]["block_count"] == 2
+    assert context[0]["text_compacted"] is False
+
+
+def test_artifact_store_removes_failed_document_upload(tmp_path):
+    store = ArtifactStore(str(tmp_path))
+
+    with pytest.raises(ValueError):
+        store.save_base64(
+            "broken.docx",
+            base64.b64encode(b"not an OOXML archive").decode("ascii"),
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        )
+
+    assert list(store.root.iterdir()) == []
 
 
 @pytest.mark.parametrize(

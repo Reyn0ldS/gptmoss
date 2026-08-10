@@ -108,6 +108,10 @@ def test_plain_text_preserves_structure_provenance_and_determinism(tmp_path: Pat
 
     assert first.id == second.id
     assert first.to_json() == second.to_json()
+    assert type(first).from_dict(first.to_dict()).to_json() == first.to_json()
+    renamed = first.with_filename("renamed.txt")
+    assert renamed.filename == "renamed.txt"
+    assert renamed.blocks[0].provenance.source_name == "renamed.txt"
     assert first.title == "Programme"
     assert [block.kind for block in first.blocks] == [
         "heading",

@@ -361,7 +361,12 @@ async def upload_artifact(req: UploadArtifactRequest):
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return {key: metadata[key] for key in ("id", "filename", "content_type", "size_bytes", "sha256", "created_at")}
+    public_fields = (
+        "id", "filename", "content_type", "size_bytes", "sha256", "created_at",
+        "document_title", "document_blocks", "document_parser",
+        "document_parser_version",
+    )
+    return {key: metadata[key] for key in public_fields if key in metadata}
 
 
 @app.get("/artifacts")
@@ -374,7 +379,20 @@ async def list_artifacts():
     for path in store.root.glob("*.json"):
         try:
             metadata = json.loads(path.read_text(encoding="utf-8"))
-            items.append({key: metadata[key] for key in ("id", "filename", "content_type", "size_bytes", "sha256", "created_at")})
+            required_fields = {
+                "id", "filename", "content_type", "size_bytes", "sha256",
+                "created_at",
+            }
+            if not required_fields.issubset(metadata):
+                continue
+            public_fields = (
+                "id", "filename", "content_type", "size_bytes", "sha256",
+                "created_at", "document_title", "document_blocks",
+                "document_parser", "document_parser_version",
+            )
+            items.append(
+                {key: metadata[key] for key in public_fields if key in metadata}
+            )
         except (OSError, KeyError, json.JSONDecodeError):
             continue
     return sorted(items, key=lambda item: item["created_at"], reverse=True)
@@ -392,8 +410,22 @@ async def preview_artifact(artifact_id: str):
     try:
         metadata = store.get(artifact_id)
         path = Path(metadata["path"])
-        if metadata["content_type"] in ArtifactStore.TEXT_TYPES:
-            return {"id": metadata["id"], "filename": metadata["filename"], "preview_type": "text", "content_type": metadata["content_type"], "text": path.read_text(encoding="utf-8", errors="replace")}
+        if metadata["content_type"] in ArtifactStore.DOCUMENT_TYPES:
+            document = store.document(artifact_id)
+            return {
+                "id": metadata["id"],
+                "filename": metadata["filename"],
+                "preview_type": "document",
+                "content_type": metadata["content_type"],
+                "text": document.to_markdown().rstrip("\n"),
+                "document": {
+                    "id": document.id,
+                    "title": document.title,
+                    "parser": document.parser,
+                    "parser_version": document.parser_version,
+                    "block_count": len(document.blocks),
+                },
+            }
         encoded = base64.b64encode(path.read_bytes()).decode("ascii")
         return {"id": metadata["id"], "filename": metadata["filename"], "preview_type": "image", "content_type": metadata["content_type"], "data_url": f"data:{metadata['content_type']};base64,{encoded}"}
     except (ValueError, FileNotFoundError, OSError, KeyError) as exc:
@@ -408,6 +440,11 @@ async def delete_artifact(artifact_id: str):
     try:
         metadata = store.get(artifact_id)
         Path(metadata["path"]).unlink(missing_ok=True)
+        document_path_value = metadata.get("document_path")
+        if document_path_value:
+            document_path = Path(document_path_value).resolve()
+            if document_path.parent == store.root:
+                document_path.unlink(missing_ok=True)
         (store.root / f"{artifact_id}.json").unlink(missing_ok=True)
     except (ValueError, FileNotFoundError) as exc:
         raise HTTPException(status_code=404, detail="Artifact not found.") from exc

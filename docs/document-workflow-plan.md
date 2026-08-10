@@ -115,9 +115,13 @@ Validation exécutée : 12 tests documentaires ciblés et 160 tests GPTMOSS au t
 
 ### Phase B — Intégration des artefacts
 
+État : terminé et validé sur la branche dédiée.
+
 Livrables : prise en charge dans `ArtifactStore`, API de téléversement/inventaire/aperçu, affichage responsive et compatibilité avec les formats existants.
 
 Validation : tests d'API, non-régression et vérification Edge aux largeurs étroites et larges.
+
+Validation exécutée : 31 tests ciblés réussis, 162 tests GPTMOSS réussis, puis sept scénarios Edge hors ligne sans débordement à 360, 500 et 1440 pixels.
 
 ### Phase C — Corpus, cache et recherche locale
 

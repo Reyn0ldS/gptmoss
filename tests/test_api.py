@@ -1,7 +1,9 @@
 import asyncio
 import base64
+from io import BytesIO
 import json
 from unittest.mock import AsyncMock
+from zipfile import ZIP_DEFLATED, ZipFile
 
 import httpx
 import pytest
@@ -35,6 +37,20 @@ class ASGIClient:
 
     def delete(self, url, **kwargs):
         return self.request("DELETE", url, **kwargs)
+
+
+def _api_docx_payload() -> str:
+    payload = BytesIO()
+    xml = """<?xml version="1.0" encoding="UTF-8"?>
+    <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+      <w:body>
+        <w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Dossier API</w:t></w:r></w:p>
+        <w:p><w:r><w:t>Contenu DOCX réellement extrait.</w:t></w:r></w:p>
+      </w:body>
+    </w:document>"""
+    with ZipFile(payload, "w", ZIP_DEFLATED) as archive:
+        archive.writestr("word/document.xml", xml)
+    return base64.b64encode(payload.getvalue()).decode("ascii")
 
 
 def test_resume_failed_root_requeues_failed_step_without_resuming_child():
@@ -504,6 +520,25 @@ def test_gui_management_api_complete_flow(tmp_path):
     assert preview.status_code == 200
     assert preview.json()["text"] == "Bonjour GPTMOSS"
 
+    uploaded_docx = client.post("/artifacts", json={
+        "filename": "architecture.docx",
+        "content_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "content_base64": _api_docx_payload(),
+    })
+    assert uploaded_docx.status_code == 201
+    docx_metadata = uploaded_docx.json()
+    assert docx_metadata["document_title"] == "Dossier API"
+    assert docx_metadata["document_blocks"] == 2
+    docx_preview = client.get(f"/artifacts/{docx_metadata['id']}/preview")
+    assert docx_preview.status_code == 200
+    assert docx_preview.json()["preview_type"] == "document"
+    assert "Contenu DOCX réellement extrait." in docx_preview.json()["text"]
+    assert docx_preview.json()["document"]["block_count"] == 2
+    assert any(
+        item["id"] == docx_metadata["id"] and item["document_title"] == "Dossier API"
+        for item in client.get("/artifacts").json()
+    )
+
     skill = {"name": "gui-review", "description": "Review", "instructions": "Review carefully.", "allowed_capabilities": ["filesystem"]}
     assert client.post("/skills", json=skill).status_code == 201
     listed_skill = next(item for item in client.get("/skills").json() if item["name"] == "gui-review")
@@ -588,6 +623,7 @@ def test_gui_management_api_complete_flow(tmp_path):
     assert client.delete(f"/memory/{memory_id}").status_code == 200
     assert client.delete("/skills/gui-review").status_code == 200
     assert client.delete("/skills/imported-skill").status_code == 200
+    assert client.delete(f"/artifacts/{docx_metadata['id']}").status_code == 200
     assert client.delete(f"/artifacts/{artifact_id}").status_code == 200
 
 
@@ -598,7 +634,8 @@ def test_gui_contains_complete_management_controls():
     for marker in (
         "previewArtifact", "importLibrarySkill", "validateLibrarySkill", "saveMemory",
         "createSubagent", "library-diagnostics", "library-audit", "revealApiKey",
-        "testLlmConnection", "collectSettingsPayload",
+        "testLlmConnection", "collectSettingsPayload", ".docx,.pptx",
+        "document_blocks", "overflow-wrap:anywhere",
     ):
         assert marker in gui
 
@@ -622,6 +659,9 @@ def test_gui_layout_stays_inside_narrow_viewports_and_keeps_scroll_fallbacks():
         "auditGPTMOSSLayout",
         "layoutGlobalOverflow",
         "layoutOffenderCount",
+        "overflow-x: hidden;",
+        "grid-template-columns: repeat(3, minmax(0, 1fr));",
+        "#task-attachments",
     ):
         assert marker in gui
 
