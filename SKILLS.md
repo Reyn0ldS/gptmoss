@@ -8,22 +8,22 @@ Each skill uses a small YAML-like frontmatter followed by instructions:
 ---
 name: my-skill
 description: Concise purpose.
-allowed_capabilities: [filesystem]
+allowed-tools: documents filesystem
 ---
 Instructions given to the agent only when this skill is selected.
 ```
 
-Pass explicit skills with `agent_config.skills` when creating an execution. Otherwise GPTMOSS ranks local skills from the task text. A selected skill limits the exposed capability schemas to its declared capabilities. Skills requiring tools that GPTMOSS does not provide remain instructions only and should be adapted rather than executed blindly.
+Pass explicit skills with `agent_config.skills` when creating an execution. Otherwise GPTMOSS ranks local skills from the task text. By default a selected skill adds a procedure without removing general capabilities. With `strict_skill_capabilities=true`, declared tools also restrict the exposed schemas. The legacy `allowed_capabilities` field remains supported. Skills requiring tools that GPTMOSS does not provide remain instructions only and should be adapted rather than executed blindly.
 
-Bundled general skills cover secure Python, architecture, review, testing, and documentation. Bundled domain skills cover requirements/feasibility, computer vision and ML, 3D geometry, digital garments, backend APIs, 3D frontends, integration/delivery, and biometric privacy. Selection uses the exact specialist assignment and expertise, not only the parent task, so sibling agents can receive different instructions.
+Bundled general skills cover secure Python, local document analysis, architecture, review, testing, and professional long-form documentation. Bundled domain skills cover requirements/feasibility, computer vision and ML, 3D geometry, digital garments, backend APIs, 3D frontends, integration/delivery, and biometric privacy. Selection uses the exact specialist assignment and expertise, not only the parent task, so sibling agents can receive different instructions.
 
-## Files and images
+## Files, documents, and images
 
-Upload text, Markdown, JSON, CSV, PNG, JPEG, or WebP through `POST /artifacts` with `filename`, `content_type`, and base64 `content_base64`. The response contains an artifact id. Pass it in `attachment_ids` to `POST /executions`.
+Upload TXT, Markdown, JSON, CSV, local HTML, DOCX, PPTX, PNG, JPEG, or WebP through `POST /artifacts` with `filename`, `content_type`, and base64 `content_base64`. The response contains an artifact id. Pass it in `attachment_ids` to `POST /executions`.
 
-Uploads are limited to 10 MiB, normalised to a safe filename, MIME/signature checked for images, stored under the workspace `uploads/` directory, and traced by SHA-256. Text is added to agent context. Images are passed to models whose name advertises vision support (`vision`, `-vl`, or `omni`); other models receive an explicit attachment notice.
+Upload size is configured by `max_upload_bytes`; zero removes the application-level fixed ceiling. Files are normalized to a safe filename, content/signatures are checked, data is stored under the workspace `uploads/` directory, and every source is traced by SHA-256. Documents are normalized into structured blocks, cached, chunked, and indexed locally. The `documents` capability can access only explicit attachment IDs and exposes `inventory`, `search`, `read`, and `read_chunk`. Images are passed to models whose configured vision mode allows them; other models receive an explicit attachment notice.
 
-PDF and DOCX extraction deliberately remains an optional extension: add a dedicated parser only after selecting its dependency and security policy.
+HTML parsing never executes scripts or loads linked resources. DOCX and PPTX parsing uses the standard library and rejects unsafe OOXML archives. PDF, OCR, legacy `.doc`/`.ppt`, Office rendering, macros, and presenter notes remain outside the current contract. See [docs/local-document-workflow.md](docs/local-document-workflow.md) for MIME types, API examples, provenance syntax, quality policies, portable validation, and troubleshooting.
 
 ## Autonomous specialization
 

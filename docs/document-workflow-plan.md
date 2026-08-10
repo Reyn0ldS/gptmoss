@@ -167,9 +167,15 @@ Validation exécutée : sept scénarios propres au validateur, 48 tests ciblés,
 
 ### Phase G — Documentation et paquet hors ligne
 
+État : terminé et validé sur la branche dédiée.
+
 Livrables : documentation utilisateur/développeur, exemples locaux, manifestes et diagnostics d'installation, adaptateurs optionnels non obligatoires.
 
 Validation : installation propre, runtime portable et reproduction depuis la documentation.
+
+Livraison : guide dédié couvrant GUI, API, quatre formats prioritaires, garanties locales, provenance, recherche, contexte adaptatif, politique qualité, rapports, diagnostic et limites ; README, manuel utilisateur et contrat des skills mis à jour ; assertions empêchant le retour des anciennes limitations documentaires. Aucun paquet documentaire n'a été ajouté : le manifeste conserve donc légitimement la même empreinte de `requirements-runtime.txt`.
+
+Validation exécutée : 43 tests ciblés du workflow, de la documentation, du manifeste et de l'installation ; exécution du point d'entrée qualité par le Python portable versionné ; empreinte et inventaire du runtime contrôlés ; 189 tests GPTMOSS réussis.
 
 ### Phase H — Projet réel surveillé
 

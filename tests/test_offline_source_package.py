@@ -81,3 +81,30 @@ def test_committed_runtime_imports_all_dependencies():
         capture_output=True,
         text=True,
     )
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows embedded runtime")
+def test_committed_runtime_runs_document_validator_entry_point():
+    manifest = json.loads(
+        (PROJECT_ROOT / "offline-runtime-manifest.json").read_text(encoding="utf-8")
+    )
+    python = PROJECT_ROOT / manifest["runtime_directory"] / "python.exe"
+    environment = os.environ.copy()
+    environment["PYTHONDONTWRITEBYTECODE"] = "1"
+
+    completed = subprocess.run(
+        [
+            str(python),
+            "-B",
+            str(PROJECT_ROOT / "scripts" / "validate_document.py"),
+            "--help",
+        ],
+        cwd=PROJECT_ROOT,
+        check=False,
+        env=environment,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "Validate a local Markdown or text deliverable" in completed.stdout
