@@ -87,6 +87,7 @@ async def test_local_openai_compatible_tool_call_round_trip():
         "arguments": {"path": "local.txt", "content": "from local model"},
     }
     assert response["usage"]["total_tokens"] == 12
+    assert provider.client.max_retries == 0
 
 
 def test_qwen_textual_tool_calls_are_normalized_and_deterministic():
@@ -128,3 +129,13 @@ true
         "arguments": {"command": "python -m pytest -q"},
     }
     assert QwenProvider._parse_text_tool_calls("<tool_call>invalid</tool_call>") == []
+
+    fenced_content = """```json
+{"tool_call":{"name":"filesystem__write","arguments":{"path":"small.py","content":"VALUE = 1\\n"}}}
+```"""
+    fenced = QwenProvider._parse_text_tool_calls(fenced_content)
+    assert fenced[0]["id"].startswith("qwen-text-")
+    assert fenced[0]["function"] == {
+        "name": "filesystem__write",
+        "arguments": {"path": "small.py", "content": "VALUE = 1\n"},
+    }

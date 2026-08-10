@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 from gptmoss.core.artifact_validation import validate_artifact
@@ -17,7 +18,7 @@ SCHEMA_VERSION = 1
 INDEPENDENT_ROLES = {"qa", "debugger", "coordinator"}
 SCOPE_MARKERS = (
     "out of scope", "hors périmètre", "hors perimetre", "not supported",
-    "future work", "plus tard", "placeholder", "mock only", "simulation only",
+    "future work", "plus tard", "not implemented", "mock only", "simulation only",
 )
 IGNORED_DIRECTORIES = {
     ".git", ".pytest_cache", "__pycache__", "node_modules", ".mypy_cache",
@@ -43,23 +44,25 @@ def _keywords(text: str) -> set[str]:
     return {word for word in words if word not in stop}
 
 
-def extract_requirements(task: str, limit: int = 24) -> List[Dict[str, Any]]:
+def extract_requirements(task: str, limit: int = 0) -> List[Dict[str, Any]]:
     """Extract stable, user-owned requirement clauses without calling an LLM."""
-    text = re.sub(r"\s+", " ", str(task or "")).strip()
+    text = str(task or "").replace("\r\n", "\n").replace("\r", "\n").strip()
     if not text:
         return []
-    clauses = re.split(
-        r"(?<=[.!?])\s+|[;,]\s*|\s+(?:puis|ensuite|then)\s+",
-        text,
-        flags=re.IGNORECASE,
-    )
+    lines = [line.strip() for line in text.split("\n") if line.strip()]
+    clauses: List[str] = []
+    for line in lines:
+        line = re.sub(r"^(?:[-*+]|\d+[.)]|[A-Za-z][.)])\s+", "", line).strip()
+        clauses.extend(re.split(r"(?<=[.!?])\s+(?=[A-Z0-9])", line))
     clauses = [clause.strip(" .;,") for clause in clauses
                if len(clause.strip(" .;,")) >= 6]
     if not clauses:
-        clauses = [text]
+        clauses = [re.sub(r"\s+", " ", text)]
+    selected = clauses[:limit] if limit and limit > 0 else clauses
     requirements = []
     seen = set()
-    for clause in clauses[:limit]:
+    for clause in selected:
+        clause = re.sub(r"\s+", " ", clause).strip()
         digest = hashlib.sha256(clause.lower().encode("utf-8")).hexdigest()[:12]
         if digest in seen:
             continue
@@ -233,7 +236,8 @@ def normalize_scope_changes(plan: Dict[str, Any]) -> List[Dict[str, Any]]:
         raw.append({"kind": "out_of_scope", "statement": statement})
     boundary = str(analysis.get("mvp_boundary") or "").strip()
     if boundary and any(marker in boundary.lower() for marker in (
-        "no claim", "without", "prototype", "mvp", "ne couvre", "not ",
+        "no claim", "prototype only", "mvp only", "ne couvre pas",
+        "does not cover", "will not implement", "not implemented",
     )):
         raw.append({"kind": "mvp_boundary", "statement": boundary})
     for step in plan.get("steps", []):
@@ -274,6 +278,55 @@ def normalize_scope_changes(plan: Dict[str, Any]) -> List[Dict[str, Any]]:
     return normalized
 
 
+def normalize_command(command: str) -> str:
+    """Normalize harmless launch wrappers while preserving the tested target."""
+    text = str(command or "").strip()
+    text = re.sub(r"^(?:cmd(?:\.exe)?\s+/[cd]\s+)", "", text, flags=re.IGNORECASE)
+    segments = [part.strip() for part in re.split(r"\s*&&\s*", text) if part.strip()]
+    while len(segments) > 1 and re.match(
+        r"^(?:chcp\b|cd(?:\s+/d)?\b|set\s+[A-Za-z_][A-Za-z0-9_]*=)",
+        segments[0],
+        flags=re.IGNORECASE,
+    ):
+        segments.pop(0)
+    text = " && ".join(segments)
+    text = re.sub(
+        r"\s+(?:\d?>|>>|2>&1)\s*(?:nul|/dev/null)?\s*$",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(
+        r'^(?:"[^"]*[\\/]python(?:\.exe)?"|[^\s"]*[\\/]python(?:\.exe)?|py(?:\.exe)?(?:\s+-3)?)(?=\s|$)',
+        "python",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(r"\s+", " ", text).strip()
+    return text.replace(chr(92), "/").lower()
+
+
+def _command_tokens(command: str) -> List[str]:
+    try:
+        return shlex.split(command, posix=True)
+    except ValueError:
+        return command.split()
+
+
+def commands_equivalent(expected: str, observed: str) -> bool:
+    """Compare command evidence without confusing targeted and full test runs."""
+    expected_normalized = normalize_command(expected)
+    observed_normalized = normalize_command(observed)
+    if expected_normalized == observed_normalized:
+        return True
+    expected_tokens = _command_tokens(expected_normalized)
+    observed_tokens = _command_tokens(observed_normalized)
+    pytest_prefix = ["python", "-m", "pytest"]
+    if expected_tokens[:3] != pytest_prefix or observed_tokens[:3] != pytest_prefix:
+        return False
+    return sorted(expected_tokens[3:]) == sorted(observed_tokens[3:])
+
+
 def normalize_ownership(plan: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Normalize file ownership while allowing legacy plans to derive it."""
     claims = []
@@ -303,16 +356,30 @@ def normalize_ownership(plan: Dict[str, Any]) -> List[Dict[str, Any]]:
     return claims
 
 
-def normalize_artifact_validations(plan: Dict[str, Any]) -> List[Dict[str, Any]]:
+def _normalization_warning(plan: Dict[str, Any], message: str) -> None:
+    warnings = plan.setdefault("normalization_warnings", [])
+    if isinstance(warnings, list):
+        warnings.append(message)
+
+
+def normalize_artifact_validations(
+    plan: Dict[str, Any], *, strict: bool = True
+) -> List[Dict[str, Any]]:
     """Normalize extensible validation specifications declared by the planner."""
     raw = plan.get("artifact_validations") or []
     if not isinstance(raw, list):
-        raise ValueError("artifact_validations must be a list.")
+        if strict:
+            raise ValueError("artifact_validations must be a list.")
+        _normalization_warning(plan, "Ignored malformed artifact_validations metadata.")
+        raw = []
     normalized = []
     seen = set()
     for index, item in enumerate(raw):
         if not isinstance(item, dict):
-            raise ValueError(f"Artifact validation {index} must be an object.")
+            if strict:
+                raise ValueError(f"Artifact validation {index} must be an object.")
+            _normalization_warning(plan, f"Ignored malformed artifact validation {index}.")
+            continue
         path = str(item.get("path") or "").strip().replace("\\", "/")
         validator = str(item.get("validator") or Path(path).suffix).strip().lower().lstrip(".")
         constraints = item.get("constraints") or {}
@@ -320,7 +387,10 @@ def normalize_artifact_validations(plan: Dict[str, Any]) -> List[Dict[str, Any]]
             not path or path.startswith("/") or ".." in Path(path).parts
             or path in seen or not isinstance(constraints, dict)
         ):
-            raise ValueError(f"Artifact validation {index} is invalid.")
+            if strict:
+                raise ValueError(f"Artifact validation {index} is invalid.")
+            _normalization_warning(plan, f"Ignored invalid artifact validation {index}.")
+            continue
         seen.add(path)
         normalized.append({
             "path": path,
@@ -351,20 +421,33 @@ def _routine_steps(value: Any) -> List[str]:
     return normalized
 
 
-def normalize_external_tools(plan: Dict[str, Any]) -> List[Dict[str, Any]]:
+def normalize_external_tools(
+    plan: Dict[str, Any], *, strict: bool = True
+) -> List[Dict[str, Any]]:
     """Freeze truthful setup contracts for project-specific external tools."""
     raw = plan.get("external_tools") or []
     if not isinstance(raw, list):
-        raise ValueError("external_tools must be a list.")
+        if strict:
+            raise ValueError("external_tools must be a list.")
+        _normalization_warning(plan, "Ignored malformed external_tools metadata.")
+        raw = []
     normalized = []
     for index, item in enumerate(raw):
         if not isinstance(item, dict):
-            raise ValueError(f"External tool {index} must be an object.")
+            if strict:
+                raise ValueError(f"External tool {index} must be an object.")
+            _normalization_warning(plan, f"Ignored malformed external tool {index}.")
+            continue
         name = str(item.get("name") or item.get("tool") or "").strip()
         purpose = str(item.get("purpose") or item.get("description") or "").strip()
         configuration = item.get("configuration") or item.get("parameters") or {}
         if not name or not purpose or not isinstance(configuration, dict):
-            raise ValueError(f"External tool {index} requires name, purpose, and configuration.")
+            if strict:
+                raise ValueError(
+                    f"External tool {index} requires name, purpose, and configuration."
+                )
+            _normalization_warning(plan, f"Ignored invalid external tool {index}.")
+            continue
         normalized.append({
             "name": name,
             "purpose": purpose,
@@ -381,23 +464,34 @@ def normalize_external_tools(plan: Dict[str, Any]) -> List[Dict[str, Any]]:
     return normalized
 
 
-def normalize_execution_routines(plan: Dict[str, Any]) -> List[Dict[str, Any]]:
+def normalize_execution_routines(
+    plan: Dict[str, Any], *, strict: bool = True
+) -> List[Dict[str, Any]]:
     """Normalize reusable operator-run routines without executing desktop tools."""
     raw = plan.get("execution_routines") or []
     if not isinstance(raw, list):
-        raise ValueError("execution_routines must be a list.")
+        if strict:
+            raise ValueError("execution_routines must be a list.")
+        _normalization_warning(plan, "Ignored malformed execution_routines metadata.")
+        raw = []
     normalized = []
     for index, item in enumerate(raw):
         if not isinstance(item, dict):
-            raise ValueError(f"Execution routine {index} must be an object.")
+            if strict:
+                raise ValueError(f"Execution routine {index} must be an object.")
+            _normalization_warning(plan, f"Ignored malformed execution routine {index}.")
+            continue
         name = str(item.get("name") or "").strip()
         purpose = str(item.get("purpose") or item.get("description") or "").strip()
         configuration = item.get("configuration") or item.get("parameters") or {}
         steps = _routine_steps(item.get("steps") or item.get("commands") or [])
         if not name or not purpose or not isinstance(configuration, dict) or not steps:
-            raise ValueError(
-                f"Execution routine {index} requires name, purpose, configuration, and steps."
-            )
+            if strict:
+                raise ValueError(
+                    f"Execution routine {index} requires name, purpose, configuration, and steps."
+                )
+            _normalization_warning(plan, f"Ignored invalid execution routine {index}.")
+            continue
         normalized.append({
             "name": name,
             "purpose": purpose,
@@ -420,9 +514,9 @@ def build_delivery_contract(plan: Dict[str, Any], task: str) -> Dict[str, Any]:
     traceability = map_requirements(plan, requirements)
     scope_changes = normalize_scope_changes(plan)
     ownership = normalize_ownership(plan)
-    artifact_validations = normalize_artifact_validations(plan)
-    external_tools = normalize_external_tools(plan)
-    execution_routines = normalize_execution_routines(plan)
+    artifact_validations = normalize_artifact_validations(plan, strict=False)
+    external_tools = normalize_external_tools(plan, strict=False)
+    execution_routines = normalize_execution_routines(plan, strict=False)
     commands = []
     for step in plan.get("steps", []):
         for command in _strings(step.get("verification_commands")):
@@ -450,6 +544,7 @@ def build_delivery_contract(plan: Dict[str, Any], task: str) -> Dict[str, Any]:
         "artifact_validations": artifact_validations,
         "external_tools": external_tools,
         "execution_routines": execution_routines,
+        "normalization_warnings": _strings(plan.get("normalization_warnings")),
         "software_delivery": software_delivery,
     }
     frozen = json.dumps(contract, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
@@ -464,9 +559,13 @@ def path_is_owned(contract: Dict[str, Any], step_id: Any, role: str, path: str) 
     if (not normalized or original_path.startswith("/")
             or original_path.removeprefix("./").startswith(".gptmoss/")):
         return False
-    if role == "debugger":
-        return True
     claims = contract.get("ownership") if isinstance(contract, dict) else []
+    if role == "debugger":
+        return not any(
+            str(claim.get("role") or "").lower() == "qa"
+            and fnmatch.fnmatchcase(normalized, str(claim.get("pattern") or ""))
+            for claim in claims
+        )
     if not claims:
         return True
     own_claims = [
@@ -771,7 +870,10 @@ def evaluate_delivery(
             continue
         command = str(item.get("command") or "").strip()
         matched = any(
-            str(entry.get("arguments", {}).get("command") or "").strip() == command
+            commands_equivalent(
+                command,
+                str(entry.get("arguments", {}).get("command") or ""),
+            )
             and "EXIT_CODE: 0" in str(entry.get("result") or "")
             for entry in histories
         )
@@ -791,7 +893,10 @@ def evaluate_delivery(
     missing_launches = []
     for command in contract.get("launch_commands", []):
         matched = any(
-            str(entry.get("arguments", {}).get("command") or "").strip() == command
+            commands_equivalent(
+                command,
+                str(entry.get("arguments", {}).get("command") or ""),
+            )
             and "EXIT_CODE: 0" in str(entry.get("result") or "")
             for entry in histories
         )

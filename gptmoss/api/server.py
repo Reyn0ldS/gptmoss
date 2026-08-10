@@ -130,6 +130,7 @@ async def lifespan(_: FastAPI):
         logger.info("Started debounced state persistence loop")
     if app_state.execution_engine:
         app_state.execution_engine.resume_waiting_provider_executions()
+        app_state.execution_engine.resume_interrupted_executions()
 
     try:
         yield
@@ -261,6 +262,29 @@ async def get_gui():
         raise HTTPException(status_code=404, detail="GUI file not found.")
     with open(GUI_FILE_PATH, "r", encoding="utf-8") as f:
         return f.read()
+
+
+@app.get("/health")
+async def health():
+    return {
+        "status": "ok",
+        "runtime_initialized": bool(
+            app_state.kernel and app_state.execution_engine and app_state.state_engine
+        ),
+    }
+
+
+@app.get("/readiness")
+async def readiness():
+    ready = bool(
+        app_state.kernel
+        and app_state.execution_engine
+        and app_state.state_engine
+        and app_state.event_bus
+    )
+    if not ready:
+        raise HTTPException(status_code=503, detail="Runtime services are not initialized.")
+    return {"status": "ready"}
 
 @app.post("/executions", status_code=201)
 async def submit_task(req: SubmitTaskRequest):
@@ -728,8 +752,14 @@ async def resume_execution(execution_id: str):
         raise HTTPException(status_code=500, detail="Engine not initialized.")
         
     state = app_state.state_engine.get_execution(execution_id)
-    if state.status not in ("paused", "waiting_provider"):
+    if state.status not in ("paused", "waiting_provider", "running", "failed"):
         raise HTTPException(status_code=400, detail=f"Cannot resume execution in status '{state.status}'.")
+
+    if state.status == "failed" and state.variables.get("parent_execution_id"):
+        raise HTTPException(
+            status_code=400,
+            detail="Failed delegated executions cannot be resumed directly; resume their top-level parent.",
+        )
         
     # If paused on approval, the user must use /approve or /reject.
     # Otherwise, if it was manually paused, just set back to running and resume.
@@ -744,6 +774,24 @@ async def resume_execution(execution_id: str):
             detail="Execution is paused waiting for scope approval. Use /approve or /reject endpoint."
         )
         
+    if state.status == "failed":
+        steps = (state.current_plan or {}).get("steps", [])
+        failed_step = next(
+            (step for step in steps if step.get("status") == "failed"),
+            None,
+        )
+        if failed_step:
+            failed_step["status"] = "pending"
+            failed_step.pop("assigned_execution_id", None)
+            failed_step.pop("error", None)
+            failed_step["manual_retry_count"] = int(
+                failed_step.get("manual_retry_count", 0)
+            ) + 1
+        state.results.pop("error", None)
+        state.variables["manual_failure_resumes"] = int(
+            state.variables.get("manual_failure_resumes", 0)
+        ) + 1
+
     state.status = "running"
     await app_state.event_bus.publish(Event(
         type="ExecutionResumed",
@@ -761,19 +809,39 @@ async def resume_execution(execution_id: str):
 
 @app.post("/executions/{execution_id}/cancel")
 async def cancel_execution(execution_id: str):
-    if not app_state.state_engine or not app_state.event_bus:
+    if not app_state.state_engine or not app_state.event_bus or not app_state.execution_engine:
         raise HTTPException(status_code=500, detail="Engine not initialized.")
         
     state = app_state.state_engine.get_execution(execution_id)
     if state.status not in ("running", "paused", "pending", "waiting_provider"):
         raise HTTPException(status_code=400, detail=f"Cannot cancel execution in status '{state.status}'.")
         
-    state.status = "cancelled"
-    await app_state.event_bus.publish(Event(
-        type="ExecutionCancelled",
-        payload={"execution_id": execution_id}
-    ))
-    return {"status": "cancelled"}
+    to_cancel = [execution_id]
+    cancelled = []
+    while to_cancel:
+        current_id = to_cancel.pop(0)
+        current = app_state.state_engine.get_execution(current_id)
+        if current.status in {"running", "paused", "pending", "waiting_provider"}:
+            current.status = "cancelled"
+            current.variables.pop("pending_approval", None)
+            current.variables.pop("pending_scope_approval", None)
+            cancelled.append(current_id)
+            shell = app_state.execution_engine.get_capability("shell")
+            if shell and hasattr(shell, "cancel_execution"):
+                shell.cancel_execution(current_id)
+            await app_state.event_bus.publish(Event(
+                type="ExecutionCancelled",
+                payload={"execution_id": current_id}
+            ))
+        for child_id, child in app_state.state_engine.executions.items():
+            if (
+                child.variables.get("parent_execution_id") == current_id
+                and child_id not in cancelled
+                and child_id not in to_cancel
+            ):
+                to_cancel.append(child_id)
+    app_state.state_engine.save_to_disk()
+    return {"status": "cancelled", "execution_ids": cancelled}
 
 @app.delete("/executions/{execution_id}")
 async def delete_execution(execution_id: str):

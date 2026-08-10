@@ -6,7 +6,10 @@ from pathlib import Path
 import pytest
 
 from gptmoss.capabilities.filesystem import FilesystemCapability
+from gptmoss.capabilities.shell import ShellCapability
 from gptmoss.core.context import ContextEngine
+from gptmoss.core.adaptive import tool_call_fingerprint
+from gptmoss.core.delivery import build_delivery_contract
 from gptmoss.core.event_bus import EventBus
 from gptmoss.core.execution import ExecutionEngine, ProviderUnavailableError, normalize_plan
 from gptmoss.core.skills import SkillRegistry
@@ -88,6 +91,61 @@ async def test_scope_reduction_requires_a_hashed_decision_before_resume(tmp_path
     assert execution.variables["approved_scope_contract_sha256"] == "abc123"
     assert execution.variables["scope_decisions"][0]["reason"] == "accepted prototype"
     engine.execute_task.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_direct_child_approval_decision_clears_parent_mirror(tmp_path):
+    engine, state = _engine(tmp_path, MockLLMProvider())
+    parent = state.get_execution("approval-parent")
+    parent.status = "paused"
+    parent.variables.update({
+        "task": "Parent task",
+        "pending_approval": {"child_execution_id": "approval-child"},
+    })
+    child = state.get_execution("approval-child")
+    child.status = "paused"
+    child.variables.update({
+        "task": "Child task",
+        "parent_execution_id": "approval-parent",
+        "pending_approval": {
+            "tool_call_id": "gate",
+            "capability": "devteam",
+            "action": "approve_quality_gate",
+            "arguments": {"test_output": "incomplete"},
+        },
+    })
+    engine.execute_task = AsyncMock()
+
+    await engine.resume_with_decision("approval-child", "reject", "insufficient")
+    await asyncio.sleep(0)
+
+    assert child.status == "running"
+    assert child.variables["pending_approval"]["decision"] == "reject"
+    assert parent.status == "running"
+    assert "pending_approval" not in parent.variables
+    assert engine.execute_task.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_stale_parent_approval_mirror_is_cleared_without_500(tmp_path):
+    engine, state = _engine(tmp_path, MockLLMProvider())
+    parent = state.get_execution("stale-parent")
+    parent.status = "paused"
+    parent.variables.update({
+        "task": "Resume parent",
+        "pending_approval": {"child_execution_id": "finished-child"},
+    })
+    child = state.get_execution("finished-child")
+    child.status = "completed"
+    child.variables["parent_execution_id"] = "stale-parent"
+    engine.execute_task = AsyncMock()
+
+    await engine.resume_with_decision("stale-parent", "reject", "already handled")
+    await asyncio.sleep(0)
+
+    assert parent.status == "running"
+    assert "pending_approval" not in parent.variables
+    engine.execute_task.assert_awaited_once_with("stale-parent", "Resume parent")
 
 
 @pytest.mark.asyncio
@@ -317,6 +375,17 @@ def test_progress_ignores_repeated_success_and_identical_file_rewrite(tmp_path):
     (root / "work.md").write_text("same\n", encoding="utf-8")
     execution.variables["tool_call_history"].append(dict(execution.variables["tool_call_history"][0]))
     assert engine._progress_signature("progress", step) == before
+    execution.variables["tool_call_history"].append({
+        "capability": "shell", "action": "execute", "arguments": {"command": "dir /b"},
+        "result": "EXIT_CODE: 0\n",
+    })
+    assert engine._progress_signature("progress", step) == before
+    (root / "work.md").write_bytes(b"same\r\n")
+    assert engine._progress_signature("progress", step) == before
+    (root / "tmp_fix_module.py").write_text("repair helper\n", encoding="utf-8")
+    (root / "test_results.txt").write_text("volatile output\n", encoding="utf-8")
+    (root / "test_output_full.txt").write_text("volatile full output\n", encoding="utf-8")
+    assert engine._progress_signature("progress", step) == before
 
     (root / "work.md").write_text("changed\n", encoding="utf-8")
     assert engine._progress_signature("progress", step) != before
@@ -339,6 +408,46 @@ def test_quality_delta_limits_file_churn_and_rewards_fewer_failures(tmp_path):
     assert kind == "fewer_machine_failures"
 
 
+def test_progress_failure_count_ignores_unrelated_shell_probes(tmp_path):
+    engine, state = _engine(tmp_path, MockLLMProvider())
+    execution = state.get_execution("failure-progress")
+    root = tmp_path / "projects" / "proj-default"
+    root.mkdir(parents=True)
+    (root / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+    step = {
+        "required_artifacts": [],
+        "verification_commands": ["python -m pytest -q"],
+    }
+    execution.variables["tool_call_history"] = [{
+        "capability": "shell", "action": "execute",
+        "arguments": {"command": "python -m pytest -q"},
+        "result": "EXIT_CODE: 1\n5 failed\n",
+    }]
+    failed = engine._progress_signature("failure-progress", step)
+
+    execution.variables["tool_call_history"].extend([{
+        "capability": "shell", "action": "execute",
+        "arguments": {"command": "where python"},
+        "result": "EXIT_CODE: 1\n",
+    }, {
+        "capability": "shell", "action": "execute",
+        "arguments": {"command": "findstr Config agentbench\\models.py"},
+        "result": "EXIT_CODE: 0\n",
+    }])
+
+    assert engine._progress_signature("failure-progress", step) == failed
+    execution.variables["tool_call_history"].append({
+        "capability": "shell", "action": "execute",
+        "arguments": {"command": "python -m pytest -q"},
+        "result": "EXIT_CODE: 1\n2 failed\n",
+    })
+    improved = engine._progress_signature("failure-progress", step)
+    assert improved[3] == 2
+    assert engine._quality_improved("failure-progress", failed, improved) == (
+        True, "fewer_machine_failures",
+    )
+
+
 def test_tool_argument_normalization_recovers_wrappers_aliases_and_prefixed_path():
     wrapped = ExecutionEngine._normalize_tool_arguments(
         "filesystem", "write", {"parameters": {"file_path": "src/app.py", "text": "VALUE = 1\n"}},
@@ -350,6 +459,12 @@ def test_tool_argument_normalization_recovers_wrappers_aliases_and_prefixed_path
     )
     assert prefixed["path"] == "tests/test_app.py"
     assert prefixed["content"].startswith("def test_app")
+
+    shell = ExecutionEngine._normalize_tool_arguments(
+        "shell", "execute",
+        {"cmd": "python -m pytest -q", "path": "C:/ignored", "cwd": "C:/ignored"},
+    )
+    assert shell == {"command": "python -m pytest -q"}
 
 
 @pytest.mark.asyncio
@@ -410,6 +525,75 @@ async def test_parent_replaces_failed_specialist_and_completes_from_partial_work
     assert (tmp_path / "projects" / "proj-default" / "app.py").is_file()
 
 
+@pytest.mark.asyncio
+async def test_failed_qa_hands_machine_evidence_and_commands_to_debugger(tmp_path):
+    llm = MockLLMProvider()
+    for _ in range(8):
+        llm.add_response(content="QA done without running the declared command")
+    llm.add_response(tool_calls=[{
+        "id": "debug-full", "type": "function",
+        "function": {"name": "shell__execute", "arguments": {"command": "python -m pytest -q"}},
+    }])
+    llm.add_response(tool_calls=[{
+        "id": "debug-collect", "type": "function",
+        "function": {"name": "shell__execute", "arguments": {"command": "python -m pytest --collect-only -q"}},
+    }])
+    llm.add_response(content=json.dumps({
+        "summary": "repaired", "artifacts": [],
+        "evidence": ["full and collect-only suites passed"],
+        "risks": [], "next_action": "",
+    }))
+    engine, state = _engine(tmp_path, llm, max_iterations=2)
+    engine.register_capability(
+        "shell", ShellCapability(str(tmp_path), state, timeout_seconds=20)
+    )
+    project = tmp_path / "projects" / "proj-default"
+    (project / "tests").mkdir(parents=True)
+    (project / "tests" / "test_ok.py").write_text(
+        "def test_ok():\n    assert True\n", encoding="utf-8"
+    )
+    parent = state.get_execution("validation-handoff")
+    parent.current_plan = normalize_plan({"steps": [{
+        "id": -1, "role": "developer", "specialist": "Implementation Engineer",
+        "description": "Implement the validated feature", "dependencies": [],
+        "status": "completed", "acceptance_criteria": ["Feature is implemented"],
+        "verification_commands": [],
+    }, {
+        "id": 0, "role": "qa", "specialist": "Independent QA",
+        "description": "Run independent collection", "dependencies": [-1],
+        "acceptance_criteria": ["Collection passes"],
+        "verification_commands": ["python -m pytest --collect-only -q"],
+    }, {
+        "id": 1, "role": "debugger", "specialist": "Repair Engineer",
+        "description": "Repair validation defects", "dependencies": [0],
+        "acceptance_criteria": ["All tests pass"],
+        "verification_commands": ["python -m pytest -q"],
+    }]})
+    parent.variables["delivery_contract"] = build_delivery_contract(
+        parent.current_plan, "Validate then repair"
+    )
+
+    await engine.execute_task("validation-handoff", "Validate then repair")
+
+    assert parent.status == "completed", json.dumps({
+        "error": parent.results.get("error"),
+        "call_count": llm.call_count,
+        "steps": parent.current_plan.get("steps"),
+        "children": {
+            key: {"status": value.status, "error": value.results.get("error")}
+            for key, value in state.executions.items()
+            if value.variables.get("parent_execution_id") == "validation-handoff"
+        },
+    }, default=str, indent=2)
+    assert parent.current_plan["steps"][1]["validation_passed"] is False
+    assert parent.current_plan["steps"][2]["verification_commands"] == [
+        "python -m pytest -q", "python -m pytest --collect-only -q",
+    ]
+    children = [item for item in state.executions.values()
+                if item.variables.get("parent_execution_id") == "validation-handoff"]
+    assert sorted(item.status for item in children) == ["completed", "failed"]
+
+
 def test_verification_gate_requires_the_exact_declared_successful_command(tmp_path):
     engine, state = _engine(tmp_path, MockLLMProvider())
     execution = state.get_execution("verify")
@@ -419,6 +603,64 @@ def test_verification_gate_requires_the_exact_declared_successful_command(tmp_pa
     }]
     step = {"description": "Verify", "verification_commands": ["python -m pytest -q"]}
     assert "python -m pytest -q" in " ".join(engine._step_completion_issues("verify", step, "done"))
+
+
+def test_verification_gate_requires_exact_commands_in_inherited_requirements(tmp_path):
+    engine, state = _engine(tmp_path, MockLLMProvider())
+    execution = state.get_execution("inherited-verify")
+    delimiter = chr(96)
+    execution.variables["inherited_requirements"] = [{
+        "id": "REQ-TEST",
+        "statement": (
+            "Run exact " + delimiter + "python -m pytest --collect-only -q"
+            + delimiter + " and " + delimiter + "python -m pytest -q" + delimiter + "."
+        ),
+        "mandatory": True,
+    }]
+    execution.variables["tool_call_history"] = [{
+        "capability": "shell",
+        "action": "execute",
+        "arguments": {"command": "python -m pytest --collect-only -q"},
+        "result": "EXIT_CODE: 0\n",
+    }]
+    step = {
+        "role": "developer",
+        "description": "Repair the implementation",
+        "acceptance_criteria": ["Complete validation is green"],
+        "verification_commands": [],
+    }
+    response = '{"summary":"checked","artifacts":[],"evidence":[],"risks":[],"next_action":""}'
+
+    issues = " ".join(
+        engine._step_completion_issues("inherited-verify", step, response)
+    )
+
+    assert "python -m pytest -q" in issues
+    assert "collect-only" not in issues
+
+
+def test_inherited_software_validation_commands_do_not_block_architecture(tmp_path):
+    engine, state = _engine(tmp_path, MockLLMProvider())
+    execution = state.get_execution("architect-verify")
+    delimiter = chr(96)
+    execution.variables["inherited_requirements"] = [{
+        "id": "REQ-TEST",
+        "statement": (
+            "Final software must pass " + delimiter + "python -m pytest -q" + delimiter + "."
+        ),
+        "mandatory": True,
+    }]
+    step = {
+        "role": "architect",
+        "description": "Design the integration",
+        "acceptance_criteria": ["Architecture covers requirements"],
+        "verification_commands": [],
+    }
+    response = '{"summary":"designed","artifacts":[],"evidence":[],"risks":[],"next_action":""}'
+
+    issues = engine._step_completion_issues("architect-verify", step, response)
+
+    assert not any("pytest" in issue for issue in issues)
 
 
 @pytest.mark.asyncio
@@ -473,3 +715,151 @@ def test_integration_gate_rejects_duplicate_src_package_identity_and_bad_pytest_
 
     assert any("canonical installed package identity" in issue for issue in issues)
     assert any("pythonpath" in issue for issue in issues)
+
+
+def test_integration_gate_rejects_module_package_collision_without_src_layout(tmp_path):
+    engine, state = _engine(tmp_path, MockLLMProvider())
+    state.get_execution("collision")
+    package = tmp_path / "projects" / "proj-default" / "agentbench"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "fixtures.py").write_text("VALUE = 1\n", encoding="utf-8")
+    fixture_package = package / "fixtures"
+    fixture_package.mkdir()
+    (fixture_package / "__init__.py").write_text("", encoding="utf-8")
+    tests = tmp_path / "projects" / "proj-default" / "tests"
+    tests.mkdir()
+    (tests / "test_acceptance.py").write_text(
+        "def test_acceptance(): assert True\n", encoding="utf-8"
+    )
+    (tmp_path / "projects" / "proj-default" / "pytest.ini").write_text(
+        "[pytest]\ntestpaths = agentbench/tests\n", encoding="utf-8"
+    )
+
+    issues = engine._integration_contract_issues("collision")
+
+    assert any(
+        "module/package name collisions" in issue
+        and "agentbench/fixtures" in issue
+        for issue in issues
+    )
+    assert any(
+        "no discovered validation suite is hidden" in issue
+        and "tests" in issue
+        for issue in issues
+    )
+
+
+def test_quality_gate_fingerprint_ignores_volatile_test_duration():
+    first = tool_call_fingerprint("devteam", "approve_quality_gate", {
+        "test_output": "67 passed in 2.41 seconds",
+        "status": "passed",
+    })
+    second = tool_call_fingerprint("devteam", "approve_quality_gate", {
+        "test_output": "67 passed in 9.88 seconds",
+        "status": "passed",
+    })
+
+    assert first == second
+
+
+def test_tests_package_is_not_treated_as_a_fake_third_party_dependency(tmp_path):
+    engine, state = _engine(tmp_path, MockLLMProvider())
+    state.get_execution("package-check")
+    tests_package = tmp_path / "projects" / "proj-default" / "tests"
+    tests_package.mkdir(parents=True)
+    (tests_package / "__init__.py").write_text("", encoding="utf-8")
+
+    assert "tests" not in engine._fake_dependency_packages("package-check")
+
+
+def test_shell_mutation_detection_covers_python_powershell_and_redirection():
+    detected = ExecutionEngine._shell_mutation_paths(
+        "python -c \"from pathlib import Path; Path('src/app.py').write_text('x')\""
+    )
+    assert detected == ["src/app.py"]
+    assert ExecutionEngine._shell_mutation_paths(
+        "Set-Content -LiteralPath tests/test_app.py -Value ok"
+    ) == ["tests/test_app.py"]
+    assert ExecutionEngine._shell_mutation_paths("echo ok > docs/result.txt") == ["docs/result.txt"]
+
+
+@pytest.mark.asyncio
+async def test_restart_recovery_schedules_only_top_level_interrupted_work(tmp_path):
+    engine, state = _engine(tmp_path, MockLLMProvider())
+    root = state.get_execution("interrupted-root")
+    root.status = "running"
+    root.variables["task"] = "Resume me"
+    child = state.get_execution("interrupted-child")
+    child.status = "running"
+    child.variables.update({"task": "Do not schedule directly", "parent_execution_id": "interrupted-root"})
+    engine.execute_task = AsyncMock()
+
+    engine.resume_interrupted_executions()
+    await asyncio.sleep(0)
+
+    engine.execute_task.assert_awaited_once_with("interrupted-root", "Resume me")
+    assert child.status == "pending"
+    assert child.variables["interrupted_resume_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_truncated_text_tool_call_gets_recovery_feedback_instead_of_completion_gate(tmp_path):
+    llm = MockLLMProvider()
+    llm.add_response(content=(
+        '```json\n{"tool_call":{"name":"filesystem__write","arguments":'
+        '{"path":"too_large.py","content":"unterminated'
+    ))
+    llm.add_response(content=json.dumps({
+        "summary": "recovered", "artifacts": [], "evidence": ["compact response"],
+        "risks": [], "next_action": "",
+    }))
+    engine, state = _engine(tmp_path, llm, max_iterations=4)
+    execution = state.get_execution("truncated-call")
+    execution.variables.update({
+        "parent_execution_id": "parent", "role_key": "writer",
+        "role_name": "Writer", "specialist": "Writer",
+    })
+    execution.current_plan = {"steps": [{
+        "id": 0, "role": "writer", "specialist": "Writer",
+        "description": "Document a compact module", "dependencies": [],
+        "expertise": ["documentation"], "required_artifacts": [],
+        "acceptance_criteria": ["Recovery is explicit"], "verification_commands": [],
+    }]}
+
+    await engine.execute_task("truncated-call", "Document a compact module")
+
+    assert execution.status == "completed"
+    feedback = [message.get("content", "") for message in state.get_conversation("truncated-call").messages]
+    assert any("malformed or truncated" in message for message in feedback)
+    assert not any("return the required structured JSON" in message for message in feedback)
+
+
+@pytest.mark.asyncio
+async def test_repeated_malformed_text_tool_calls_trip_safe_retry_circuit(tmp_path):
+    llm = MockLLMProvider()
+    malformed = (
+        '```json\n{"tool_call":{"name":"shell__execute","arguments":'
+        '{"command": python -m pytest -q\n```'
+    )
+    for _ in range(5):
+        llm.add_response(content=malformed)
+    engine, state = _engine(tmp_path, llm, max_iterations=30)
+    execution = state.get_execution("malformed-circuit")
+    execution.variables.update({
+        "parent_execution_id": "parent", "role_key": "developer",
+        "role_name": "Developer", "specialist": "Developer",
+    })
+    execution.current_plan = {"steps": [{
+        "id": 0, "role": "developer", "specialist": "Developer",
+        "description": "Implement and validate a module", "dependencies": [],
+        "expertise": [], "required_artifacts": [],
+        "acceptance_criteria": ["Implementation is validated"],
+        "verification_commands": [],
+    }]}
+
+    await engine.execute_task("malformed-circuit", "Implement and validate")
+
+    assert execution.status == "failed"
+    assert "repeatedly emitted malformed or truncated" in execution.results["error"]
+    assert execution.variables.get("tool_call_history", []) == []

@@ -2,6 +2,7 @@
 
 import json
 import os
+import tempfile
 import time
 from typing import Any, Dict, List, Optional
 
@@ -33,6 +34,53 @@ class TraceRecorder:
             directory = os.path.dirname(self.file_path)
             if directory:
                 os.makedirs(directory, exist_ok=True)
+            self._repair_legacy_separators()
+
+    def _repair_legacy_separators(self) -> None:
+        """Atomically migrate traces written with a literal backslash-n separator."""
+        if not self.file_path or not os.path.isfile(self.file_path):
+            return
+        try:
+            with open(self.file_path, "r", encoding="utf-8") as handle:
+                content = handle.read()
+            if "\\n{\"timestamp\":" not in content:
+                return
+
+            decoder = json.JSONDecoder()
+            position = 0
+            records = []
+            while position < len(content):
+                while position < len(content) and content[position].isspace():
+                    position += 1
+                if position >= len(content):
+                    break
+                record, position = decoder.raw_decode(content, position)
+                records.append(record)
+                if content.startswith("\\n", position):
+                    position += 2
+                elif position < len(content) and not content[position].isspace():
+                    return
+            if len(records) < 2:
+                return
+
+            directory = os.path.dirname(self.file_path) or "."
+            descriptor, temporary_path = tempfile.mkstemp(
+                prefix=".telemetry-repair-", suffix=".jsonl", dir=directory,
+            )
+            try:
+                with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
+                    for record in records:
+                        handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+                os.replace(temporary_path, self.file_path)
+            except BaseException:
+                try:
+                    os.unlink(temporary_path)
+                except OSError:
+                    pass
+                raise
+        except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
+            # A partial or unrelated file is left untouched; telemetry is optional.
+            return
 
     def record(self, event_type: str, execution_id: str, **payload: Any) -> None:
         event = {
@@ -47,7 +95,7 @@ class TraceRecorder:
         if self.file_path:
             try:
                 with open(self.file_path, "a", encoding="utf-8") as handle:
-                    handle.write(json.dumps(event, ensure_ascii=False) + "\\n")
+                    handle.write(json.dumps(event, ensure_ascii=False) + "\n")
             except OSError:
                 # Telemetry must never interrupt the agent's primary work.
                 pass

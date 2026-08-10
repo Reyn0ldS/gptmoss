@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import json
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -34,6 +35,71 @@ class ASGIClient:
 
     def delete(self, url, **kwargs):
         return self.request("DELETE", url, **kwargs)
+
+
+def test_resume_failed_root_requeues_failed_step_without_resuming_child():
+    event_bus = EventBus()
+    state_engine = StateEngine()
+    llm = MockLLMProvider()
+    engine = ExecutionEngine(
+        event_bus, state_engine,
+        ContextEngine(state_engine, RAMMemoryProvider()), llm,
+        SimplePlanner(llm), SimplePolicyProvider(),
+    )
+    engine.execute_task = AsyncMock()
+    kernel = RuntimeKernel(event_bus, state_engine, engine)
+    init_app(kernel, engine, state_engine, event_bus)
+    client = ASGIClient(app)
+
+    root = state_engine.get_execution("failed-root")
+    root.status = "failed"
+    root.variables["task"] = "Repair the project"
+    root.results["error"] = "repair child was cancelled"
+    root.current_plan = {"steps": [
+        {"id": 0, "status": "completed"},
+        {
+            "id": 1, "status": "failed", "error": "cancelled",
+            "assigned_execution_id": "old-child",
+        },
+        {"id": 2, "status": "pending"},
+    ]}
+    child = state_engine.get_execution("old-child")
+    child.status = "cancelled"
+    child.variables["parent_execution_id"] = "failed-root"
+
+    response = client.post("/executions/failed-root/resume")
+
+    assert response.status_code == 200
+    assert root.status == "running"
+    assert root.current_plan["steps"][0]["status"] == "completed"
+    assert root.current_plan["steps"][1]["status"] == "pending"
+    assert "assigned_execution_id" not in root.current_plan["steps"][1]
+    assert root.current_plan["steps"][1]["manual_retry_count"] == 1
+    assert child.status == "cancelled"
+    assert "error" not in root.results
+    engine.execute_task.assert_called_once_with("failed-root", "Repair the project")
+
+
+def test_resume_failed_delegated_execution_is_rejected():
+    event_bus = EventBus()
+    state_engine = StateEngine()
+    llm = MockLLMProvider()
+    engine = ExecutionEngine(
+        event_bus, state_engine,
+        ContextEngine(state_engine, RAMMemoryProvider()), llm,
+        SimplePlanner(llm), SimplePolicyProvider(),
+    )
+    kernel = RuntimeKernel(event_bus, state_engine, engine)
+    init_app(kernel, engine, state_engine, event_bus)
+    client = ASGIClient(app)
+    child = state_engine.get_execution("failed-child")
+    child.status = "failed"
+    child.variables["parent_execution_id"] = "root"
+
+    response = client.post("/executions/failed-child/resume")
+
+    assert response.status_code == 400
+    assert child.status == "failed"
 
 def test_api_submit_and_query_flow():
     # Setup test dependencies
@@ -206,6 +272,12 @@ def test_api_delete_cascade_flow():
     assert child_id in state_engine.executions
 
     # Call DELETE on the parent
+    cancelled = client.post(f"/executions/{parent_id}/cancel")
+    assert cancelled.status_code == 200
+    assert set(cancelled.json()["execution_ids"]) == {parent_id, child_id}
+    assert state_engine.get_execution(parent_id).status == "cancelled"
+    assert state_engine.get_execution(child_id).status == "cancelled"
+
     response = client.delete(f"/executions/{parent_id}")
     assert response.status_code == 200
     assert response.json()["status"] == "deleted"
@@ -298,6 +370,11 @@ def test_api_settings_preserve_secret_and_context_budget(tmp_path):
     kernel = RuntimeKernel(event_bus=event_bus, state_engine=state_engine, execution_engine=exec_engine)
     init_app(kernel, exec_engine, state_engine, event_bus)
     client = ASGIClient(app)
+
+    assert client.get("/health").json() == {
+        "status": "ok", "runtime_initialized": True,
+    }
+    assert client.get("/readiness").json() == {"status": "ready"}
 
     settings = {
         "api_key": "secret-key",

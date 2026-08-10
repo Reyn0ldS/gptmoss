@@ -5,17 +5,31 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
 from dataclasses import dataclass
 from typing import Any, Dict
 
 
 def tool_call_fingerprint(capability: str, action: str, arguments: Dict[str, Any]) -> str:
     """Return an ID that is stable across model-generated tool-call IDs."""
+    stable_arguments = arguments if isinstance(arguments, dict) else {}
+    if (
+        str(capability).strip().lower() == "devteam"
+        and str(action).strip().lower() == "approve_quality_gate"
+    ):
+        stable_arguments = dict(stable_arguments)
+        test_output = stable_arguments.get("test_output")
+        if isinstance(test_output, str):
+            stable_arguments["test_output"] = re.sub(
+                r"(?i)\b(?:in|duration[:=]?)\s*\d+(?:\.\d+)?\s*(?:s|sec|seconds|ms)\b",
+                "<duration>",
+                test_output,
+            )
     payload = json.dumps(
         {
             "capability": str(capability).strip().lower(),
             "action": str(action).strip().lower(),
-            "arguments": arguments if isinstance(arguments, dict) else {},
+            "arguments": stable_arguments,
         },
         ensure_ascii=False,
         sort_keys=True,

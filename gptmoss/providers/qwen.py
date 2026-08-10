@@ -36,8 +36,11 @@ class QwenProvider(LLMProvider):
         # Certificate validation is secure by default. A local/self-signed
         # endpoint can still be enabled explicitly through settings.
         http_client = httpx.AsyncClient(verify=True)
+        # ExecutionEngine owns provider recovery and persists waiting state.
+        # Hidden SDK retries multiply that policy and can make one request
+        # monopolize an execution for many minutes without observable state.
         self.client = AsyncOpenAI(api_key=self.api_key, base_url=self.base_url, http_client=http_client,
-                                  max_retries=5, timeout=90.0)
+                                  max_retries=0, timeout=90.0)
 
     @staticmethod
     def _infer_vision(model_name: str) -> bool:
@@ -83,7 +86,7 @@ class QwenProvider(LLMProvider):
             
         http_client = httpx.AsyncClient(verify=verify_value)
         self.client = AsyncOpenAI(api_key=self.api_key, base_url=self.base_url, http_client=http_client,
-                                  max_retries=5, timeout=90.0)
+                                  max_retries=0, timeout=90.0)
         logger.info(f"QwenProvider config updated. base_url={self.base_url}, ssl_verify={ssl_verify}, ssl_cert_path={ssl_cert_path}")
 
     @staticmethod
@@ -287,6 +290,18 @@ class QwenProvider(LLMProvider):
         """Parse common Qwen textual tool-call formats into OpenAI calls."""
         calls = []
         blocks = re.findall(r"<tool_call>\s*(.*?)\s*</tool_call>", content, flags=re.DOTALL | re.IGNORECASE)
+        if not blocks:
+            candidates = [str(content or "").strip()]
+            candidates.extend(re.findall(
+                r"```(?:json)?\s*(\{.*?\})\s*```",
+                str(content or ""),
+                flags=re.DOTALL | re.IGNORECASE,
+            ))
+            first, last = str(content or "").find("{"), str(content or "").rfind("}")
+            if first >= 0 and last > first:
+                candidates.append(str(content or "")[first:last + 1])
+            blocks = list(dict.fromkeys(candidate for candidate in candidates if candidate))
+        seen = set()
         for index, block in enumerate(blocks):
             name = ""
             arguments: Any = {}
@@ -328,9 +343,19 @@ class QwenProvider(LLMProvider):
                 continue
             if not isinstance(arguments, dict):
                 arguments = {}
-            digest = hashlib.sha256(block.encode("utf-8")).hexdigest()[:16]
+            stable_payload = json.dumps(
+                {"name": name, "arguments": arguments},
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+            )
+            digest = hashlib.sha256(stable_payload.encode("utf-8")).hexdigest()[:16]
+            if digest in seen:
+                continue
+            seen.add(digest)
             calls.append({
-                "id": f"qwen-text-{digest}-{index}",
+                "id": f"qwen-text-{digest}",
                 "type": "function",
                 "function": {"name": name, "arguments": arguments},
             })
@@ -344,8 +369,6 @@ class QwenProvider(LLMProvider):
         **kwargs
     ) -> Dict[str, Any]:
         import json
-        import random
-        import string
         
         # Format tools list for prompt injection
         tools_desc = []
@@ -495,7 +518,16 @@ class QwenProvider(LLMProvider):
                     
                     # Verify that tool name matches available tools
                     if tool_name in [t.get("function", {}).get("name") for t in tools]:
-                        call_id = "call_" + "".join(random.choices(string.ascii_letters + string.digits, k=16))
+                        stable_payload = json.dumps(
+                            {"name": tool_name, "arguments": tool_args},
+                            ensure_ascii=False,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                            default=str,
+                        )
+                        call_id = "qwen-prompt-" + hashlib.sha256(
+                            stable_payload.encode("utf-8")
+                        ).hexdigest()[:16]
                         tool_calls = [{
                             "id": call_id,
                             "type": "function",

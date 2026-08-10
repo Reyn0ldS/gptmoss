@@ -2,12 +2,20 @@ import json
 
 from gptmoss.core.delivery import (
     build_delivery_contract,
+    commands_equivalent,
     declared_interface_issues,
     evaluate_delivery,
+    extract_requirements,
+    normalize_scope_changes,
     path_is_owned,
     static_workspace_issues,
 )
-from gptmoss.core.execution import merge_inherited_requirements, normalize_plan
+from gptmoss.core.execution import (
+    merge_inherited_requirements,
+    normalize_plan,
+    requirement_validation_commands,
+    requirements_for_delegation,
+)
 
 
 def _plan():
@@ -70,6 +78,7 @@ def test_contract_freezes_traceability_scope_and_ownership():
     assert path_is_owned(contract, 0, "developer", "src/sample/cli.py")
     assert not path_is_owned(contract, 0, "developer", "tests/test_cli.py")
     assert path_is_owned(contract, 1, "debugger", "src/sample/cli.py")
+    assert not path_is_owned(contract, 1, "debugger", "tests/test_cli.py")
     assert not path_is_owned(contract, 1, "debugger", ".gptmoss/contract.json")
     assert not path_is_owned(contract, 1, "debugger", "./.gptmoss/contract.json")
 
@@ -137,6 +146,38 @@ def test_delegated_plan_inherits_parent_requirement_identifiers():
 
     assert contract["requirements"][0]["id"] == "REQ-FACE-IMAGE"
     assert contract["traceability"][0]["implementation_steps"] == [0]
+
+
+def test_delegation_transmits_full_requirement_text_and_defaults_to_all_mandatory():
+    requirements = [
+        {"id": "REQ-1", "statement": "Restore the public model", "mandatory": True},
+        {"id": "REQ-2", "statement": "Run complete acceptance", "mandatory": True},
+        {"id": "REQ-3", "statement": "Optional polish", "mandatory": False},
+    ]
+
+    selected = requirements_for_delegation(requirements, ["REQ-2"])
+    fallback = requirements_for_delegation(requirements, [])
+
+    assert selected == [requirements[1]]
+    assert fallback == requirements[:2]
+
+
+def test_explicit_validation_commands_are_extracted_from_requirement_text():
+    delimiter = chr(96)
+    requirements = [{
+        "id": "REQ-TEST",
+        "statement": (
+            "Require exact " + delimiter + "python -m pytest --collect-only -q"
+            + delimiter + " and " + delimiter + "python -m pytest -q"
+            + delimiter + "; preserve " + delimiter + "HealthStatus" + delimiter + "."
+        ),
+        "mandatory": True,
+    }]
+
+    assert requirement_validation_commands(requirements) == [
+        "python -m pytest --collect-only -q",
+        "python -m pytest -q",
+    ]
 
 
 def test_static_assurance_detects_package_identity_and_signature_mismatch(tmp_path):
@@ -218,3 +259,60 @@ def test_declared_interface_is_checked_against_actual_ast(tmp_path):
 
     assert any("parameters" in issue["message"] for issue in issues)
     assert any("consumer" in issue["message"] for issue in issues)
+
+
+def test_requirement_extraction_preserves_lists_punctuation_and_has_no_hidden_cap():
+    task = "\n".join(
+        f"- Outcome {index}: keep commas, semicolons; and all details together"
+        for index in range(30)
+    )
+
+    requirements = extract_requirements(task)
+
+    assert len(requirements) == 30
+    assert ", semicolons;" in requirements[0]["statement"]
+    assert requirements[-1]["statement"].startswith("Outcome 29")
+
+
+def test_complete_without_placeholders_is_not_misclassified_as_scope_reduction():
+    plan = {"steps": [{
+        "id": 0,
+        "description": "Implement the complete system without placeholders",
+        "acceptance_criteria": ["No placeholder remains"],
+    }]}
+
+    assert normalize_scope_changes(plan) == []
+
+    plan = {"steps": [{"id": 0, "description": "Dashboard is future work"}]}
+    assert normalize_scope_changes(plan)[0]["kind"] == "scope_reduction"
+
+
+def test_optional_planner_metadata_cannot_abort_an_otherwise_valid_plan():
+    plan = _plan()
+    plan.update({
+        "artifact_validations": ["invalid"],
+        "external_tools": [{"name": "Blender"}],
+        "execution_routines": "invalid",
+    })
+
+    contract = build_delivery_contract(plan, "Expose a runnable local command")
+
+    assert contract["artifact_validations"] == []
+    assert contract["external_tools"] == []
+    assert contract["execution_routines"] == []
+    assert len(contract["normalization_warnings"]) == 3
+
+
+def test_command_evidence_accepts_windows_wrappers_but_not_a_targeted_subset():
+    assert commands_equivalent(
+        "python -m pytest -q",
+        'chcp 65001 >nul && cd /d "C:/work" && "C:/runtime/python.exe" -m pytest -q',
+    )
+    assert commands_equivalent(
+        "python -m pytest tests/test_cli.py -q",
+        "python -m pytest -q tests/test_cli.py",
+    )
+    assert not commands_equivalent(
+        "python -m pytest -q",
+        "python -m pytest -q tests/test_cli.py",
+    )
