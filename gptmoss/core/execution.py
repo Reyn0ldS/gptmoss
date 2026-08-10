@@ -2190,6 +2190,23 @@ class ExecutionEngine:
         """
         state = self.state_engine.get_execution(execution_id)
         convo = self.state_engine.get_conversation(execution_id)
+        role_for_step = canonical_step_role(step.get("role")) or infer_step_role(
+            step.get("description", "")
+        )
+        persisted_runtime = (state.variables.get("step_runtime") or {}).get(
+            str(step.get("id")), {}
+        )
+        is_resumed_step = int(persisted_runtime.get("iterations", 0)) > 0
+        if (
+            role_for_step == "coordinator"
+            and is_resumed_step
+            and not state.variables.get("pending_approval")
+            and self._can_engine_finalize(execution_id, step)
+        ):
+            # A resumed terminal audit may already have complete delegated QA
+            # evidence.  Finalize before asking the model for another action,
+            # which could only duplicate tests or mutate an assured workspace.
+            return self._engine_delivery(execution_id, step)
         expertise_query = " ".join([
             str(state.variables.get("specialist") or step.get("specialist") or ""),
             step.get("description", ""),
@@ -2201,7 +2218,6 @@ class ExecutionEngine:
         step_desc = step.get("description", "")
         prerequisite_outputs = state.variables.get("dependency_results") or []
         if not prerequisite_outputs and state.current_plan:
-            role_for_step = canonical_step_role(step.get("role")) or infer_step_role(step_desc)
             if role_for_step == "coordinator":
                 dependency_ids = [
                     item.get("id") for item in state.current_plan.get("steps", [])

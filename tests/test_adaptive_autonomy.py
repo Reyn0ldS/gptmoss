@@ -213,6 +213,37 @@ def test_coordinator_reuses_exact_verification_evidence_from_delegated_children(
 
 
 @pytest.mark.asyncio
+async def test_resumed_converged_coordinator_finalizes_before_another_llm_call(tmp_path):
+    llm = MockLLMProvider()
+    engine, state = _engine(tmp_path, llm)
+    execution = state.get_execution("preflight-audit")
+    implementation = {
+        "id": 0, "role": "developer", "description": "Implement",
+        "dependencies": [], "status": "completed",
+    }
+    auditor = {
+        "id": 1, "role": "coordinator", "specialist": "Final Auditor",
+        "description": "Audit the delivery", "dependencies": [0],
+        "acceptance_criteria": ["Independent assurance passes"], "status": "running",
+    }
+    execution.current_plan = {"steps": [implementation, auditor], "requirements": []}
+    execution.variables["step_runtime"] = {
+        "1": {"iterations": 4, "stagnant_iterations": 1},
+    }
+    engine._independent_delivery_report = Mock(return_value={
+        "passed": True,
+        "checks": [{"name": "independent_machine_evidence", "passed": True}],
+        "failures": [],
+    })
+
+    result = json.loads(await engine._execute_step_loop("preflight-audit", auditor))
+
+    assert llm.call_count == 0
+    assert result["next_action"] == "Deliver the independently assured result."
+    assert "independent assurance passed" in result["evidence"][0]
+
+
+@pytest.mark.asyncio
 async def test_failed_final_assurance_reopens_only_repair_and_auditor(tmp_path):
     llm = MockLLMProvider()
     delivery = json.dumps({
