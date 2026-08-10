@@ -1157,6 +1157,12 @@ class ExecutionEngine:
             or step.get("acceptance_criteria") or step.get("verification_commands")
         )
         role_key = canonical_step_role(step.get("role")) or infer_step_role(step.get("description", ""))
+        if role_key == "coordinator":
+            # Final coordinators validate the whole workflow.  Successful
+            # machine evidence normally belongs to delegated QA/integration
+            # executions, so limiting the gate to the coordinator's local
+            # history needlessly forces expensive duplicate test runs.
+            history = self._delivery_histories(execution_id)
         if quality_contract and role_key != "coordinator" and not self._is_structured_delivery(response):
             issues.append("return the required structured JSON delivery contract")
 

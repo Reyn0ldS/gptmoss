@@ -180,6 +180,38 @@ def test_terminal_coordinator_auto_finalizes_only_after_independent_assurance(tm
     assert not engine._can_engine_finalize("terminal-audit", auditor)
 
 
+def test_coordinator_reuses_exact_verification_evidence_from_delegated_children(tmp_path):
+    engine, state = _engine(tmp_path, MockLLMProvider())
+    parent = state.get_execution("evidence-parent")
+    auditor = {
+        "id": 1, "role": "coordinator", "specialist": "Final Auditor",
+        "description": "Audit the delivery", "dependencies": [0],
+        "acceptance_criteria": ["All exact verification commands passed"],
+    }
+    parent.current_plan = {
+        "requirements": [{
+            "id": "REQ-TEST", "statement": "Validate with `python -m pytest -q`",
+            "acceptance": [],
+        }],
+        "steps": [auditor],
+    }
+
+    initial_issues = engine._step_completion_issues("evidence-parent", auditor, "done")
+    assert any("python -m pytest -q" in issue for issue in initial_issues)
+
+    child = state.get_execution("evidence-child")
+    child.variables.update({
+        "parent_execution_id": "evidence-parent",
+        "tool_call_history": [{
+            "capability": "shell", "action": "execute",
+            "arguments": {"command": "python -m pytest -q"},
+            "result": "224 passed\\nEXIT_CODE: 0",
+        }],
+    })
+
+    assert engine._step_completion_issues("evidence-parent", auditor, "done") == []
+
+
 @pytest.mark.asyncio
 async def test_failed_final_assurance_reopens_only_repair_and_auditor(tmp_path):
     llm = MockLLMProvider()
