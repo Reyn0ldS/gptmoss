@@ -20,6 +20,7 @@ from gptmoss.interfaces.capability import generate_action_schema, get_actions
 from gptmoss.core.observability import TraceRecorder
 from gptmoss.core.skills import SkillRegistry
 from gptmoss.core.artifacts import ArtifactStore
+from gptmoss.core.artifact_validation import validate_artifact
 from gptmoss.core.evolution import AgentProfileRegistry, AutonomousSkillLifecycle
 from gptmoss.core.delivery import (
     build_delivery_contract,
@@ -589,6 +590,46 @@ class ExecutionEngine:
         return [path for path in step.get("required_artifacts", [])
                 if not self._artifact_exists(execution_id, path)]
 
+    def _step_artifact_validation_issues(
+        self, execution_id: str, step: Dict[str, Any]
+    ) -> List[str]:
+        """Validate each completed step artifact before allowing downstream reuse."""
+        state = self.state_engine.get_execution(execution_id)
+        specifications = {
+            str(item.get("path") or "").replace("\\", "/"): item
+            for item in (state.current_plan or {}).get("artifact_validations", [])
+            if isinstance(item, dict) and item.get("path")
+        }
+        filesystem = self.get_capability("filesystem")
+        if not filesystem or not hasattr(filesystem, "_resolve_path"):
+            return []
+        issues = []
+        for path in step.get("required_artifacts", []):
+            normalized = str(path).replace("\\", "/")
+            if not self._artifact_exists(execution_id, normalized):
+                continue
+            specification = specifications.get(normalized, {})
+            suffix = os.path.splitext(normalized)[1].lower()
+            validator = specification.get("validator")
+            constraints = dict(specification.get("constraints") or {})
+            # Even a planner without an explicit policy must not advance a
+            # generated text artifact containing placeholders or model-thought tags.
+            if not specification and suffix in {".md", ".txt", ".html"}:
+                validator = "document"
+                constraints["forbid_placeholders"] = True
+            try:
+                resolved = filesystem._resolve_path(normalized, execution_id)
+                report = validate_artifact(
+                    resolved, validator=validator, constraints=constraints,
+                )
+            except (OSError, PermissionError, TypeError, ValueError) as error:
+                issues.append(f"{normalized}: validation could not run: {error}")
+                continue
+            if not report.get("valid", False):
+                failures = report.get("failures") or ["artifact validation failed"]
+                issues.extend(f"{normalized}: {message}" for message in failures[:12])
+        return issues
+
     def _capability_gaps(self, state) -> List[Dict[str, Any]]:
         """Describe unavailable input modalities without pretending to use them."""
         gaps = []
@@ -1069,6 +1110,14 @@ class ExecutionEngine:
         text_suffixes = {".py", ".md", ".txt", ".json", ".html", ".css", ".js",
                          ".toml", ".yaml", ".yml", ".bat", ".ps1", ".sh"}
         candidates = [path for path in missing if os.path.splitext(path)[1].lower() in text_suffixes][:4]
+        if state.variables.get("attachment_ids"):
+            # A detached rescue prompt does not contain the complete attached
+            # corpus and therefore cannot honestly synthesize grounded prose.
+            source_document_suffixes = {".md", ".txt", ".json", ".html"}
+            candidates = [
+                path for path in candidates
+                if os.path.splitext(path)[1].lower() not in source_document_suffixes
+            ]
         contracts = self._source_contract_summary(execution_id)
         rescued = []
         for path in candidates:
@@ -1170,6 +1219,7 @@ class ExecutionEngine:
                    if not self._artifact_exists(execution_id, path)]
         if missing:
             issues.append("create non-empty required artifacts: " + ", ".join(missing))
+        issues.extend(self._step_artifact_validation_issues(execution_id, step))
 
         if role_key in {"qa", "debugger", "coordinator"}:
             fake_packages = self._fake_dependency_packages(execution_id)
@@ -1500,6 +1550,11 @@ class ExecutionEngine:
             plan_result = merge_inherited_requirements(
                 plan_result, state.variables.get("inherited_requirements")
             )
+            inherited_validations = state.variables.get("inherited_artifact_validations")
+            if isinstance(inherited_validations, list) and inherited_validations:
+                plan_result["artifact_validations"] = [
+                    dict(item) for item in inherited_validations if isinstance(item, dict)
+                ]
             if state.variables.get("capability_gaps"):
                 scope_changes = plan_result.setdefault("scope_changes", [])
                 known_statements = {
@@ -1683,6 +1738,16 @@ class ExecutionEngine:
                         if key not in {"id", "dependencies", "status", "assigned_execution_id", "delivery", "result", "error"}
                     }
                     sub_exec.variables["attachment_ids"] = state.variables.get("attachment_ids", [])
+                    owned_artifacts = {
+                        str(path).replace("\\", "/")
+                        for path in step.get("required_artifacts", [])
+                    }
+                    sub_exec.variables["inherited_artifact_validations"] = [
+                        dict(item)
+                        for item in (state.current_plan or {}).get("artifact_validations", [])
+                        if isinstance(item, dict)
+                        and str(item.get("path") or "").replace("\\", "/") in owned_artifacts
+                    ]
                     parent_requirements = (
                         state.variables.get("delivery_contract", {}).get("requirements", [])
                     )

@@ -23,6 +23,8 @@ _DEFAULT_PLACEHOLDERS = (
     r"\blorem\s+ipsum\b",
     r"\b(?:a|à)\s+compl(?:e|é)ter\b",
     r"\[(?:insert|placeholder|complete|compl(?:e|é)ter)[^\]]*\]",
+    r"(?im)^\s*(?:[-*]\s*)?(?:[^:\n]{1,80}:\s*)?(?:\.\.\.|â¦)\s*$",
+    r"(?i)</?think>",
 )
 
 

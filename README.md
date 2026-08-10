@@ -421,7 +421,7 @@ Le pipeline logiciel ne bloque plus l'agent de réparation derrière une suite d
 
 Les moteurs de jeu, Blender et autres applications propres à un projet restent des outils externes. Le plan fournit `external_tools` et `execution_routines` avec sondes de disponibilité, paramètres, étapes opérateur, commandes ou appels API non interactifs, sorties attendues, validation, dépannage et retour arrière. GPTMOSS ne prétend pas piloter une interface graphique qu’il n’a pas réellement exécutée.
 
-Les sorties déclarées dans `artifact_validations` sont contrôlées même si elles sont produites plus tard par un opérateur. Les validateurs intégrés inspectent JSON, OBJ et GLB. Le validateur `document` contrôle de façon déclarative les sections, exigences, tables de traçabilité, références locales bornées, sources autorisées, liens externes, placeholders, répétitions, terminologie, paragraphes non sourcés et métriques minimales d'un Markdown ou TXT. Une erreur critique bloque la garantie de livraison. Les validations structurelles ne prouvent ni le photoréalisme, ni le rendu Blender, ni la justesse métier ; ces points restent soumis aux critères explicites et à la revue appropriée.
+Les sorties déclarées dans `artifact_validations` sont contrôlées dès la fin de l'étape qui les produit, avant leur transmission aux spécialistes suivants, puis de nouveau par l'assurance finale. Les validateurs intégrés inspectent JSON, OBJ et GLB. Le validateur `document` contrôle de façon déclarative les sections, exigences, tables de traçabilité, références locales bornées, sources autorisées, liens externes, placeholders, balises de raisonnement résiduelles, répétitions, terminologie, paragraphes non sourcés et métriques minimales d'un Markdown ou TXT. Même sans politique détaillée, un texte intermédiaire ne peut pas passer avec un placeholder manifeste. Une erreur critique bloque la garantie de livraison. Pour un travail fondé sur des pièces jointes, la récupération d'inactivité ne fabrique jamais le document manquant depuis un contexte privé de son corpus. Les validations structurelles ne prouvent ni le photoréalisme, ni le rendu Blender, ni la justesse métier ; ces points restent soumis aux critères explicites et à la revue appropriée.
 
 États possibles :
 
@@ -588,7 +588,7 @@ python scripts/browser_layout_audit.py http://127.0.0.1:8000/
 
 Les tests vérifient notamment l'API, le moteur d'exécution, les politiques, la mémoire, les skills, les artefacts et le workflow documentaire local. La validation complète du 10 août 2026 a produit :
 
-- `193 passed` pour la suite GPTMOSS sur la branche documentaire ;
+- `197 passed` pour la suite GPTMOSS sur la branche documentaire ;
 - 48/48 cas Edge réussis entre 360 × 740 et 1920 × 1080, avec des facteurs d'échelle de 100 % à 200 % ;
 - aucun débordement horizontal global et aucun élément signalé hors écran dans les scénarios vide, contenu, approbation, réglages et bibliothèque.
 

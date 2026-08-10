@@ -113,6 +113,28 @@ def test_document_fallback_reconstructs_explicit_quality_policy():
     assert constraints["forbid_placeholders"] is True
 
 
+def test_document_fallback_validates_intermediate_and_supporting_outputs():
+    plan = SimplePlanner._fallback_plan(
+        DOCUMENT_TASK, analyze_task_complexity(DOCUMENT_TASK)
+    )
+    policies = {item["path"]: item for item in plan["artifact_validations"]}
+
+    assert policies["analysis/corpus-inventory.md"]["validator"] == "document"
+    inventory_constraints = policies["analysis/corpus-inventory.md"]["constraints"]
+    assert inventory_constraints["required_source_files"] == [
+        "requirements.docx", "vision.pptx", "decisions.txt", "existing.html"
+    ]
+    assert inventory_constraints["require_bounded_references"] is True
+    matrix_constraints = policies["requirements-matrix.md"]["constraints"]
+    assert matrix_constraints["required_requirement_ids"] == [
+        "BR-001", "BR-002", "FR-001", "FR-002", "FR-003",
+        "NFR-001", "NFR-002", "SEC-001", "SEC-002",
+    ]
+    assert matrix_constraints["required_traceability_ids"] == matrix_constraints["required_requirement_ids"]
+    assert policies["quality-policy.json"]["validator"] == "json"
+    assert policies["review-report.md"]["constraints"]["forbid_external_links"] is True
+
+
 def test_small_software_readme_request_keeps_software_fallback():
     task = "Build a Python API and create README.md with setup instructions."
     plan = SimplePlanner._fallback_plan(task, analyze_task_complexity(task))

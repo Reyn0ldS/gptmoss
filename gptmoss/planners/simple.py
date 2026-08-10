@@ -246,6 +246,81 @@ def _document_validation_policy(
     }
 
 
+def _supporting_document_validation_policies(
+    task: str, steps: List[Dict[str, Any]], primary: str
+) -> List[Dict[str, Any]]:
+    """Give every reusable document artifact a deterministic acceptance floor."""
+    inventory = _source_inventory(task, [
+        str(path)
+        for step in steps
+        for path in step.get("required_artifacts", [])
+    ])
+    identifiers = _expanded_identifier_ranges(task)
+    forbid_external = bool(
+        re.search(r"(?i)\bforbid_external_links\s*=\s*true\b", task)
+        or re.search(r"(?i)\b(?:aucun|sans)\s+(?:lien|url).*internet", task)
+    )
+    policies: List[Dict[str, Any]] = []
+    seen = {primary.replace("\\", "/")}
+    for step in steps:
+        for raw_path in step.get("required_artifacts", []):
+            path = str(raw_path).replace("\\", "/")
+            if path in seen:
+                continue
+            seen.add(path)
+            suffix = os.path.splitext(path)[1].lower()
+            if suffix == ".json":
+                policies.append({
+                    "path": path,
+                    "validator": "json",
+                    "required": True,
+                    "constraints": {"min_size_bytes": 20},
+                })
+                continue
+            if suffix not in {".md", ".txt", ".html"}:
+                continue
+            lower = path.casefold()
+            source_grounded = (
+                lower.startswith("analysis/")
+                and "quality-findings" not in lower
+            ) or any(marker in lower for marker in (
+                "requirement", "exigence", "evidence", "preuve", "decision", "adr",
+            ))
+            complete_source_coverage = any(marker in lower for marker in (
+                "corpus-inventory", "requirement", "exigence", "evidence", "preuve",
+            ))
+            minimum_words = 300 if source_grounded else 120
+            constraints: Dict[str, Any] = {
+                "forbid_placeholders": True,
+                "minimums": {"words": minimum_words},
+            }
+            if forbid_external:
+                constraints["forbid_external_links"] = True
+            if source_grounded:
+                constraints["require_local_references"] = True
+                constraints["minimums"]["local_references"] = 3
+                if inventory:
+                    constraints["source_inventory"] = inventory
+                    constraints["require_bounded_references"] = True
+            if complete_source_coverage and inventory:
+                constraints["required_source_files"] = list(inventory)
+                constraints["minimums"]["local_references"] = max(
+                    4, len(inventory)
+                )
+            if identifiers and any(marker in lower for marker in (
+                "requirement", "exigence", "evidence", "preuve",
+            )):
+                constraints["required_requirement_ids"] = identifiers
+                constraints["required_traceability_ids"] = identifiers
+            policies.append({
+                "path": path,
+                "validator": "document",
+                "required": True,
+                "constraints": constraints,
+            })
+    return policies
+
+
 def _step(step_id: int, role: str, specialist: str, description: str,
           dependencies: List[int], expertise: List[str], required_artifacts: List[str],
           acceptance_criteria: List[str], verification_commands: List[str] | None = None) -> Dict[str, Any]:
@@ -481,7 +556,8 @@ class SimplePlanner(PlannerProvider):
             "external_tools": [],
             "execution_routines": [],
             "artifact_validations": [
-                _document_validation_policy(task, outputs, primary)
+                _document_validation_policy(task, outputs, primary),
+                *_supporting_document_validation_policies(task, steps, primary),
             ],
             "launch_commands": [],
             "steps": steps,

@@ -116,7 +116,7 @@ $execution = Invoke-RestMethod -Method Post -Uri 'http://127.0.0.1:8000/executio
   -ContentType 'application/json' -Body $request
 ```
 
-La capability `documents` ne peut inventorier, rechercher et lire que les identifiants présents dans `attachment_ids`. Une autre exécution ne gagne donc pas implicitement accès à tout le corpus stocké.
+La capability `documents` ne peut inventorier, rechercher et lire que les identifiants présents dans `attachment_ids`. Une autre exécution ne gagne donc pas implicitement accès à tout le corpus stocké. `documents.read` et le filtre de `documents.search` acceptent l'`artifact_id` recommandé, mais aussi le nom de fichier exact ou l'empreinte `document_id` renvoyés par l'inventaire. Ces alias sont résolus uniquement parmi les pièces jointes de l'exécution ; un identifiant inventé, ambigu ou appartenant à un autre corpus reste refusé et l'erreur rappelle les références autorisées.
 
 ## Fonctionnement interne
 
@@ -156,7 +156,7 @@ Pour une revue exhaustive, l'agent tient une matrice contenant au minimum : iden
 
 ## Politique qualité déclarative
 
-Le plan peut déclarer un validateur `document` dans `artifact_validations`. La même politique peut être enregistrée dans `quality-policy.json` :
+Le plan peut déclarer un validateur `document` dans `artifact_validations`. Chaque politique est appliquée immédiatement à l'artefact produit avant tout handoff, puis lors de l'audit final. Le fallback de rédaction professionnelle crée aussi des politiques pour l'inventaire, les matrices, les analyses spécialisées, les registres et les rapports JSON/Markdown : un simple fichier non vide ne suffit donc plus. La même politique peut être enregistrée dans `quality-policy.json` :
 
 ```json
 {

@@ -36,15 +36,38 @@ class DocumentCapability:
     def _json(value: Any) -> str:
         return json.dumps(value, ensure_ascii=False, sort_keys=True)
 
-    def _require_attached(
+    def _resolve_attached(
         self,
-        artifact_id: str,
+        reference: str,
         context: Optional[Dict[str, Any]],
-    ) -> None:
-        if artifact_id not in self._attached_ids(context):
-            raise PermissionError(
-                "Document is not attached to this execution. Attach it explicitly first."
-            )
+    ) -> str:
+        """Resolve an ID, document digest, or filename within the attached scope only."""
+        attached = self._attached_ids(context)
+        candidate = str(reference or "").strip()
+        if candidate in attached:
+            return candidate
+        matches = []
+        for item in self.artifact_store.document_index.inventory():
+            if item.get("artifact_id") not in attached:
+                continue
+            aliases = {
+                str(item.get("document_id") or "").casefold(),
+                str(item.get("filename") or "").casefold(),
+            }
+            if candidate.casefold() in aliases:
+                matches.append(str(item["artifact_id"]))
+        if len(matches) == 1:
+            return matches[0]
+        available = [
+            f"{item.get('filename')} ({item.get('artifact_id')})"
+            for item in self.artifact_store.document_index.inventory()
+            if item.get("artifact_id") in attached
+        ]
+        detail = "; ".join(available) or "none"
+        raise PermissionError(
+            "Document reference is not attached or is not unambiguous. "
+            f"Use documents.inventory and retry with a filename or artifact_id. Attached: {detail}."
+        )
 
     @action(
         name="inventory",
@@ -56,7 +79,14 @@ class DocumentCapability:
     def inventory(self, context: Optional[Dict[str, Any]] = None) -> str:
         attached = self._attached_ids(context)
         items = [
-            item
+            {
+                **item,
+                "read_reference": item["artifact_id"],
+                "read_hint": (
+                    "Pass artifact_id, filename, or document_id to documents.read; "
+                    "artifact_id is preferred."
+                ),
+            }
             for item in self.artifact_store.document_index.inventory()
             if item["artifact_id"] in attached
         ]
@@ -96,8 +126,7 @@ class DocumentCapability:
             )
         requested = artifact_id.strip()
         if requested:
-            self._require_attached(requested, context)
-            selected = [requested]
+            selected = [self._resolve_attached(requested, context)]
         else:
             selected = sorted(attached)
         effective_limit = max(1, min(int(limit), 40))
@@ -148,15 +177,16 @@ class DocumentCapability:
         block_count: int = 20,
         context: Optional[Dict[str, Any]] = None,
     ) -> str:
-        self._require_attached(artifact_id, context)
-        document = self.artifact_store.document(artifact_id)
+        resolved_id = self._resolve_attached(artifact_id, context)
+        document = self.artifact_store.document(resolved_id)
         start = max(0, int(start_block))
         count = max(1, min(int(block_count), 200))
         selected = document.blocks[start : start + count]
         next_start = start + len(selected)
         return self._json(
             {
-                "artifact_id": artifact_id,
+                "artifact_id": resolved_id,
+                "requested_reference": artifact_id,
                 "document_id": document.id,
                 "filename": document.filename,
                 "title": document.title,
@@ -183,5 +213,5 @@ class DocumentCapability:
         context: Optional[Dict[str, Any]] = None,
     ) -> str:
         chunk = self.artifact_store.document_index.get_chunk(chunk_id)
-        self._require_attached(chunk.artifact_id, context)
+        self._resolve_attached(chunk.artifact_id, context)
         return self._json(chunk.to_dict())

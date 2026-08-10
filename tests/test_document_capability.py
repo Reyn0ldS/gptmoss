@@ -102,6 +102,27 @@ def test_document_capability_refuses_unattached_document_access(tmp_path: Path):
         )
 
 
+def test_document_capability_resolves_attached_filename_and_document_digest(tmp_path: Path):
+    store = ArtifactStore(str(tmp_path))
+    attached = _upload_text(store, "vision.pptx.txt", "# Vision\n\nContenu local.")
+    hidden = _upload_text(store, "hidden.txt", "# CachÃ©\n\nSecret.")
+    capability = DocumentCapability(store)
+    context = _context(attached["id"])
+    inventory = json.loads(capability.inventory(context))
+    item = inventory["documents"][0]
+
+    by_filename = json.loads(capability.read("vision.pptx.txt", context=context))
+    by_digest = json.loads(capability.read(item["document_id"], context=context))
+
+    assert by_filename["artifact_id"] == attached["id"]
+    assert by_filename["requested_reference"] == "vision.pptx.txt"
+    assert by_digest["artifact_id"] == attached["id"]
+    assert item["read_reference"] == attached["id"]
+    assert "artifact_id is preferred" in item["read_hint"]
+    with pytest.raises(PermissionError, match="not attached"):
+        capability.read(hidden["id"], context=context)
+
+
 def test_document_search_output_is_budgeted_and_points_to_full_chunk(tmp_path: Path):
     store = ArtifactStore(str(tmp_path))
     long_section = "contexte " * 1_500

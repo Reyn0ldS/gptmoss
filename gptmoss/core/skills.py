@@ -158,7 +158,10 @@ class SkillRegistry:
                 score += 5
             description_tokens = self._tokens(skill.description)
             score += len(task_tokens & description_tokens) * 2
-            if score:
+            # A single incidental token (for example a local filename such as
+            # vision.pptx) is not enough to activate unrelated expertise.
+            # Explicitly requested and preferred skills remain unconditional.
+            if score >= 2:
                 scored.append((score, skill))
         scored.sort(key=lambda item: (-item[0], item[1].name))
         for _, skill in scored:
