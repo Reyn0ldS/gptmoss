@@ -31,6 +31,40 @@ def test_skill_registry_discovers_and_selects_builtin_skill():
     assert selected[0].allowed_capabilities == ["filesystem", "shell"]
 
 
+def test_professional_document_skills_use_standard_tools_and_quality_gates():
+    root = Path(__file__).resolve().parents[1] / "gptmoss" / "skills"
+    registry = SkillRegistry([str(root)])
+
+    analysis = registry.skills["document-analysis"]
+    documentation = registry.skills["documentation"]
+    architecture = registry.skills["project-architecture"]
+
+    for skill in (analysis, documentation, architecture):
+        assert skill.allowed_capabilities == ["documents", "filesystem"]
+        assert "TODO" not in skill.instructions
+        report = registry.validate(
+            name=skill.name,
+            description=skill.description,
+            instructions=skill.instructions,
+            allowed_capabilities=skill.allowed_capabilities,
+            registered_capabilities={"documents", "filesystem"},
+        )
+        assert report["valid"], report
+
+    assert registry.select(
+        "Analyze the attached DOCX corpus and trace every requirement",
+        requested=["document-analysis"],
+    )[0].name == "document-analysis"
+    assert "documents.search" in analysis.instructions
+    assert "traceability matrix" in documentation.instructions
+    assert "migration" in architecture.instructions
+
+    interface = (
+        root / "document-analysis" / "agents" / "openai.yaml"
+    ).read_text(encoding="utf-8")
+    assert "$document-analysis" in interface
+
+
 def test_skill_compatibility_report_maps_known_external_tools(tmp_path):
     path = tmp_path / "SKILL.md"
     path.write_text("Use shell_command and apply_patch, then image_gen.", encoding="utf-8")

@@ -145,9 +145,13 @@ Validation exécutée : portée limitée aux pièces jointes explicites, recherc
 
 ### Phase E — Workflows professionnels
 
+État : terminé et validé sur la branche dédiée.
+
 Livrables : skills d'analyse documentaire, de rédaction longue et d'architecture, plan hiérarchique, matrice de couverture, rédaction par section et consolidation.
 
 Validation : contrats génériques, reprise après interruption et résultats intermédiaires persistants.
+
+Validation exécutée : trois skills génériques avec outils documentaires en lecture seule, références locales, matrices de couverture et gates de qualité ; validation officielle `skill-creator`, 18 tests ciblés et 178 tests GPTMOSS réussis.
 
 ### Phase F — Contrôles qualité
 

@@ -60,8 +60,18 @@ class SkillRegistry:
             name = str(fields.get("name") or path.parent.name).strip().lower()
             if not re.fullmatch("[a-z0-9][a-z0-9_-]*", name):
                 continue
+            raw_capabilities = fields.get(
+                "allowed_capabilities",
+                fields.get("allowed-tools", []),
+            )
+            if isinstance(raw_capabilities, str):
+                raw_capabilities = [
+                    item
+                    for item in re.split(r"[\s,]+", raw_capabilities)
+                    if item
+                ]
             skill = Skill(name, str(fields.get("description") or ""), instructions,
-                          [str(item).lower() for item in fields.get("allowed_capabilities", [])],
+                          [str(item).lower() for item in raw_capabilities],
                           str(path), hashlib.sha256(text.encode("utf-8")).hexdigest())
             self.skills[name] = skill
             discovered.append(skill)
