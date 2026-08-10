@@ -165,7 +165,7 @@ La configuration active est `workspace/config.json`. Au démarrage, GPTMOSS la n
 | `continue_while_progress` | Supprime la limite globale de tours d'une étape tant qu'un progrès durable est détecté. | `true` pour les tâches longues. |
 | `adaptive_resource_management` | Transforme contexte, stagnation, reprises et sorties d'outils en budgets qui grandissent avec le contrat réel. | `true`. |
 | `strict_skill_capabilities` | Si activé, les skills sélectionnés réduisent aussi les outils exposés. Par défaut un skill ajoute une procédure sans retirer les capacités générales. | `false`. |
-| `allow_nested_delegation` | Autorise une sous-tâche réellement nouvelle à déléguer à son tour. Les cycles exacts sont refusés. | `true`. |
+| `allow_nested_delegation` | Autorise une étape qui déclare explicitement `allow_nested_delegation=true` à déléguer une sous-tâche réellement nouvelle. Une étape déléguée ordinaire reste bornée ; les cycles exacts sont refusés. | `true`. |
 | `max_delegation_depth` | Profondeur explicite de délégation ; `0` signifie aucune limite numérique arbitraire. | `0`. |
 | `autonomous_specialization` | Crée et conserve un profil d'agent propre à chaque spécialiste inédit du plan. | `true`. |
 | `autonomous_skill_creation` | Génère un skill procédural lorsqu'aucun skill chargé ne couvre suffisamment l'expertise. | `true`. |
@@ -405,6 +405,8 @@ transmises explicitement à l'étape suivante. Le coordinateur final reçoit tou
 livraisons dans l'ordre du plan, les synthétise sans relancer de sous-agent et expose
 l'ensemble dans le champ `results` de l'exécution.
 
+Une étape déléguée n'expose pas `agent` ou `devteam` par défaut : le plan racine possède déjà les étapes sœurs et leurs propriétaires. Le planner peut déclarer `allow_nested_delegation=true` sur une étape seulement lorsqu'une équipe subordonnée distincte est justifiée ; l'option runtime globale doit également l'autoriser. Ce contrat évite qu'un spécialiste anticipe les artefacts d'un autre, duplique le DAG ou consomme son budget en boucles de statut.
+
 Le coordinateur final réutilise aussi les preuves machine réussies de tout l'arbre
 d'exécution : une commande QA exacte exécutée par un sous-agent n'est pas relancée
 uniquement pour apparaître dans l'historique local du coordinateur. Si le modèle
@@ -638,7 +640,7 @@ La mémoire de session reste éphémère et gérée automatiquement par le moteu
 3. Cliquez sur **Créer le sous-agent**. Il apparaît dans l'arbre des exécutions et dans ce panneau.
 4. Utilisez **Pause**, **Reprendre** ou **Annuler**. Une pause provoquée par une validation humaine doit toujours être traitée avec **Autoriser/Refuser** dans le panneau d'exécution, pas avec **Reprendre**.
 
-Les sous-agents créés explicitement héritent des politiques runtime et ne peuvent pas déléguer à leur tour les capacités `agent` ou `devteam` pendant leur exécution.
+Les sous-agents créés explicitement héritent des politiques runtime et ne peuvent pas déléguer à leur tour les capacités `agent` ou `devteam`, sauf si leur étape porte explicitement `allow_nested_delegation=true` et que l'option runtime globale l'autorise.
 
 ### Diagnostics, traces, erreurs, capacités et vision
 

@@ -202,6 +202,8 @@ L'essai UTF-8 propre a ensuite produit un inventaire réellement fondé sur les 
 
 La reprise a confirmé le gate : le moteur a indiqué exactement les blocs PPTX 13 à 24, le spécialiste les a lus et le handoff machine est devenu admissible. La supervision humaine a toutefois détecté que le fichier d'inventaire conservait des sous-plages de références incomplètes et plusieurs bornes décalées. La politique d'inventaire impose maintenant `require_source_coverage` : l'union des plages référencées doit couvrir chaque bloc ou diapositive du `source_inventory`, indépendamment de la preuve de lecture. Sur le fichier réel, le contrôle refuse 109 unités couvertes sur 162 et énumère les 53 unités absentes. Validation : 16 tests ciblés et 201 tests complets réussis. L'étape dépendante a été suspendue avant production et devra reprendre après correction de l'inventaire.
 
+L'essai suivant possède bien cette politique et a lu les 162 unités, mais son spécialiste d'inventaire a ignoré son artefact unique pour créer deux sous-agents chargés d'anticiper les matrices des étapes sœurs. Aucun fichier parasite n'a été conservé, mais la boucle de statut a consommé inutilement le budget. Une étape déléguée masque désormais `agent` et `devteam` par défaut, même lorsque la délégation imbriquée globale est disponible. Seul `allow_nested_delegation=true` dans cette étape peut les réexposer, à condition que le planner justifie une équipe subordonnée qui ne duplique pas le DAG. Validation : 55 tests ciblés et 201 tests complets réussis. Le projet partiel doit être remis en quarantaine avant le prochain essai propre.
+
 ## 5. Boucle de validation et stratégie Git
 
 Pour chaque incrément :

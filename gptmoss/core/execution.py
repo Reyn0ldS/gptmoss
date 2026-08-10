@@ -2548,7 +2548,12 @@ class ExecutionEngine:
                 allowed_capabilities=allowed_capabilities,
                 delegation_depth=int(state.variables.get("delegation_depth", 0)),
                 suppress_delegation=(
-                    delegated_plan or schema_role in {"qa", "debugger", "coordinator"}
+                    delegated_plan
+                    or schema_role in {"qa", "debugger", "coordinator"}
+                    or (
+                        is_sub_agent
+                        and not bool(step.get("allow_nested_delegation", False))
+                    )
                 ),
             )
 

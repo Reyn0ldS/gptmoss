@@ -733,6 +733,7 @@ class SimplePlanner(PlannerProvider):
             f"Delivery environment: platform={os.name}; dependencies and model weights may not be downloaded during offline execution. "
             "Use portable Python/pytest verification commands and dependency-light implementations.\n"
             "Use canonical roles only from architect, security, developer, qa, debugger, writer, coordinator, but create as many distinct domain specialists as required. "
+            "A delegated specialist is bounded to its own assignment by default. Set allow_nested_delegation=true on a step only when that specialist genuinely requires a subordinate team and explain why in the rationale; never use it to duplicate sibling steps. "
             "Multiple differently specialized developers and testers are expected.\n"
             f"For {analysis['level']} complexity, provide at least {analysis['suggested_min_steps']} substantive steps unless a smaller complete DAG is explicitly justified. "
             "Parallelize independent work and depend on existing outputs so work is not repeated.\n"
