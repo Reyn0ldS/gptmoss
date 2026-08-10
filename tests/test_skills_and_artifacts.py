@@ -31,6 +31,20 @@ def test_skill_registry_discovers_and_selects_builtin_skill():
     assert selected[0].allowed_capabilities == ["filesystem", "shell"]
 
 
+def test_explicit_skill_selection_is_complete_and_not_auto_augmented():
+    registry = SkillRegistry([str(Path(__file__).resolve().parents[1] / "gptmoss" / "skills")])
+
+    selected = registry.select(
+        "Analyze ingestion from vision.pptx and deliver final validation",
+        requested=["document-analysis", "documentation", "project-architecture"],
+        limit=1,
+    )
+
+    assert [skill.name for skill in selected] == [
+        "document-analysis", "documentation", "project-architecture",
+    ]
+
+
 def test_professional_document_skills_use_standard_tools_and_quality_gates():
     root = Path(__file__).resolve().parents[1] / "gptmoss" / "skills"
     registry = SkillRegistry([str(root)])

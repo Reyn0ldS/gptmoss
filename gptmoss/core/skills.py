@@ -145,6 +145,13 @@ class SkillRegistry:
                 selected.append(skill)
                 seen.add(skill.name)
 
+        # Per-execution requested skills are an explicit selection contract,
+        # not seed words for an unrelated fourth skill. Autonomous specialist
+        # skills are appended to this same requested list before selection.
+        # Keep every explicit item even when it exceeds the automatic ranking limit.
+        if requested:
+            return selected
+
         task_lower = task.lower()
         task_tokens = self._tokens(task_lower)
         scored = []

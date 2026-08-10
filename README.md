@@ -475,8 +475,8 @@ Instructions détaillées données à l'agent lorsqu'il sélectionne ce skill.
 
 Deux modes de sélection existent :
 
-1. automatique : GPTMOSS classe les skills selon les mots de la tâche ;
-2. explicite : envoyez `agent_config.skills`, comme dans l'exemple API précédent.
+1. automatique : sans liste explicite, GPTMOSS classe les skills selon les mots de la tâche et ignore les correspondances trop faibles ;
+2. explicite : envoyez `agent_config.skills`, comme dans l'exemple API précédent. Cette liste devient le contrat de sélection de l'exécution : tous ses éléments valides sont conservés, sans plafond de classement et sans ajout automatique hors sujet. Les skills autonomes créés pour un spécialiste sont ensuite ajoutés explicitement à son propre contrat.
 
 ### Création autonome d'agents et de skills
 
@@ -588,7 +588,7 @@ python scripts/browser_layout_audit.py http://127.0.0.1:8000/
 
 Les tests vérifient notamment l'API, le moteur d'exécution, les politiques, la mémoire, les skills, les artefacts et le workflow documentaire local. La validation complète du 10 août 2026 a produit :
 
-- `197 passed` pour la suite GPTMOSS sur la branche documentaire ;
+- `198 passed` pour la suite GPTMOSS sur la branche documentaire ;
 - 48/48 cas Edge réussis entre 360 × 740 et 1920 × 1080, avec des facteurs d'échelle de 100 % à 200 % ;
 - aucun débordement horizontal global et aucun élément signalé hors écran dans les scénarios vide, contenu, approbation, réglages et bibliothèque.
 
