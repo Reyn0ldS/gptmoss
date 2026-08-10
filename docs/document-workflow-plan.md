@@ -135,9 +135,13 @@ Validation exécutée : recherche du début, du milieu et de la fin, filtres str
 
 ### Phase D — Connexion aux agents
 
+État : terminé et validé sur la branche dédiée.
+
 Livrables : outils de recherche/lecture, injection adaptative, provenance dans les traces et gestion des corpus dépassant la fenêtre du modèle.
 
 Validation : aucun milieu de document perdu silencieusement, sources diversifiées, budget respecté et réponses traçables.
+
+Validation exécutée : portée limitée aux pièces jointes explicites, recherche et pagination avec provenance, relecture complète des chunks, sélection pertinente au milieu d'un gros fichier et échantillonnage début/milieu/fin ; 177 tests GPTMOSS réussis.
 
 ### Phase E — Workflows professionnels
 

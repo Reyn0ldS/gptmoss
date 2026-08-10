@@ -22,6 +22,7 @@ GUI_FILE_PATH = os.path.join(CURRENT_DIR, "gui.html")
 
 from gptmoss.core import EventBus, Event, StateEngine, RuntimeKernel, ExecutionEngine, DEFAULT_SYSTEM_PROMPT
 from gptmoss.core.artifacts import ArtifactStore
+from gptmoss.capabilities.documents import DocumentCapability
 from gptmoss.core.evolution import AgentProfileRegistry, AutonomousSkillLifecycle
 from gptmoss.core.skills import SkillRegistry
 
@@ -213,13 +214,27 @@ def _artifact_store() -> Optional[ArtifactStore]:
         return None
     store = app_state.execution_engine.artifact_store
     if store:
+        _synchronize_document_capability(store)
         return store
     filesystem = _filesystem_capability()
     if not filesystem:
         return None
     store = ArtifactStore(filesystem.workspace_root)
     app_state.execution_engine.artifact_store = store
+    _synchronize_document_capability(store)
     return store
+
+def _synchronize_document_capability(store: ArtifactStore) -> None:
+    if not app_state.execution_engine:
+        return
+    capability = app_state.execution_engine.get_capability("documents")
+    if capability and hasattr(capability, "update_store"):
+        capability.update_store(store)
+    elif not capability:
+        app_state.execution_engine.register_capability(
+            "documents",
+            DocumentCapability(store),
+        )
 
 def _runtime_config_path() -> Optional[Path]:
     if app_state.config_path:
@@ -1242,6 +1257,10 @@ async def update_settings(req: SettingsRequest):
             req.max_upload_bytes,
             req.max_attachment_text_chars,
         )
+    if app_state.execution_engine.artifact_store:
+        _synchronize_document_capability(
+            app_state.execution_engine.artifact_store
+        )
     app_state.execution_engine.autonomous_specialization = req.autonomous_specialization
     if workspace_changed or not app_state.execution_engine.agent_profile_registry:
         app_state.execution_engine.agent_profile_registry = AgentProfileRegistry(req.workspace_path)
@@ -1293,4 +1312,7 @@ def init_app(kernel: RuntimeKernel, exec_engine: ExecutionEngine, state_engine: 
     else:
         filesystem = exec_engine.get_capability("filesystem")
         app_state.config_path = Path(filesystem.workspace_root).resolve() / "config.json" if filesystem else None
+    store = _artifact_store()
+    if store:
+        _synchronize_document_capability(store)
     return app

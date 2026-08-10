@@ -2429,10 +2429,25 @@ class ExecutionEngine:
                 attachment_text_budget = self.artifact_store.max_text_chars
                 if not attachment_text_budget and self.adaptive_resource_management:
                     attachment_text_budget = int(context.get("context_budget_chars") or 0)
+                attachment_query = "\n".join(
+                    str(value)
+                    for value in (
+                        state.variables.get("task"),
+                        step.get("description"),
+                        step.get("specialist"),
+                        " ".join(str(item) for item in step.get("expertise", [])),
+                        " ".join(
+                            str(item)
+                            for item in step.get("acceptance_criteria", [])
+                        ),
+                    )
+                    if value
+                )[:8_000]
                 context["attachments"] = self.artifact_store.context_items(
                     state.variables["attachment_ids"],
                     getattr(self.llm_provider, "supports_vision", False),
                     max_text_chars=attachment_text_budget,
+                    query=attachment_query,
                 )
 
             # Request LLM completion
@@ -2462,6 +2477,15 @@ class ExecutionEngine:
             if skills:
                 base_prompt += "\n\nActive skills:\n" + "\n\n".join(
                     f"[{skill.name}]\n{skill.instructions}" for skill in skills
+                )
+            if state.variables.get("attachment_ids"):
+                base_prompt += (
+                    "\n\nLocal document workflow: attached documents are parsed and indexed "
+                    "without Internet access. Initial excerpts are selected from the whole corpus "
+                    "for this assignment and include source, section, block range, and chunk ID. "
+                    "Use documents.inventory, documents.search, documents.read, and "
+                    "documents.read_chunk to verify coverage or retrieve omitted sections. "
+                    "Never claim complete corpus coverage from excerpts alone."
                 )
             
             if role_key == "architect":
@@ -2546,7 +2570,16 @@ class ExecutionEngine:
             llm_messages.append({"role": "system", "content": role_prompt})
             for attachment in context.get("attachments", []):
                 if attachment.get("text") is not None:
-                    llm_messages.append({"role": "user", "content": f"Attached file {attachment['filename']}:\n{attachment['text']}"})
+                    llm_messages.append({
+                        "role": "user",
+                        "content": (
+                            f"Retrieved local content from attached file "
+                            f"{attachment['filename']}:\n"
+                            f"Selection metadata: "
+                            f"{json.dumps(attachment.get('retrieval', {}), ensure_ascii=False)}\n"
+                            f"{attachment['text']}"
+                        ),
+                    })
                 elif attachment.get("image_url"):
                     llm_messages.append({"role": "user", "content": [
                         {"type": "text", "text": f"Attached image: {attachment['filename']}"},

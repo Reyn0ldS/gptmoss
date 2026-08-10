@@ -361,6 +361,24 @@ class LocalDocumentIndex:
                 )
             ]
 
+    def get_chunk(self, chunk_id: str) -> DocumentChunk:
+        with self._lock:
+            try:
+                return self._chunks[chunk_id]
+            except KeyError as exc:
+                raise KeyError(f"Unknown document chunk: {chunk_id}") from exc
+
+    def chunks_for_artifact(self, artifact_id: str) -> list[DocumentChunk]:
+        with self._lock:
+            return sorted(
+                (
+                    chunk
+                    for chunk in self._chunks.values()
+                    if chunk.artifact_id == artifact_id
+                ),
+                key=lambda chunk: (chunk.start_order, chunk.part, chunk.id),
+            )
+
     def _matching_chunks(
         self,
         *,

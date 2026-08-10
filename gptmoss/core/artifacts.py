@@ -240,22 +240,129 @@ class ArtifactStore:
         tail = available - head
         return text[:head] + notice + (text[-tail:] if tail else ""), True
 
+    @staticmethod
+    def _evenly_spaced_chunks(chunks: list[Any], count: int) -> list[Any]:
+        if count >= len(chunks):
+            return list(chunks)
+        if count <= 1:
+            return [chunks[len(chunks) // 2]]
+        indices = {
+            round(index * (len(chunks) - 1) / (count - 1))
+            for index in range(count)
+        }
+        return [chunks[index] for index in sorted(indices)]
+
+    @staticmethod
+    def _render_context_chunk(chunk: Any) -> str:
+        section = " / ".join(chunk.heading_path) or "(root)"
+        return (
+            f"[Local source: {chunk.filename} | section: {section} | "
+            f"blocks: {chunk.start_order}-{chunk.end_order} | chunk: {chunk.id}]\n"
+            f"{chunk.text}"
+        )
+
     def context_items(
         self,
         artifact_ids: List[str],
         supports_vision: bool = False,
         max_text_chars: int | None = None,
+        query: str = "",
     ) -> List[Dict[str, Any]]:
         items = []
         text_limit = self.max_text_chars if max_text_chars is None else max(0, int(max_text_chars))
-        for artifact_id in artifact_ids:
-            metadata = self.get(artifact_id)
+        metadata_items = [self.get(artifact_id) for artifact_id in artifact_ids]
+        document_ids = [
+            metadata["id"]
+            for metadata in metadata_items
+            if metadata["content_type"] in self.DOCUMENT_TYPES
+        ]
+        per_document_limit = 0
+        if text_limit and document_ids:
+            per_document_limit = max(128, text_limit // len(document_ids))
+
+        ranked_by_artifact: Dict[str, List[Dict[str, Any]]] = {}
+        if query.strip() and document_ids:
+            ranked = self.search_documents(
+                query,
+                limit=max(8, min(100, len(document_ids) * 8)),
+                artifact_ids=document_ids,
+            )
+            for result in ranked:
+                ranked_by_artifact.setdefault(result["artifact_id"], []).append(result)
+
+        for metadata in metadata_items:
+            artifact_id = metadata["id"]
             path = Path(metadata["path"])
             item = {key: metadata[key] for key in ("id", "filename", "content_type", "size_bytes", "sha256")}
             if metadata["content_type"] in self.DOCUMENT_TYPES:
                 document = self.document(artifact_id)
                 full_text = document.to_markdown()
-                item["text"], item["text_compacted"] = self._context_text(full_text, text_limit)
+                chunks = self.document_index.chunks_for_artifact(artifact_id)
+                selected_chunks: list[Any] = []
+                ranked_results = ranked_by_artifact.get(artifact_id, [])
+                if ranked_results:
+                    selected_chunks = [
+                        self.document_index.get_chunk(result["id"])
+                        for result in ranked_results
+                    ]
+                elif per_document_limit and len(full_text) > per_document_limit:
+                    estimated_count = max(1, per_document_limit // 1_800)
+                    selected_chunks = self._evenly_spaced_chunks(
+                        chunks,
+                        min(len(chunks), estimated_count),
+                    )
+
+                if selected_chunks and (query.strip() or per_document_limit):
+                    if per_document_limit:
+                        maximum_selected = max(1, per_document_limit // 700)
+                        selected_chunks = selected_chunks[:maximum_selected]
+                        chunk_allowance = max(
+                            128,
+                            per_document_limit // len(selected_chunks),
+                        )
+                    else:
+                        chunk_allowance = 0
+                    rendered: list[str] = []
+                    used = 0
+                    selected_ids: list[str] = []
+                    for chunk in selected_chunks:
+                        value = self._render_context_chunk(chunk)
+                        if per_document_limit:
+                            remaining = per_document_limit - used
+                            if remaining <= 0:
+                                break
+                            allowance = min(remaining, chunk_allowance)
+                            if len(value) > allowance:
+                                value, _ = self._context_text(value, allowance)
+                        if value:
+                            rendered.append(value)
+                            selected_ids.append(chunk.id)
+                            used += len(value) + 2
+                    item["text"] = "\n\n".join(rendered)
+                    item["text_compacted"] = len(selected_ids) < len(chunks)
+                    item["retrieval"] = {
+                        "query": query.strip(),
+                        "selected_chunk_ids": selected_ids,
+                        "selected_chunk_count": len(selected_ids),
+                        "total_chunk_count": len(chunks),
+                        "strategy": (
+                            "ranked_local_search"
+                            if ranked_results
+                            else "even_structural_sampling"
+                        ),
+                    }
+                else:
+                    item["text"], item["text_compacted"] = self._context_text(
+                        full_text,
+                        per_document_limit,
+                    )
+                    item["retrieval"] = {
+                        "query": query.strip(),
+                        "selected_chunk_ids": [chunk.id for chunk in chunks],
+                        "selected_chunk_count": len(chunks),
+                        "total_chunk_count": len(chunks),
+                        "strategy": "complete_document",
+                    }
                 item["text_total_chars"] = len(full_text)
                 item["document"] = {
                     "id": document.id,
