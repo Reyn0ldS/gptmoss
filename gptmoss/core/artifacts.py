@@ -11,6 +11,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, List
 
+from gptmoss.core.corpus import LocalDocumentIndex
 from gptmoss.core.documents import (
     NormalizedDocument,
     SUPPORTED_DOCUMENT_TYPES,
@@ -29,6 +30,10 @@ class ArtifactStore:
         self.max_bytes = max(0, int(max_bytes))
         self.max_text_chars = max(0, int(max_text_chars))
         self.root.mkdir(parents=True, exist_ok=True)
+        self.document_index = LocalDocumentIndex(
+            self.root / "document-index.json"
+        )
+        self._synchronize_document_index()
 
     def update_limits(self, max_bytes: int = 0, max_text_chars: int = 0) -> None:
         """Use zero to remove the upload ceiling or select text budgets per task."""
@@ -91,17 +96,89 @@ class ArtifactStore:
                         "document_parser_version": document.parser_version,
                     }
                 )
+                metadata["document_chunks"] = self.document_index.add_document(
+                    artifact_id,
+                    document,
+                )
             metadata_path.write_text(
                 json.dumps(metadata, ensure_ascii=False),
                 encoding="utf-8",
             )
             return metadata
         except (OSError, ValueError):
+            self.document_index.remove_document(artifact_id, persist=False)
             path.unlink(missing_ok=True)
             if document_path is not None:
                 document_path.unlink(missing_ok=True)
             metadata_path.unlink(missing_ok=True)
             raise
+
+    def _document_metadata(self) -> list[dict[str, Any]]:
+        records: list[dict[str, Any]] = []
+        for metadata_path in self.root.glob("*.json"):
+            try:
+                metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if (
+                isinstance(metadata, dict)
+                and metadata.get("id")
+                and metadata.get("document_id")
+                and metadata.get("path")
+            ):
+                records.append(metadata)
+        return records
+
+    def _synchronize_document_index(self) -> None:
+        records = self._document_metadata()
+        expected = {
+            str(metadata["id"]): str(metadata["document_id"])
+            for metadata in records
+        }
+        if (
+            not self.document_index.load_error
+            and self.document_index.fingerprints() == expected
+        ):
+            return
+        documents: list[tuple[str, NormalizedDocument]] = []
+        for metadata in records:
+            try:
+                documents.append(
+                    (str(metadata["id"]), self.document(str(metadata["id"])))
+                )
+            except (FileNotFoundError, KeyError, OSError, ValueError):
+                continue
+        self.document_index.rebuild(documents)
+
+    def rebuild_document_index(self) -> dict[str, int]:
+        documents: list[tuple[str, NormalizedDocument]] = []
+        for metadata in self._document_metadata():
+            try:
+                documents.append(
+                    (str(metadata["id"]), self.document(str(metadata["id"])))
+                )
+            except (FileNotFoundError, KeyError, OSError, ValueError):
+                continue
+        return self.document_index.rebuild(documents)
+
+    def search_documents(
+        self,
+        query: str,
+        *,
+        limit: int = 8,
+        artifact_ids: List[str] | None = None,
+        content_types: List[str] | None = None,
+        heading: str | None = None,
+        kinds: List[str] | None = None,
+    ) -> List[Dict[str, Any]]:
+        return self.document_index.search(
+            query,
+            limit=limit,
+            artifact_ids=artifact_ids,
+            content_types=content_types,
+            heading=heading,
+            kinds=kinds,
+        )
 
     def get(self, artifact_id: str) -> Dict[str, Any]:
         if not re.fullmatch(r"[0-9a-f-]{36}", artifact_id):
@@ -140,6 +217,18 @@ class ArtifactStore:
 
     def preview_text(self, artifact_id: str) -> str:
         return self.document(artifact_id).to_markdown()
+
+    def delete(self, artifact_id: str) -> Dict[str, Any]:
+        metadata = self.get(artifact_id)
+        self.document_index.remove_document(artifact_id)
+        Path(metadata["path"]).unlink(missing_ok=True)
+        document_path_value = metadata.get("document_path")
+        if document_path_value:
+            document_path = Path(document_path_value).resolve()
+            if document_path.parent == self.root:
+                document_path.unlink(missing_ok=True)
+        (self.root / f"{artifact_id}.json").unlink(missing_ok=True)
+        return metadata
 
     @staticmethod
     def _context_text(text: str, limit: int) -> tuple[str, bool]:

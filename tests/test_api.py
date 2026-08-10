@@ -538,6 +538,12 @@ def test_gui_management_api_complete_flow(tmp_path):
         item["id"] == docx_metadata["id"] and item["document_title"] == "Dossier API"
         for item in client.get("/artifacts").json()
     )
+    search = client.get("/artifacts/search?q=contenu+extrait")
+    assert search.status_code == 200
+    assert search.json()["index"]["documents"] >= 2
+    assert search.json()["results"][0]["artifact_id"] == docx_metadata["id"]
+    assert search.json()["results"][0]["provenance"][0]["source_name"] == "architecture.docx"
+    assert client.get("/artifacts/search?q=").status_code == 400
 
     skill = {"name": "gui-review", "description": "Review", "instructions": "Review carefully.", "allowed_capabilities": ["filesystem"]}
     assert client.post("/skills", json=skill).status_code == 201
@@ -624,6 +630,7 @@ def test_gui_management_api_complete_flow(tmp_path):
     assert client.delete("/skills/gui-review").status_code == 200
     assert client.delete("/skills/imported-skill").status_code == 200
     assert client.delete(f"/artifacts/{docx_metadata['id']}").status_code == 200
+    assert client.get("/artifacts/search?q=contenu+extrait").json()["results"] == []
     assert client.delete(f"/artifacts/{artifact_id}").status_code == 200
 
 

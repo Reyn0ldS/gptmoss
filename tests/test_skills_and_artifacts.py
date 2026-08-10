@@ -1,5 +1,6 @@
 import base64
 from io import BytesIO
+import json
 from pathlib import Path
 from zipfile import ZIP_DEFLATED, ZipFile
 
@@ -69,6 +70,15 @@ def test_artifact_store_normalizes_docx_and_reuses_cached_structure(tmp_path):
     assert "Les sources restent sur le poste." in store.preview_text(metadata["id"])
     assert context[0]["document"]["block_count"] == 2
     assert context[0]["text_compacted"] is False
+    results = store.search_documents("sources poste")
+    assert results[0]["artifact_id"] == metadata["id"]
+    assert results[0]["provenance"][0]["source_name"] == "requirements.bin"
+
+    reloaded = ArtifactStore(str(tmp_path))
+    assert reloaded.search_documents("sources poste") == results
+    reloaded.delete(metadata["id"])
+    assert reloaded.search_documents("sources poste") == []
+    assert reloaded.document_index.stats()["documents"] == 0
 
 
 def test_artifact_store_removes_failed_document_upload(tmp_path):
@@ -82,6 +92,33 @@ def test_artifact_store_removes_failed_document_upload(tmp_path):
         )
 
     assert list(store.root.iterdir()) == []
+
+
+def test_artifact_store_rebuilds_a_corrupt_persistent_index(tmp_path):
+    store = ArtifactStore(str(tmp_path))
+    metadata = store.save_base64(
+        "requirements.docx",
+        base64.b64encode(_minimal_docx_bytes()).decode("ascii"),
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    )
+    index_path = store.document_index.path
+    index_path.write_text("{corrupt", encoding="utf-8")
+
+    recovered = ArtifactStore(str(tmp_path))
+
+    assert recovered.document_index.load_error == ""
+    assert recovered.search_documents("sources locales")[0]["artifact_id"] == metadata["id"]
+
+
+def test_artifact_store_recovers_an_empty_corrupt_index(tmp_path):
+    store = ArtifactStore(str(tmp_path))
+    store.document_index.path.write_text("{corrupt", encoding="utf-8")
+
+    recovered = ArtifactStore(str(tmp_path))
+
+    assert recovered.document_index.load_error == ""
+    assert recovered.document_index.stats()["documents"] == 0
+    assert json.loads(recovered.document_index.path.read_text(encoding="utf-8"))["version"] == 1
 
 
 @pytest.mark.parametrize(

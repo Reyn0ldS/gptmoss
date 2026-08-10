@@ -1,6 +1,7 @@
 from gptmoss.core.event_bus import Event, EventBus
 from gptmoss.core.state import StateEngine, ExecutionState, ConversationState, AgentState
 from gptmoss.core.context import ContextEngine
+from gptmoss.core.corpus import DocumentChunk, LocalDocumentIndex, chunk_document
 from gptmoss.core.execution import ExecutionEngine
 from gptmoss.core.kernel import RuntimeKernel
 from gptmoss.core.scheduler import Scheduler
@@ -30,6 +31,9 @@ __all__ = [
     "ConversationState",
     "AgentState",
     "ContextEngine",
+    "DocumentChunk",
+    "LocalDocumentIndex",
+    "chunk_document",
     "ExecutionEngine",
     "RuntimeKernel",
     "Scheduler",

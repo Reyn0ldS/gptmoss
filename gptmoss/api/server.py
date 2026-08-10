@@ -364,7 +364,7 @@ async def upload_artifact(req: UploadArtifactRequest):
     public_fields = (
         "id", "filename", "content_type", "size_bytes", "sha256", "created_at",
         "document_title", "document_blocks", "document_parser",
-        "document_parser_version",
+        "document_parser_version", "document_chunks",
     )
     return {key: metadata[key] for key in public_fields if key in metadata}
 
@@ -389,6 +389,7 @@ async def list_artifacts():
                 "id", "filename", "content_type", "size_bytes", "sha256",
                 "created_at", "document_title", "document_blocks",
                 "document_parser", "document_parser_version",
+                "document_chunks",
             )
             items.append(
                 {key: metadata[key] for key in public_fields if key in metadata}
@@ -396,6 +397,35 @@ async def list_artifacts():
         except (OSError, KeyError, json.JSONDecodeError):
             continue
     return sorted(items, key=lambda item: item["created_at"], reverse=True)
+
+@app.get("/artifacts/search")
+async def search_artifacts(
+    q: str,
+    limit: int = 8,
+    artifact_id: Optional[List[str]] = None,
+    content_type: Optional[List[str]] = None,
+    heading: Optional[str] = None,
+    kind: Optional[List[str]] = None,
+):
+    store = _artifact_store()
+    if not store:
+        raise HTTPException(status_code=500, detail="Artifact storage not initialized.")
+    query = q.strip()
+    if not query:
+        raise HTTPException(status_code=400, detail="A non-empty local search query is required.")
+    results = store.search_documents(
+        query,
+        limit=max(1, min(int(limit), 100)),
+        artifact_ids=artifact_id,
+        content_types=content_type,
+        heading=heading,
+        kinds=kind,
+    )
+    return {
+        "query": query,
+        "results": results,
+        "index": store.document_index.stats(),
+    }
 
 @app.get("/artifacts/{artifact_id}/preview")
 async def preview_artifact(artifact_id: str):
@@ -438,14 +468,7 @@ async def delete_artifact(artifact_id: str):
     if not store:
         raise HTTPException(status_code=500, detail="Artifact storage not initialized.")
     try:
-        metadata = store.get(artifact_id)
-        Path(metadata["path"]).unlink(missing_ok=True)
-        document_path_value = metadata.get("document_path")
-        if document_path_value:
-            document_path = Path(document_path_value).resolve()
-            if document_path.parent == store.root:
-                document_path.unlink(missing_ok=True)
-        (store.root / f"{artifact_id}.json").unlink(missing_ok=True)
+        store.delete(artifact_id)
     except (ValueError, FileNotFoundError) as exc:
         raise HTTPException(status_code=404, detail="Artifact not found.") from exc
     return {"status": "deleted"}

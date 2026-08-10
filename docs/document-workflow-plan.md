@@ -125,9 +125,13 @@ Validation exécutée : 31 tests ciblés réussis, 162 tests GPTMOSS réussis, p
 
 ### Phase C — Corpus, cache et recherche locale
 
+État : terminé et validé sur la branche dédiée.
+
 Livrables : segmentation hiérarchique, index persistant reconstruisible, filtres, cache par empreinte/version et diagnostic de couverture.
 
 Validation : corpus multi-format, redémarrage, modification isolée, recherches exactes et thématiques, absence de réseau.
+
+Validation exécutée : recherche du début, du milieu et de la fin, filtres structurels, persistance, invalidation, suppression et reconstruction après corruption ; 170 tests GPTMOSS réussis.
 
 ### Phase D — Connexion aux agents
 
