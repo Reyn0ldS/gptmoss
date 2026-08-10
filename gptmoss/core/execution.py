@@ -2689,6 +2689,7 @@ class ExecutionEngine:
                 "\nAct autonomously inside the project workspace: inspect existing prerequisite artifacts, implement the assignment, "
                 "run relevant checks, diagnose failures, fix root causes, and rerun checks before finishing. Do not merely describe "
                 "what should be done. Do not redo validated dependency work. Never claim an artifact or successful test that you did not create or execute."
+                " Inherited requirements are context for this assignment; they never expand your ownership. Create or edit only the exact Required artifacts and Owned paths above. Do not create sibling-step deliverables, alternate root-level copies, quality reports owned by later reviewers, or extra subprojects."
                 " Do not install dependencies online or create fake dependency packages inside the project."
             )
 

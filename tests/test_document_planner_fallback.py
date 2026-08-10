@@ -46,10 +46,15 @@ def test_document_fallback_preserves_outputs_roles_and_repair_gates():
     analysis = analyze_task_complexity(DOCUMENT_TASK)
     plan = normalize_plan(SimplePlanner._fallback_plan(DOCUMENT_TASK, analysis))
 
-    assert len(plan["steps"]) == 12
+    assert len(plan["steps"]) == 13
     assert plan["steps"][-1]["role"] == "coordinator"
     assert any(step["role"] == "debugger" for step in plan["steps"])
     assert not any(step["role"] == "developer" for step in plan["steps"])
+    assert plan["steps"][10]["role"] == "writer"
+    assert plan["steps"][11]["role"] == "qa"
+    assert plan["steps"][11]["required_artifacts"] == [
+        "analysis/final-delivery-audit.md"
+    ]
     artifacts = {
         artifact
         for step in plan["steps"]
@@ -77,6 +82,29 @@ def test_document_fallback_preserves_outputs_roles_and_repair_gates():
         for row in contract["traceability"]
         if row["mandatory"]
     )
+
+
+def test_document_fallback_keeps_requirement_ownership_bounded():
+    plan = SimplePlanner._fallback_plan(
+        DOCUMENT_TASK, analyze_task_complexity(DOCUMENT_TASK)
+    )
+    requirements = {item["id"]: item["statement"] for item in plan["requirements"]}
+    inventory_statements = [
+        requirements[requirement_id]
+        for requirement_id in plan["steps"][0]["requirement_ids"]
+    ]
+
+    assert any(
+        "inventorier" in statement.casefold()
+        or "documents.inventory" in statement.casefold()
+        for statement in inventory_statements
+    )
+    assert not any("quality-report" in statement for statement in inventory_statements)
+    assert not any("review-report" in statement for statement in inventory_statements)
+    assert not any("evidence-matrix" in statement for statement in inventory_statements)
+    assert {
+        requirement["id"] for requirement in plan["requirements"]
+    } == set(plan["steps"][11]["requirement_ids"])
 
 
 def test_document_fallback_reconstructs_explicit_quality_policy():

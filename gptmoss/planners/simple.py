@@ -8,6 +8,7 @@ from typing import Any, Dict, List
 
 from gptmoss.interfaces.llm import LLMProvider
 from gptmoss.interfaces.planner import PlannerProvider
+from gptmoss.core.delivery import extract_requirements
 
 logger = logging.getLogger("gptmoss.planners.simple")
 
@@ -282,7 +283,7 @@ def _supporting_document_validation_policies(
             lower = path.casefold()
             source_grounded = (
                 lower.startswith("analysis/")
-                and "quality-findings" not in lower
+                and not any(marker in lower for marker in ("quality", "audit"))
             ) or any(marker in lower for marker in (
                 "requirement", "exigence", "evidence", "preuve", "decision", "adr",
             ))
@@ -321,6 +322,70 @@ def _supporting_document_validation_policies(
                 "constraints": constraints,
             })
     return policies
+
+
+def _assign_document_requirements(
+    task: str, steps: List[Dict[str, Any]]
+) -> List[Dict[str, Any]]:
+    """Map document requirements to bounded owners instead of lexical accidents."""
+    requirements = extract_requirements(task)
+    by_id = {int(step["id"]): step for step in steps}
+    producer_ids = [0, 1, 2, 3, 4, 5, 6, 7, 10]
+    for step in steps:
+        step["requirement_ids"] = []
+    for requirement in requirements:
+        statement = str(requirement["statement"]).casefold()
+        targets: List[int]
+        if "crée dans le projet les huit fichiers" in statement or "cree dans le projet les huit fichiers" in statement:
+            targets = [1, 2, 7, 10]
+        elif any(marker in statement for marker in (
+            "requirements-matrix", "evidence-matrix", "matrice", "toutes les exigences",
+        )):
+            targets = [1]
+        elif any(marker in statement for marker in (
+            "decisions-register", "contradiction", "paliers chiffr", "autorité compétente",
+        )):
+            targets = [2]
+        elif any(marker in statement for marker in (
+            "quality-policy", "quality-report", "review-report", "validateur document",
+            "delivery_assurance", "auditeur final",
+        )):
+            targets = [10]
+        elif any(marker in statement for marker in (
+            "inventorier intégralement", "inventorier integralement",
+            "capability documents", "documents.inventory", "recherche puis lis",
+            "pièces jointes locales", "pieces jointes locales",
+        )):
+            targets = [0]
+        elif any(marker in statement for marker in (
+            "sécurité", "securite", "sec-001", "identité", "identite",
+        )):
+            targets = [4]
+        elif any(marker in statement for marker in (
+            "rto", "rpo", "capacité", "capacite", "déploiement", "deploiement",
+            "résilience", "resilience", "observabilité", "observabilite",
+        )):
+            targets = [5]
+        elif any(marker in statement for marker in (
+            "migration", "coexistence", "feuille de route",
+        )):
+            targets = [6]
+        elif "chaque auteur doit relire" in statement:
+            targets = producer_ids
+        elif any(marker in statement for marker in (
+            "fichiers locaux comme sources", "aucune recherche web", "numéros doivent être réels",
+            "numeros doivent etre reels", "aucun placeholder", "aucune url externe",
+        )):
+            targets = [0, 1, 2, 3, 4, 5, 6, 7, 10]
+        else:
+            targets = [7]
+        for target in targets:
+            if target in by_id:
+                by_id[target]["requirement_ids"].append(requirement["id"])
+        # The final independent reviewer validates every user requirement.
+        if 11 in by_id:
+            by_id[11]["requirement_ids"].append(requirement["id"])
+    return requirements
 
 
 def _step(step_id: int, role: str, specialist: str, description: str,
@@ -534,19 +599,27 @@ class SimplePlanner(PlannerProvider):
                 [], ["All critical findings are corrected or explicitly escalated with a truthful reason."],
             ),
             _step(
-                10, "qa", "Final Deterministic Delivery Reviewer",
-                "Revalidate the corrected files against the frozen document policy and full requirement set. Produce the requested policy, machine-readable quality report, readable synthesis, and independent review using the actual final content.",
-                [9], ["deterministic validation", "acceptance audit", "residual risk"],
+                10, "writer", "Quality Evidence & Review Editor",
+                "Produce the requested frozen policy, machine-readable quality report, readable synthesis, and review report from the corrected files and actual independent findings. Never claim a passing result that the evidence does not support.",
+                [9], ["quality evidence", "professional reporting", "residual risk"],
                 [*quality, *review] or ["quality-policy.json", "quality-report.json", "quality-report.md", "review-report.md"],
-                ["The final report is truthful, all mandatory files exist, and the primary document passes its declared document validator."],
+                ["The reports are truthful, internally consistent, and derived from the actual final files and independent findings."],
             ),
             _step(
-                11, "coordinator", "Final Requirement Traceability Auditor",
+                11, "qa", "Final Deterministic Delivery Reviewer",
+                "Independently inspect every final requested file, rerun the declared document policy conceptually against actual content, compare the JSON and Markdown quality reports, and record exact pass/fail evidence without editing author-owned outputs.",
+                [10], ["deterministic validation", "acceptance audit", "residual risk"],
+                ["analysis/final-delivery-audit.md"],
+                ["Every mandatory file, policy result, traceability claim, contradiction, and residual risk is independently checked."],
+            ),
+            _step(
+                12, "coordinator", "Final Requirement Traceability Auditor",
                 "Audit every user requirement against the final files, local evidence, declared artifact validator, repair history, and residual risks; do not claim completion while a mandatory gap or critical validation failure remains.",
-                [8, 9, 10], ["delivery assurance", "traceability", "evidence-based completion"],
+                [8, 9, 10, 11], ["delivery assurance", "traceability", "evidence-based completion"],
                 [], ["Every mandatory requirement has final implementation and independent validation evidence."],
             ),
         ]
+        requirements = _assign_document_requirements(task, steps)
         return {
             "analysis": {
                 **analysis,
@@ -557,6 +630,7 @@ class SimplePlanner(PlannerProvider):
             "interfaces": [],
             "external_tools": [],
             "execution_routines": [],
+            "requirements": requirements,
             "artifact_validations": [
                 _document_validation_policy(task, outputs, primary),
                 *_supporting_document_validation_policies(task, steps, primary),

@@ -129,9 +129,12 @@ fichier local
   -> index lexical persistant local
   -> recherche et sélection adaptative
   -> agents d'analyse, architecture et rédaction
-  -> validation déterministe
-  -> livrable Markdown et rapports qualité
+  -> constats QA, réparation et rapports qualité
+  -> audit déterministe indépendant
+  -> livrable Markdown et assurance finale
 ```
+
+Le fallback professionnel utilise treize étapes bornées. La production de la politique et des rapports qualité appartient à un rédacteur de preuves après réparation ; un QA distinct crée ensuite `analysis/final-delivery-audit.md` sans modifier les sorties des auteurs, puis le coordinateur contrôle toute la traçabilité. Les exigences complètes transmises à un spécialiste restent limitées à sa nature de travail et ne l'autorisent jamais à écrire les livrables des étapes sœurs.
 
 L'index est lexical, accent-insensible et sans modèle à télécharger. Il est enregistré dans `workspace/uploads/document-index.json`, rechargé au redémarrage et reconstruit automatiquement si son état ne correspond plus aux documents. La représentation normalisée de chaque fichier évite de reparcourir l'archive à chaque lecture.
 
