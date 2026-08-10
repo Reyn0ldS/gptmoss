@@ -65,6 +65,15 @@ def test_shell_safe_mode_blocks_destructive_command(tmp_path):
     assert "blocked by shell safe mode" in shell.execute("shutdown /s")
 
 
+def test_shell_safe_mode_allows_shutdown_word_inside_python_output(tmp_path):
+    shell = ShellCapability(str(tmp_path))
+
+    result = shell.execute('python -c "print(\'Shutdown called\')"')
+
+    assert "EXIT_CODE: 0" in result
+    assert "Shutdown called" in result
+
+
 @pytest.mark.parametrize(
     "command",
     [

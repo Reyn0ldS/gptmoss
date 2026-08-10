@@ -110,10 +110,21 @@ class ShellCapability:
                 "termination by name can stop the runtime or unrelated work."
             )
         destructive_patterns = (
-            "rm -rf /", "del /s", "format ", "diskpart", "shutdown ",
-            "reboot", "reg delete", "remove-item -recurse", "clear-disk",
+            "rm -rf /", "del /s", "format ", "diskpart",
+            "reg delete", "remove-item -recurse", "clear-disk",
         )
-        if any(pattern in normalized for pattern in destructive_patterns):
+        power_control = (
+            re.search(
+                r"(?:^|[;&|]\s*)shutdown(?:\.exe)?\s+"
+                r"(?:now\b|(?:/|--?)[a-z])",
+                normalized,
+            )
+            or re.search(
+                r"(?:^|[;&|]\s*)reboot(?:\.exe)?(?:\s|$)",
+                normalized,
+            )
+        )
+        if power_control or any(pattern in normalized for pattern in destructive_patterns):
             return "Command blocked by shell safe mode because it is destructive."
         return None
 
