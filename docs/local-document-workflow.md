@@ -137,6 +137,8 @@ L'index est lexical, accent-insensible et sans modèle à télécharger. Il est 
 
 Quand le corpus dépasse la fenêtre du modèle, GPTMOSS n'injecte pas simplement le début du premier fichier. Il recherche les passages liés à la tâche, conserve leurs titres, diversifie les sources et, sans requête assez discriminante, échantillonne le début, le milieu et la fin. Les agents peuvent ensuite paginer et relire les chunks par les actions `documents.inventory`, `documents.search`, `documents.read` et `documents.read_chunk`.
 
+Si le fournisseur renvoie un plan invalide ou trop petit, le fallback déterministe reconnaît une mission documentaire à partir des formats, pièces jointes, actions `documents` et objectifs de rédaction. Il conserve les noms de livrables explicitement listés, reconstruit la politique `document`, sépare analyse du corpus, exigences, décisions, architecture, sécurité, SRE, migration, rédaction, QA, réparation et audit final. Un nom comme `vision.pptx` ou le verbe « porter » dans « porter une référence » n'est pas interprété comme un projet de computer vision ou de vêtement numérique.
+
 Avec `adaptive_resource_management=true`, `max_context_chars` est un plancher de départ. Les limites `max_upload_bytes=0` et `max_attachment_text_chars=0` retirent les anciens plafonds applicatifs fixes ; les ressources réelles de la machine, du serveur HTTP et du modèle ainsi que les protections d'archive continuent naturellement de s'appliquer.
 
 ## Provenance attendue

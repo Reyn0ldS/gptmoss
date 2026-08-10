@@ -192,6 +192,8 @@ Le livrable minimal comprendra synthèse exécutive, contexte, exigences, archit
 
 Le test est accepté seulement si GPTMOSS exécute le workflow complet, couvre les exigences prioritaires, conserve la provenance, ne s'appuie sur aucun lien distant et passe la revue finale.
 
+Journal de qualification en cours : la première planification LLM a été rejetée à juste titre car elle omettait la réparation autonome et l'audit final. Le fallback antérieur a toutefois transformé à tort la mission documentaire en projet logiciel générique. L'exécution a été annulée avant création d'artefact. Le fallback corrigé détecte maintenant le type de livraison, préserve les huit fichiers demandés, reconstruit 17 titres, 48 identifiants source, quatre inventaires bornés et les seuils qualité. Il distingue aussi une QA documentaire d'une livraison logicielle. Rejeu déterministe du texte exact : 12 spécialistes, 27 exigences utilisateur toutes mappées, aucun périmètre réduit ; 62 tests ciblés et 193 tests complets réussis. Le test réel doit être relancé sur ce jalon poussé.
+
 ## 5. Boucle de validation et stratégie Git
 
 Pour chaque incrément :
