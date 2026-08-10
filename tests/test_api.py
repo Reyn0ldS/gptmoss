@@ -55,6 +55,14 @@ def test_resume_failed_root_requeues_failed_step_without_resuming_child():
     root.status = "failed"
     root.variables["task"] = "Repair the project"
     root.results["error"] = "repair child was cancelled"
+    root.variables["step_runtime"] = {
+        "1": {
+            "iterations": 52,
+            "stagnant_iterations": 52,
+            "stagnation_nudge_level": 2,
+        },
+        "2": {"iterations": 3, "stagnant_iterations": 1},
+    }
     root.current_plan = {"steps": [
         {"id": 0, "status": "completed"},
         {
@@ -75,6 +83,8 @@ def test_resume_failed_root_requeues_failed_step_without_resuming_child():
     assert root.current_plan["steps"][1]["status"] == "pending"
     assert "assigned_execution_id" not in root.current_plan["steps"][1]
     assert root.current_plan["steps"][1]["manual_retry_count"] == 1
+    assert "1" not in root.variables["step_runtime"]
+    assert root.variables["step_runtime"]["2"]["iterations"] == 3
     assert child.status == "cancelled"
     assert "error" not in root.results
     engine.execute_task.assert_called_once_with("failed-root", "Repair the project")

@@ -787,6 +787,13 @@ async def resume_execution(execution_id: str):
             failed_step["manual_retry_count"] = int(
                 failed_step.get("manual_retry_count", 0)
             ) + 1
+            # A failed loop may have exhausted its persisted iteration or
+            # stagnation budget.  Manual resume is an explicit fresh attempt,
+            # so carrying that runtime forward would fail again immediately
+            # before the model can make progress.
+            step_runtime = state.variables.get("step_runtime")
+            if isinstance(step_runtime, dict):
+                step_runtime.pop(str(failed_step.get("id")), None)
         state.results.pop("error", None)
         state.variables["manual_failure_resumes"] = int(
             state.variables.get("manual_failure_resumes", 0)
