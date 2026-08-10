@@ -663,6 +663,50 @@ def test_inherited_software_validation_commands_do_not_block_architecture(tmp_pa
     assert not any("pytest" in issue for issue in issues)
 
 
+def test_custom_delegated_role_requires_own_validation_and_durable_edit(tmp_path):
+    engine, state = _engine(tmp_path, MockLLMProvider())
+    execution = state.get_execution("custom-fixer")
+    execution.variables["parent_execution_id"] = "root"
+    delimiter = chr(96)
+    execution.current_plan = {
+        "requirements": [
+            {"id": "REQ-EDIT", "statement": "Edit ONLY src/fix.py", "mandatory": True},
+            {
+                "id": "REQ-TEST",
+                "statement": (
+                    "Then run exactly " + delimiter
+                    + "python -m pytest -q tests/test_fix.py" + delimiter
+                ),
+                "mandatory": True,
+            },
+        ],
+        "steps": [],
+    }
+    step = {"description": "Apply the smallest concrete correction"}
+
+    initial = " ".join(engine._step_completion_issues("custom-fixer", step, "done"))
+    assert "durable filesystem mutation" in initial
+    assert "python -m pytest -q tests/test_fix.py" in initial
+
+    engine._record_tool_result(
+        "custom-fixer", "filesystem", "write",
+        {"path": "src/fix.py", "content": "fixed = True\n"},
+        "Wrote 13 bytes to src/fix.py",
+    )
+    after_write = " ".join(
+        engine._step_completion_issues("custom-fixer", step, "done")
+    )
+    assert "durable filesystem mutation" not in after_write
+    assert "python -m pytest -q tests/test_fix.py" in after_write
+
+    engine._record_tool_result(
+        "custom-fixer", "shell", "execute",
+        {"command": "python -m pytest -q tests/test_fix.py"},
+        "EXIT_CODE: 0\n",
+    )
+    assert engine._step_completion_issues("custom-fixer", step, "done") == []
+
+
 @pytest.mark.asyncio
 async def test_stall_rescue_generates_missing_text_artifact_in_clean_context(tmp_path):
     llm = MockLLMProvider()

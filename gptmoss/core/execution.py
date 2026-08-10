@@ -221,6 +221,32 @@ def requirement_validation_commands(requirements: Any) -> List[str]:
     return commands
 
 
+def requirements_request_mutation(requirements: Any) -> bool:
+    """Return whether the assignment explicitly asks for a durable edit."""
+    if not isinstance(requirements, list):
+        return False
+    explicit_filesystem_edit = re.compile(
+        r"(?i)\buse\s+(?:the\s+)?filesystem\s+(?:write|edit)\b"
+    )
+    direct_file_edit = re.compile(
+        r"(?i)^\s*(?:please\s+)?(?:edit|modify|write|create|fix|repair|update|"
+        r"delete|remove)\b[^\r\n]*(?:[A-Za-z0-9_.-]+[\\/])+[A-Za-z0-9_.-]+"
+    )
+    for requirement in requirements:
+        if not isinstance(requirement, dict):
+            continue
+        texts = [str(requirement.get("statement") or "")]
+        acceptance = requirement.get("acceptance")
+        if isinstance(acceptance, list):
+            texts.extend(str(item) for item in acceptance)
+        if any(
+            explicit_filesystem_edit.search(text) or direct_file_edit.search(text)
+            for text in texts
+        ):
+            return True
+    return False
+
+
 logger = logging.getLogger("gptmoss.execution")
 
 
@@ -660,16 +686,18 @@ class ExecutionEngine:
             except (OSError, PermissionError, ValueError):
                 files = []
 
-        history = self.state_engine.get_execution(execution_id).variables.get("tool_call_history", [])
+        execution_state = self.state_engine.get_execution(execution_id)
+        history = execution_state.variables.get("tool_call_history", [])
         role_key = (
             canonical_step_role(step.get("role"))
             or infer_step_role(step.get("description", ""))
         )
+        current_commands = requirement_validation_commands(
+            (execution_state.current_plan or {}).get("requirements", [])
+        )
         inherited_commands = (
             requirement_validation_commands(
-                self.state_engine.get_execution(execution_id).variables.get(
-                    "inherited_requirements", []
-                )
+                execution_state.variables.get("inherited_requirements", [])
             )
             if role_key in {"developer", "qa", "debugger", "coordinator"}
             else []
@@ -679,7 +707,7 @@ class ExecutionEngine:
             if str(command).strip()
         ]
         declared_commands.extend(
-            command for command in inherited_commands
+            command for command in [*current_commands, *inherited_commands]
             if command not in declared_commands
         )
         successful_commands = sorted({
@@ -1119,6 +1147,11 @@ class ExecutionEngine:
     def _step_completion_issues(self, execution_id: str, step: Dict[str, Any], response: str) -> List[str]:
         """Evaluate machine-checkable delivery gates before accepting prose as completion."""
         issues = []
+        execution_state = self.state_engine.get_execution(execution_id)
+        current_requirements = (
+            (execution_state.current_plan or {}).get("requirements", [])
+        )
+        history = execution_state.variables.get("tool_call_history", [])
         quality_contract = bool(
             step.get("specialist") or step.get("required_artifacts")
             or step.get("acceptance_criteria") or step.get("verification_commands")
@@ -1145,17 +1178,42 @@ class ExecutionEngine:
             str(command).strip() for command in step.get("verification_commands", [])
             if str(command).strip()
         ]
+        required_commands.extend(
+            command for command in requirement_validation_commands(current_requirements)
+            if command not in required_commands
+        )
         if role_key in {"developer", "qa", "debugger", "coordinator"}:
             required_commands.extend(
                 command for command in requirement_validation_commands(
-                    self.state_engine.get_execution(execution_id).variables.get(
-                        "inherited_requirements", []
-                    )
+                    execution_state.variables.get("inherited_requirements", [])
                 )
                 if command not in required_commands
             )
+        if (
+            execution_state.variables.get("parent_execution_id")
+            and requirements_request_mutation(current_requirements)
+        ):
+            durable_mutation = any(
+                (
+                    item.get("capability") == "filesystem"
+                    and item.get("action") in {"write", "delete"}
+                    and "Error" not in str(item.get("result") or "")
+                )
+                or (
+                    item.get("capability") == "shell"
+                    and item.get("action") == "execute"
+                    and "EXIT_CODE: 0" in str(item.get("result") or "")
+                    and self._shell_mutation_paths(
+                        str(item.get("arguments", {}).get("command") or "")
+                    )
+                )
+                for item in history
+            )
+            if not durable_mutation:
+                issues.append(
+                    "make at least one durable filesystem mutation required by the assignment"
+                )
         if required_commands:
-            history = self.state_engine.get_execution(execution_id).variables.get("tool_call_history", [])
             missing_commands = []
             for command in required_commands:
                 matched = any(
