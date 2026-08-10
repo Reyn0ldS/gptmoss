@@ -141,6 +141,42 @@ def test_document_validator_accepts_french_bounded_locator_terms(tmp_path):
     assert report["valid"], json.dumps(report, indent=2)
 
 
+def test_document_validator_requires_union_of_full_source_inventory(tmp_path):
+    document = tmp_path / "inventory.md"
+    document.write_text(
+        "# Inventaire\n\n"
+        "Couverture partielle. [requirements.docx > Exigences > blocs 1-8]\n\n"
+        "Vision complète. [vision.pptx > Présentation > diapositives 1-4]\n",
+        encoding="utf-8",
+    )
+    constraints = {
+        "source_inventory": POLICY["source_inventory"],
+        "required_source_files": ["requirements.docx", "vision.pptx"],
+        "require_bounded_references": True,
+        "require_source_coverage": True,
+    }
+
+    rejected = validate_artifact(
+        document, validator="document", constraints=constraints
+    )
+    document.write_text(
+        document.read_text(encoding="utf-8").replace(
+            "blocs 1-8", "blocs 1-12"
+        ),
+        encoding="utf-8",
+    )
+    accepted = validate_artifact(
+        document, validator="document", constraints=constraints
+    )
+
+    assert not rejected["valid"]
+    assert any("incomplete source coverage" in item for item in rejected["failures"])
+    assert rejected["metrics"]["source_units_covered"] == 12
+    assert rejected["metrics"]["source_units_total"] == 16
+    assert accepted["valid"], json.dumps(accepted, indent=2)
+    assert accepted["metrics"]["source_units_covered"] == 16
+
+
 def test_requirement_coverage_uses_complete_identifiers(tmp_path):
     document = tmp_path / "near-match.md"
     document.write_text(

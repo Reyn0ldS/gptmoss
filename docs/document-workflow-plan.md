@@ -200,6 +200,8 @@ Le redémarrage suivant a montré avant la première étape qu'un score encore r
 
 L'essai UTF-8 propre a ensuite produit un inventaire réellement fondé sur les quatre sources, mais a révélé deux défauts : le validateur ne reconnaissait que `block/blocks` alors que le rédacteur français employait `bloc/blocs`, et le spécialiste déclarait le PPTX entièrement lu après seulement 12 blocs sur 24, en confondant diapositives et blocs normalisés. Les locators français sont désormais reconnus avec les mêmes contrôles de bornes. Surtout, toute étape promettant un inventaire complet doit prouver dans son historique `documents.read` la couverture de chaque ordre de bloc de chaque pièce jointe. Validation : 50 tests ciblés, rejeu positif des 76 références du fichier réel et 200 tests complets réussis. Après redémarrage, le même essai doit rester bloqué jusqu'à la lecture des blocs PPTX 13 à 24.
 
+La reprise a confirmé le gate : le moteur a indiqué exactement les blocs PPTX 13 à 24, le spécialiste les a lus et le handoff machine est devenu admissible. La supervision humaine a toutefois détecté que le fichier d'inventaire conservait des sous-plages de références incomplètes et plusieurs bornes décalées. La politique d'inventaire impose maintenant `require_source_coverage` : l'union des plages référencées doit couvrir chaque bloc ou diapositive du `source_inventory`, indépendamment de la preuve de lecture. Sur le fichier réel, le contrôle refuse 109 unités couvertes sur 162 et énumère les 53 unités absentes. Validation : 16 tests ciblés et 201 tests complets réussis. L'étape dépendante a été suspendue avant production et devra reprendre après correction de l'inventaire.
+
 ## 5. Boucle de validation et stratégie Git
 
 Pour chaque incrément :

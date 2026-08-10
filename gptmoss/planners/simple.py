@@ -307,6 +307,8 @@ def _supporting_document_validation_policies(
                 constraints["minimums"]["local_references"] = max(
                     4, len(inventory)
                 )
+                if "corpus-inventory" in lower:
+                    constraints["require_source_coverage"] = True
             if identifiers and any(marker in lower for marker in (
                 "requirement", "exigence", "evidence", "preuve",
             )):

@@ -152,6 +152,23 @@ def _is_safe_local_source(value: str) -> bool:
     )
 
 
+def _locator_range(locator: str) -> Tuple[str, int, int] | None:
+    block_match = re.search(
+        r"(?i)\bbloc(?:k)?s?\s+(\d+)(?:\s*[-–]\s*(\d+))?", locator
+    )
+    if block_match:
+        start = int(block_match.group(1))
+        return "blocks", start, int(block_match.group(2) or start)
+    slide_match = re.search(
+        r"(?i)\b(?:slide|diapositive)s?\s+(\d+)(?:\s*[-–]\s*(\d+))?",
+        locator,
+    )
+    if slide_match:
+        start = int(slide_match.group(1))
+        return "slides", start, int(slide_match.group(2) or start)
+    return None
+
+
 def _validate_reference_locator(
     source: str,
     locator: str,
@@ -165,24 +182,16 @@ def _validate_reference_locator(
         details = {"blocks": details}
     if not isinstance(details, dict):
         raise TypeError("source_inventory values must be integers or objects")
-    block_match = re.search(
-        r"(?i)\bbloc(?:k)?s?\s+(\d+)(?:\s*[-–]\s*(\d+))?", locator
-    )
-    slide_match = re.search(r"(?i)\b(?:slide|diapositive)s?\s+(\d+)", locator)
-    if require_bounds and not (block_match or slide_match):
+    span = _locator_range(locator)
+    if require_bounds and not span:
         return f"reference to {source!r} lacks a block or slide locator"
-    if block_match and "blocks" not in details:
-        return f"reference to {source!r} uses blocks but its inventory has no block count"
-    if slide_match and "slides" not in details:
-        return f"reference to {source!r} uses slides but its inventory has no slide count"
-    if block_match and "blocks" in details:
-        last = int(block_match.group(2) or block_match.group(1))
-        if last < 1 or last > int(details["blocks"]):
-            return f"reference to {source!r} uses an out-of-range block {last}"
-    if slide_match and "slides" in details:
-        slide = int(slide_match.group(1))
-        if slide < 1 or slide > int(details["slides"]):
-            return f"reference to {source!r} uses an out-of-range slide {slide}"
+    if span:
+        unit, start, last = span
+        if unit not in details:
+            return f"reference to {source!r} uses {unit} but its inventory has no {unit} count"
+        if start < 1 or last < start or last > int(details[unit]):
+            singular = "block" if unit == "blocks" else "slide"
+            return f"reference to {source!r} uses an out-of-range {singular} {last}"
     return None
 
 
@@ -338,6 +347,45 @@ def validate_document(path: Path, constraints: Dict[str, Any]) -> ValidationRepo
     if constraints.get("require_local_references") and not references:
         _failure(report, "document contains no local source reference")
 
+    source_units_covered = 0
+    source_units_total = 0
+    if constraints.get("require_source_coverage"):
+        coverage_failures = []
+        references_by_source: Dict[str, List[Dict[str, str]]] = {}
+        for reference in references:
+            references_by_source.setdefault(
+                _normalize_source(reference["source"]), []
+            ).append(reference)
+        for source, details in inventory.items():
+            if isinstance(details, int):
+                details = {"blocks": details}
+            if not isinstance(details, dict):
+                continue
+            unit = "slides" if "slides" in details else "blocks"
+            total = int(details.get(unit) or 0)
+            expected = set(range(1, total + 1))
+            covered = set()
+            for reference in references_by_source.get(source, []):
+                span = _locator_range(reference["locator"])
+                if not span or span[0] != unit:
+                    continue
+                covered.update(range(span[1], span[2] + 1))
+            missing_units = sorted(expected - covered)
+            source_units_covered += len(expected & covered)
+            source_units_total += len(expected)
+            if missing_units:
+                display = ", ".join(str(value) for value in missing_units[:20])
+                if len(missing_units) > 20:
+                    display += f", and {len(missing_units) - 20} more"
+                coverage_failures.append(
+                    f"{source} is missing referenced {unit}: {display}"
+                )
+        if coverage_failures:
+            _failure(
+                report,
+                "incomplete source coverage: " + "; ".join(coverage_failures[:10]),
+            )
+
     unsupported_claims = []
     if constraints.get("require_claim_references"):
         for paragraph in paragraphs:
@@ -391,6 +439,8 @@ def validate_document(path: Path, constraints: Dict[str, Any]) -> ValidationRepo
         "traceability_ids_total": len(traceability_ids),
         "required_sources_cited": len(required_sources) - len(missing_sources),
         "required_sources_total": len(required_sources),
+        "source_units_covered": source_units_covered,
+        "source_units_total": source_units_total,
     }
     report["metrics"] = metrics
     for metric, minimum in (constraints.get("minimums") or {}).items():

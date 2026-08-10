@@ -125,6 +125,7 @@ def test_document_fallback_validates_intermediate_and_supporting_outputs():
         "requirements.docx", "vision.pptx", "decisions.txt", "existing.html"
     ]
     assert inventory_constraints["require_bounded_references"] is True
+    assert inventory_constraints["require_source_coverage"] is True
     matrix_constraints = policies["requirements-matrix.md"]["constraints"]
     assert matrix_constraints["required_requirement_ids"] == [
         "BR-001", "BR-002", "FR-001", "FR-002", "FR-003",
