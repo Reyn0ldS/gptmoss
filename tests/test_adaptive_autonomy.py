@@ -663,6 +663,36 @@ def test_inherited_software_validation_commands_do_not_block_architecture(tmp_pa
     assert not any("pytest" in issue for issue in issues)
 
 
+def test_current_task_validation_commands_do_not_block_architecture(tmp_path):
+    engine, state = _engine(tmp_path, MockLLMProvider())
+    execution = state.get_execution("current-architect-verify")
+    delimiter = chr(96)
+    execution.current_plan = {
+        "requirements": [{
+            "id": "REQ-TEST",
+            "statement": (
+                "Final software must pass " + delimiter
+                + "python -m pytest -q tests/test_api.py" + delimiter + "."
+            ),
+            "mandatory": True,
+        }],
+        "steps": [],
+    }
+    step = {
+        "role": "architect",
+        "description": "Analyze requirements before implementation",
+        "acceptance_criteria": ["Requirements are testable"],
+        "verification_commands": [],
+    }
+    response = '{"summary":"designed","artifacts":[],"evidence":[],"risks":[],"next_action":""}'
+
+    issues = engine._step_completion_issues(
+        "current-architect-verify", step, response
+    )
+
+    assert not any("pytest" in issue for issue in issues)
+
+
 def test_custom_delegated_role_requires_own_validation_and_durable_edit(tmp_path):
     engine, state = _engine(tmp_path, MockLLMProvider())
     execution = state.get_execution("custom-fixer")

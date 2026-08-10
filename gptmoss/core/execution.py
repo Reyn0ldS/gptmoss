@@ -1178,10 +1178,15 @@ class ExecutionEngine:
             str(command).strip() for command in step.get("verification_commands", [])
             if str(command).strip()
         ]
-        required_commands.extend(
-            command for command in requirement_validation_commands(current_requirements)
-            if command not in required_commands
-        )
+        # Task-level acceptance commands belong to implementation and
+        # validation work.  Planning, security, and documentation specialists
+        # must not be forced to make a knowingly failing final suite pass
+        # before the dependent implementation steps have even started.
+        if role_key in {None, "developer", "qa", "debugger", "coordinator"}:
+            required_commands.extend(
+                command for command in requirement_validation_commands(current_requirements)
+                if command not in required_commands
+            )
         if role_key in {"developer", "qa", "debugger", "coordinator"}:
             required_commands.extend(
                 command for command in requirement_validation_commands(
