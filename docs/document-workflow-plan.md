@@ -105,9 +105,13 @@ Trois workflows réutilisables sont prévus : analyse de corpus, rédaction prof
 
 ### Phase A — Socle documentaire
 
+État : terminé et validé sur la branche dédiée.
+
 Livrables : modèle normalisé, registre, détection par contenu, parseurs TXT/HTML/DOCX/PPTX, sérialisation déterministe et rendu Markdown.
 
 Validation : ordre, Unicode, tableaux, titres, diapositives, fichiers trompeurs, URL refusées et archives dangereuses.
+
+Validation exécutée : 12 tests documentaires ciblés et 160 tests GPTMOSS au total réussis avec le runtime Python portable.
 
 ### Phase B — Intégration des artefacts
 
