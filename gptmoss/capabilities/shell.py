@@ -99,6 +99,16 @@ class ShellCapability:
         if not self.safe_mode:
             return None
         normalized = command.lower().replace("\\", "/")
+        broad_process_termination = (
+            re.search(r"(?:^|[\s&|])taskkill\b[^\r\n]*(?:/im\s+|\*)", normalized)
+            or re.search(r"(?:^|[\s&|])stop-process\b[^\r\n]*-name\b", normalized)
+            or re.search(r"(?:^|[\s&|])(?:pkill|killall)\b", normalized)
+        )
+        if broad_process_termination:
+            return (
+                "Command blocked by shell safe mode because process-wide "
+                "termination by name can stop the runtime or unrelated work."
+            )
         destructive_patterns = (
             "rm -rf /", "del /s", "format ", "diskpart", "shutdown ",
             "reboot", "reg delete", "remove-item -recurse", "clear-disk",

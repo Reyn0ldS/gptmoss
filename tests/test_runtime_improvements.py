@@ -65,6 +65,23 @@ def test_shell_safe_mode_blocks_destructive_command(tmp_path):
     assert "blocked by shell safe mode" in shell.execute("shutdown /s")
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        "taskkill /f /im python.exe",
+        "Stop-Process -Name python -Force",
+        "pkill python",
+        "killall python",
+    ],
+)
+def test_shell_safe_mode_blocks_process_wide_termination(command, tmp_path):
+    shell = ShellCapability(str(tmp_path))
+
+    result = shell.execute(command)
+
+    assert "process-wide termination by name" in result
+
+
 def test_shell_removes_terminal_pagers_that_would_block_hidden_execution():
     assert ShellCapability._without_interactive_pager("git log | more") == "git log"
     assert ShellCapability._without_interactive_pager("type report.txt | less -R") == "type report.txt"
