@@ -1251,7 +1251,24 @@ class ExecutionEngine:
         """Detect converged work even when a model keeps calling tools or formats its finale badly."""
         role_key = canonical_step_role(step.get("role")) or infer_step_role(step.get("description", ""))
         if role_key == "coordinator":
-            return False
+            state = self.state_engine.get_execution(execution_id)
+            plan_steps = list((state.current_plan or {}).get("steps") or [])
+            step_id = step.get("id")
+            is_terminal = not any(
+                step_id in (candidate.get("dependencies") or [])
+                for candidate in plan_steps
+                if candidate.get("id") != step_id
+            )
+            predecessors_complete = all(
+                candidate.get("status") == "completed"
+                for candidate in plan_steps
+                if candidate.get("id") != step_id
+            )
+            if not is_terminal or not predecessors_complete:
+                return False
+            assurance = self._independent_delivery_report(execution_id, plan_steps)
+            if not assurance.get("passed", False):
+                return False
         valid_contract = json.dumps({
             "summary": "checked", "artifacts": [], "evidence": [], "risks": [], "next_action": "",
         })
@@ -1274,11 +1291,29 @@ class ExecutionEngine:
                 evidence.append(
                     "EXIT_CODE: 0 for " + str(item.get("arguments", {}).get("command") or "shell command")
                 )
+        role_key = canonical_step_role(step.get("role")) or infer_step_role(step.get("description", ""))
+        if role_key == "coordinator":
+            assurance = self._independent_delivery_report(
+                execution_id, list((state.current_plan or {}).get("steps") or [])
+            )
+            evidence.extend(
+                f"independent assurance passed: {check.get('name')}"
+                for check in assurance.get("checks", [])
+                if check.get("passed")
+            )
         return json.dumps({
-            "summary": "GPTMOSS verified the specialist's converged workspace delivery after tool execution.",
+            "summary": (
+                "GPTMOSS independently verified the completed workflow and its delivery contract."
+                if role_key == "coordinator" else
+                "GPTMOSS verified the specialist's converged workspace delivery after tool execution."
+            ),
             "artifacts": artifacts, "evidence": evidence[-8:],
             "risks": ["The specialist did not return a clean final contract; GPTMOSS synthesized it from machine evidence."],
-            "next_action": "Validate this delivery in its dependent integration and acceptance steps.",
+            "next_action": (
+                "Deliver the independently assured result."
+                if role_key == "coordinator" else
+                "Validate this delivery in its dependent integration and acceptance steps."
+            ),
         }, ensure_ascii=False)
 
     def _delivery_histories(self, execution_id: str) -> List[Dict[str, Any]]:

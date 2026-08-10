@@ -148,6 +148,38 @@ async def test_stale_parent_approval_mirror_is_cleared_without_500(tmp_path):
     engine.execute_task.assert_awaited_once_with("stale-parent", "Resume parent")
 
 
+def test_terminal_coordinator_auto_finalizes_only_after_independent_assurance(tmp_path):
+    engine, state = _engine(tmp_path, MockLLMProvider())
+    execution = state.get_execution("terminal-audit")
+    implementation = {
+        "id": 0, "role": "developer", "description": "Implement",
+        "dependencies": [], "status": "completed",
+    }
+    auditor = {
+        "id": 1, "role": "coordinator", "specialist": "Final Auditor",
+        "description": "Audit the delivery", "dependencies": [0],
+        "acceptance_criteria": ["Independent assurance passes"], "status": "running",
+    }
+    execution.current_plan = {"steps": [implementation, auditor], "requirements": []}
+    engine._independent_delivery_report = Mock(return_value={
+        "passed": True, "checks": [{"name": "required_artifacts", "passed": True}],
+        "failures": [],
+    })
+
+    assert engine._can_engine_finalize("terminal-audit", auditor)
+
+    engine._independent_delivery_report.return_value = {
+        "passed": False, "checks": [], "failures": ["verification failed"],
+    }
+    assert not engine._can_engine_finalize("terminal-audit", auditor)
+
+    engine._independent_delivery_report.return_value = {
+        "passed": True, "checks": [], "failures": [],
+    }
+    implementation["status"] = "running"
+    assert not engine._can_engine_finalize("terminal-audit", auditor)
+
+
 @pytest.mark.asyncio
 async def test_failed_final_assurance_reopens_only_repair_and_auditor(tmp_path):
     llm = MockLLMProvider()
