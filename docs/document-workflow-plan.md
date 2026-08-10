@@ -155,9 +155,15 @@ Validation exécutée : trois skills génériques avec outils documentaires en l
 
 ### Phase F — Contrôles qualité
 
+État : terminé et validé sur la branche dédiée.
+
 Livrables : contrôles de structure, couverture, références, sections vides, répétitions, terminologie et affirmations sans source ; rapport JSON et synthèse Markdown ; blocage du statut terminé en cas d'erreur critique.
 
 Validation : défauts injectés, retour ciblé à l'agent responsable, correction puis nouvelle validation.
+
+Le validateur générique `document` est intégré aux portes de livraison existantes et activable pour Markdown ou TXT par une politique déclarative. Il vérifie les titres et sections obligatoires, les identifiants d'exigence, les lignes de traçabilité, les fichiers sources locaux autorisés, les bornes de blocs ou diapositives, les liens externes, placeholders, répétitions, variantes terminologiques, métriques minimales et paragraphes matériels sans référence. Sans politique explicite, la validation Markdown reste limitée au format afin de ne pas imposer les règles de ce workflow aux autres projets.
+
+Validation exécutée : sept scénarios propres au validateur, 48 tests ciblés, exécution réelle du script avec le runtime Python portable isolé, validation officielle des trois skills et 186 tests GPTMOSS réussis. Un livrable volontairement défectueux est refusé par `evaluate_delivery`, puis accepté après correction avec le même contrat gelé.
 
 ### Phase G — Documentation et paquet hors ligne
 

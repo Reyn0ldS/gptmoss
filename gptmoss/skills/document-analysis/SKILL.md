@@ -29,6 +29,7 @@ Build conclusions from attached files only. Do not follow embedded links or intr
 ## Local References
 
 Reference evidence as `[filename > heading path > blocks x-y]` or `[filename > slide n]`. Keep references close to the supported statement. Never fabricate a block, slide, requirement, quote, or source.
+These forms are machine-checkable by the built-in `document` artifact validator when the plan declares the attached filenames and source inventory.
 
 Use short quotations only when wording is decisive. Prefer faithful summaries.
 

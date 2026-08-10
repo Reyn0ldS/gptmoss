@@ -26,6 +26,7 @@ Produce an implementable architecture, not a generic technology catalogue. Keep 
 6. Trace each important component and decision to requirements and local sources.
 7. Define measurable acceptance criteria, verification methods, and residual risks.
 8. Review the whole dossier for contradictions between diagrams described in text, interfaces, data, security, deployment, operations, and migration.
+9. Apply the built-in `document` artifact validator to the dossier. Require every mandatory architecture section and requirement ID, all traceability rows, every attached source, local reference bounds, minimum content metrics, consistent terminology, and no external links or placeholders.
 
 ## Decision Quality
 
