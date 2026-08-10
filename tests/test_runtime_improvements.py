@@ -100,6 +100,23 @@ def test_shell_keeps_portable_project_imports_with_redirection(tmp_path):
     assert "73" in result
 
 
+def test_shell_executes_multiline_python_with_stderr_merge_and_real_exit_code(tmp_path):
+    shell = ShellCapability(str(tmp_path), timeout_seconds=10)
+    script = """
+from pathlib import Path
+Path('multiline-proof.txt').write_text('executed', encoding='utf-8')
+print('MULTILINE_EXECUTED')
+"""
+
+    result = shell.execute(f'python -c "{script}" 2>&1')
+    failure = shell.execute('python -c "raise SystemExit(7)" 2>&1')
+
+    assert "EXIT_CODE: 0" in result
+    assert "MULTILINE_EXECUTED" in result
+    assert (tmp_path / "multiline-proof.txt").read_text(encoding="utf-8") == "executed"
+    assert "EXIT_CODE: 7" in failure
+
+
 def test_shell_timeout_terminates_a_hung_process_tree(tmp_path):
     shell = ShellCapability(str(tmp_path), timeout_seconds=1)
     started = time.monotonic()

@@ -206,9 +206,17 @@ class ShellCapability:
 
     def _portable_python_command(self, command: str):
         """Build argv that restores normal project imports for embeddable Python."""
-        if self._has_shell_operators(command):
+        direct_command = str(command or "").strip()
+        split_command = self._split_first_shell_operator(direct_command)
+        if split_command and re.fullmatch(r"2\s*>\s*&\s*1", split_command[1]):
+            # stdout/stderr are already captured independently by Popen.  A
+            # trailing stderr merge therefore has no observable benefit, but
+            # routing a quoted or multiline ``python -c`` through cmd.exe can
+            # corrupt its quoting and even report a false successful no-op.
+            direct_command = split_command[0]
+        if self._has_shell_operators(direct_command):
             return None
-        match = re.match(r"^python(?:\.exe)?(?:\s+(.*))?$", command, flags=re.IGNORECASE | re.DOTALL)
+        match = re.match(r"^python(?:\.exe)?(?:\s+(.*))?$", direct_command, flags=re.IGNORECASE | re.DOTALL)
         if not match:
             return None
         raw_arguments = match.group(1) or ""
