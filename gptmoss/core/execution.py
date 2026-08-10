@@ -2765,6 +2765,63 @@ class ExecutionEngine:
         )
 
     @staticmethod
+    def _shell_redirection_paths(command: str) -> List[str]:
+        """Extract output redirections while ignoring operators inside quotes."""
+        text = str(command or "")
+        paths: List[str] = []
+        quote = None
+        escaped = False
+        index = 0
+        while index < len(text):
+            character = text[index]
+            if escaped:
+                escaped = False
+                index += 1
+                continue
+            if character == "\\" and quote:
+                escaped = True
+                index += 1
+                continue
+            if character in {'"', "'"}:
+                if quote == character:
+                    quote = None
+                elif quote is None:
+                    quote = character
+                index += 1
+                continue
+            if quote is not None or character != ">":
+                index += 1
+                continue
+
+            cursor = index + 1
+            if cursor < len(text) and text[cursor] == ">":
+                cursor += 1
+            while cursor < len(text) and text[cursor].isspace():
+                cursor += 1
+            # File-descriptor duplication (for example ``2>&1``) is not a
+            # filesystem mutation and has no path to authorize.
+            if cursor >= len(text) or text[cursor] == "&":
+                index = cursor + 1
+                continue
+
+            if text[cursor] in {'"', "'"}:
+                target_quote = text[cursor]
+                cursor += 1
+                start = cursor
+                while cursor < len(text) and text[cursor] != target_quote:
+                    cursor += 1
+                target = text[start:cursor]
+            else:
+                start = cursor
+                while cursor < len(text) and not text[cursor].isspace() and text[cursor] not in ";&|":
+                    cursor += 1
+                target = text[start:cursor]
+            if target:
+                paths.append(target)
+            index = cursor + 1
+        return paths
+
+    @staticmethod
     def _shell_mutation_paths(command: str) -> List[str]:
         """Extract explicit file targets from common shell-based mutations."""
         text = str(command or "")
@@ -2772,11 +2829,11 @@ class ExecutionEngine:
             r"Path\(\s*[rRuUbBfF]*['\"]([^'\"]+)['\"]\s*\)\.(?:write_text|write_bytes|unlink|rename|replace)\b",
             r"open\(\s*[rRuUbBfF]*['\"]([^'\"]+)['\"]\s*,\s*['\"][wax+]",
             r"(?:Set-Content|Add-Content|Out-File|Remove-Item|Move-Item|Copy-Item)\b[^\r\n]*?(?:-LiteralPath|-Path|-FilePath)\s+['\"]?([^'\"\s;&|]+)",
-            r"(?:^|\s)(?:>|>>)\s*['\"]?([^'\"\s;&|]+)",
         ]
         paths = []
         for pattern in patterns:
             paths.extend(re.findall(pattern, text, flags=re.IGNORECASE))
+        paths.extend(ExecutionEngine._shell_redirection_paths(text))
         ignored = {"nul", "/dev/null", "&1", "&2"}
         return list(dict.fromkeys(
             path for path in paths if path.strip().lower() not in ignored

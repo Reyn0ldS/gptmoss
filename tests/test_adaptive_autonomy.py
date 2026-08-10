@@ -828,6 +828,19 @@ def test_shell_mutation_detection_covers_python_powershell_and_redirection():
     assert ExecutionEngine._shell_mutation_paths("echo ok > docs/result.txt") == ["docs/result.txt"]
 
 
+def test_shell_mutation_detection_ignores_comparisons_inside_python_code():
+    command = (
+        'python -c "import subprocess; result = subprocess.run([\'python\'], '
+        'capture_output=True, text=True); '
+        'print(result.stdout[-2000:] if len(result.stdout) > 2000 else result.stdout)"'
+    )
+
+    assert ExecutionEngine._shell_mutation_paths(command) == []
+    assert ExecutionEngine._shell_mutation_paths(
+        'python -c "print(\'ok\')" > pytest_output.txt 2>&1'
+    ) == ["pytest_output.txt"]
+
+
 @pytest.mark.asyncio
 async def test_restart_recovery_schedules_only_top_level_interrupted_work(tmp_path):
     engine, state = _engine(tmp_path, MockLLMProvider())
