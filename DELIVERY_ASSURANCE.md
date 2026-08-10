@@ -52,6 +52,12 @@ Une modification de contenu ne renouvelle plus indéfiniment le budget d'une
 Après stagnation, un nouveau spécialiste reçoit les erreurs machines et reprend
 le workspace existant.
 
+Une reprise manuelle d'une exécution principale en échec remet à zéro uniquement
+le runtime de l'étape défaillante. Elle conserve le plan, les artefacts, les preuves
+et les étapes terminées. Les pauses d'approbation et les réductions de périmètre
+restent soumises à `/approve` ou `/reject` et ne peuvent pas être contournées par
+`/resume`.
+
 ## Audit indépendant final
 
 Avant `completed`, GPTMOSS évalue lui-même :
@@ -70,6 +76,15 @@ S'il échoue, le dernier réparateur est rouvert avec le rapport exact, puis
 l'auditeur final est rejoué. Les lots déjà validés ne sont pas relancés. Après
 épuisement des reprises, le projet passe à `failed` au lieu de produire une
 fausse réussite.
+
+Le coordinateur évalue les commandes obligatoires à partir de son historique et
+de celui de tous ses sous-agents. Une validation QA exacte et réussie reste donc
+utilisable après délégation ou redémarrage. Si un coordinateur terminal repris a
+déjà un runtime persistant, que toutes les autres étapes sont `completed`, que ses
+gates ne signalent plus rien et que le rapport indépendant passe, le moteur produit
+la livraison finale avant un nouvel appel LLM. Cette clôture déterministe est
+désactivée pour une première exécution et lorsqu'une approbation est encore en
+attente.
 
 Les tests E2E doivent lancer les points d'entrée publics depuis un processus
 frais et utiliser des fixtures locales. Cette garantie complète les tests du
@@ -100,4 +115,3 @@ python scripts/run_delivery_benchmarks.py
 Il échoue si un plan complexe est sous-dimensionné, réutilise trop de profils
 génériques, oublie la réparation autonome ou l'auditeur final, laisse une
 exigence sans implémentation/validation, ou crée un artefact sans propriétaire.
-

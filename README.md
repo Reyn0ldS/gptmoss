@@ -379,6 +379,8 @@ Invoke-RestMethod -Method Post "http://127.0.0.1:8000/executions/$id/cancel"
 
 `/resume` ne convient pas à une pause d'approbation : dans ce cas, utilisez impérativement `/approve` ou `/reject`. `cancel` est possible seulement pour les états `pending`, `running` ou `paused`.
 
+Pour une exécution principale en `failed`, `/resume` rouvre uniquement l'étape en échec, conserve les étapes déjà validées et incrémente `manual_retry_count`. Le budget d'exécution persistant de cette étape (`iterations`, stagnation et rappels) est supprimé afin que la tentative reparte réellement de zéro ; les compteurs des autres étapes restent intacts. Une exécution déléguée en échec ne se reprend pas directement : reprenez son parent de premier niveau. Ce mécanisme ne contourne jamais `pending_approval` ni `pending_scope_approval`.
+
 ### Événements temps réel
 
 - `ws://127.0.0.1:8000/ws/events` diffuse tous les événements ;
@@ -398,6 +400,16 @@ ou un double clic de refaire le même travail. Les livraisons des dépendances s
 transmises explicitement à l'étape suivante. Le coordinateur final reçoit toutes les
 livraisons dans l'ordre du plan, les synthétise sans relancer de sous-agent et expose
 l'ensemble dans le champ `results` de l'exécution.
+
+Le coordinateur final réutilise aussi les preuves machine réussies de tout l'arbre
+d'exécution : une commande QA exacte exécutée par un sous-agent n'est pas relancée
+uniquement pour apparaître dans l'historique local du coordinateur. Si le modèle
+continue à appeler des outils alors que toutes les autres étapes sont terminées,
+GPTMOSS peut synthétiser la livraison finale, mais seulement lorsque les contrôles
+de l'étape et `results.delivery_assurance` passent. Lors d'une reprise déjà engagée,
+cette convergence est vérifiée avant tout nouvel appel au modèle afin d'éviter une
+réécriture tardive d'un workspace assuré. Elle ne s'applique ni à une exécution
+neuve, ni lorsqu'une approbation humaine reste en attente.
 
 Après un échec, un nouveau spécialiste peut reprendre le même workspace sans refaire les dépendances déjà validées. Il reçoit les dernières erreurs de commandes et les contrats Python extraits des sources. Si une boucle n'arrive pas à créer un fichier texte requis, un contexte de secours court peut générer cet artefact, qui doit ensuite être relu et vérifié normalement.
 
@@ -560,7 +572,23 @@ Après installation des dépendances :
 python -m pytest -q
 ```
 
-Les tests vérifient notamment l'API, le moteur d'exécution, les politiques, la mémoire, les skills et les artefacts.
+L'audit de mise en page utilise le vrai moteur Microsoft Edge contre un serveur
+GPTMOSS déjà démarré :
+
+```powershell
+python scripts/browser_layout_audit.py http://127.0.0.1:8000/
+```
+
+Les tests vérifient notamment l'API, le moteur d'exécution, les politiques, la mémoire, les skills et les artefacts. La validation complète du 10 août 2026 a produit :
+
+- `148 passed` pour la suite GPTMOSS ;
+- 48/48 cas Edge réussis entre 360 × 740 et 1920 × 1080, avec des facteurs d'échelle de 100 % à 200 % ;
+- aucun débordement horizontal global et aucun élément signalé hors écran dans les scénarios vide, contenu, approbation, réglages et bibliothèque.
+
+Le script Edge renvoie un code différent de zéro si le navigateur échoue, si
+l'instrumentation de page est absente, si la page déborde horizontalement ou si un
+élément visible dépasse du viewport.
+
 ## Centre de contrôle GUI : mode d'emploi complet
 
 Le bouton **Bibliothèque** ouvre désormais le **Centre de contrôle GPTMOSS**. Il rassemble les fonctions qui ne doivent plus nécessiter de modifier directement un script ou un fichier Markdown.
