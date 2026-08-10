@@ -135,7 +135,7 @@ fichier local
 
 L'index est lexical, accent-insensible et sans modèle à télécharger. Il est enregistré dans `workspace/uploads/document-index.json`, rechargé au redémarrage et reconstruit automatiquement si son état ne correspond plus aux documents. La représentation normalisée de chaque fichier évite de reparcourir l'archive à chaque lecture.
 
-Quand le corpus dépasse la fenêtre du modèle, GPTMOSS n'injecte pas simplement le début du premier fichier. Il recherche les passages liés à la tâche, conserve leurs titres, diversifie les sources et, sans requête assez discriminante, échantillonne le début, le milieu et la fin. Les agents peuvent ensuite paginer et relire les chunks par les actions `documents.inventory`, `documents.search`, `documents.read` et `documents.read_chunk`.
+Quand le corpus dépasse la fenêtre du modèle, GPTMOSS n'injecte pas simplement le début du premier fichier. Il recherche les passages liés à la tâche, conserve leurs titres, diversifie les sources et, sans requête assez discriminante, échantillonne le début, le milieu et la fin. Les agents peuvent ensuite paginer et relire les chunks par les actions `documents.inventory`, `documents.search`, `documents.read` et `documents.read_chunk`. Si une étape promet un inventaire intégral ou exhaustif, son handoff est refusé tant que l'historique des outils ne prouve pas la lecture de chaque bloc normalisé de chaque pièce jointe ; le nombre de diapositives ne peut donc pas être confondu avec le nombre de blocs PPTX.
 
 Si le fournisseur renvoie un plan invalide ou trop petit, le fallback déterministe reconnaît une mission documentaire à partir des formats, pièces jointes, actions `documents` et objectifs de rédaction. Il conserve les noms de livrables explicitement listés, reconstruit la politique `document`, sépare analyse du corpus, exigences, décisions, architecture, sécurité, SRE, migration, rédaction, QA, réparation et audit final. Un nom comme `vision.pptx` ou le verbe « porter » dans « porter une référence » n'est pas interprété comme un projet de computer vision ou de vêtement numérique.
 
@@ -156,7 +156,7 @@ Pour une revue exhaustive, l'agent tient une matrice contenant au minimum : iden
 
 ## Politique qualité déclarative
 
-Le plan peut déclarer un validateur `document` dans `artifact_validations`. Chaque politique est appliquée immédiatement à l'artefact produit avant tout handoff, puis lors de l'audit final. Le fallback de rédaction professionnelle crée aussi des politiques pour l'inventaire, les matrices, les analyses spécialisées, les registres et les rapports JSON/Markdown : un simple fichier non vide ne suffit donc plus. La même politique peut être enregistrée dans `quality-policy.json` :
+Le plan peut déclarer un validateur `document` dans `artifact_validations`. Chaque politique est appliquée immédiatement à l'artefact produit avant tout handoff, puis lors de l'audit final. Le fallback de rédaction professionnelle crée aussi des politiques pour l'inventaire, les matrices, les analyses spécialisées, les registres et les rapports JSON/Markdown : un simple fichier non vide ne suffit donc plus. Les locators bornés acceptent `block/blocks`, `bloc/blocs`, `slide` et `diapositive`, sans changer les bornes numériques exigées. La même politique peut être enregistrée dans `quality-policy.json` :
 
 ```json
 {

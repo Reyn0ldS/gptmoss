@@ -165,8 +165,10 @@ def _validate_reference_locator(
         details = {"blocks": details}
     if not isinstance(details, dict):
         raise TypeError("source_inventory values must be integers or objects")
-    block_match = re.search(r"(?i)\bblocks?\s+(\d+)(?:\s*[-–]\s*(\d+))?", locator)
-    slide_match = re.search(r"(?i)\bslide\s+(\d+)", locator)
+    block_match = re.search(
+        r"(?i)\bbloc(?:k)?s?\s+(\d+)(?:\s*[-–]\s*(\d+))?", locator
+    )
+    slide_match = re.search(r"(?i)\b(?:slide|diapositive)s?\s+(\d+)", locator)
     if require_bounds and not (block_match or slide_match):
         return f"reference to {source!r} lacks a block or slide locator"
     if block_match and "blocks" not in details:

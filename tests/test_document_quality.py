@@ -119,6 +119,28 @@ def test_document_validator_rejects_out_of_range_local_locator(tmp_path):
     assert any("out-of-range block 30" in failure for failure in report["failures"])
 
 
+def test_document_validator_accepts_french_bounded_locator_terms(tmp_path):
+    document = tmp_path / "localized.md"
+    document.write_text(
+        "# Sources\n\n"
+        "Exigence locale. [requirements.docx > Exigences > blocs 2-3]\n\n"
+        "Vision locale. [vision.pptx > diapositive 3]\n",
+        encoding="utf-8",
+    )
+
+    report = validate_artifact(
+        document,
+        validator="document",
+        constraints={
+            "source_inventory": POLICY["source_inventory"],
+            "require_local_references": True,
+            "require_bounded_references": True,
+        },
+    )
+
+    assert report["valid"], json.dumps(report, indent=2)
+
+
 def test_requirement_coverage_uses_complete_identifiers(tmp_path):
     document = tmp_path / "near-match.md"
     document.write_text(

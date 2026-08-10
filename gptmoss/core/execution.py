@@ -630,6 +630,74 @@ class ExecutionEngine:
                 issues.extend(f"{normalized}: {message}" for message in failures[:12])
         return issues
 
+    def _document_coverage_issues(
+        self, execution_id: str, step: Dict[str, Any]
+    ) -> List[str]:
+        """Require tool evidence for assignments claiming exhaustive corpus inventory."""
+        state = self.state_engine.get_execution(execution_id)
+        attached = {
+            str(item) for item in state.variables.get("attachment_ids", []) if item
+        }
+        if not attached or not self.artifact_store:
+            return []
+        assignment = " ".join([
+            str(step.get("description") or ""),
+            " ".join(str(item) for item in step.get("acceptance_criteria", [])),
+        ]).casefold()
+        inventory_markers = ("inventory", "inventor", "inventaire")
+        exhaustive_markers = ("every", "all ", "complete", "exhaust", "integr")
+        exhaustive_assignment = any(
+            marker in assignment for marker in exhaustive_markers
+        ) or bool(re.search(r"\bint.gr", assignment))
+        if not (
+            any(marker in assignment for marker in inventory_markers)
+            and exhaustive_assignment
+        ):
+            return []
+        covered: Dict[str, set[int]] = {artifact_id: set() for artifact_id in attached}
+        history = state.variables.get("tool_call_history", [])
+        for item in history:
+            if item.get("capability") != "documents" or item.get("action") != "read":
+                continue
+            try:
+                payload = json.loads(str(item.get("result") or ""))
+            except (TypeError, ValueError):
+                continue
+            artifact_id = str(payload.get("artifact_id") or "")
+            if artifact_id not in covered:
+                continue
+            for block in payload.get("blocks") or []:
+                try:
+                    covered[artifact_id].add(int(block["order"]))
+                except (KeyError, TypeError, ValueError):
+                    continue
+        issues = []
+        inventory = {
+            str(item.get("artifact_id")): item
+            for item in self.artifact_store.document_index.inventory()
+            if str(item.get("artifact_id")) in attached
+        }
+        for artifact_id in sorted(attached):
+            item = inventory.get(artifact_id, {})
+            try:
+                total = int(item.get("block_count") or len(
+                    self.artifact_store.document(artifact_id).blocks
+                ))
+            except (OSError, KeyError, TypeError, ValueError):
+                issues.append(f"prove complete document coverage for attachment {artifact_id}")
+                continue
+            missing = sorted(set(range(total)) - covered.get(artifact_id, set()))
+            if missing:
+                display = ", ".join(str(index + 1) for index in missing[:20])
+                if len(missing) > 20:
+                    display += f", and {len(missing) - 20} more"
+                filename = str(item.get("filename") or artifact_id)
+                issues.append(
+                    f"read every normalized block of {filename}; "
+                    f"missing 1-based block(s): {display}"
+                )
+        return issues
+
     def _capability_gaps(self, state) -> List[Dict[str, Any]]:
         """Describe unavailable input modalities without pretending to use them."""
         gaps = []
@@ -1219,6 +1287,7 @@ class ExecutionEngine:
                    if not self._artifact_exists(execution_id, path)]
         if missing:
             issues.append("create non-empty required artifacts: " + ", ".join(missing))
+        issues.extend(self._document_coverage_issues(execution_id, step))
         issues.extend(self._step_artifact_validation_issues(execution_id, step))
 
         if role_key in {"qa", "debugger", "coordinator"}:

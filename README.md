@@ -588,7 +588,7 @@ python scripts/browser_layout_audit.py http://127.0.0.1:8000/
 
 Les tests vérifient notamment l'API, le moteur d'exécution, les politiques, la mémoire, les skills, les artefacts et le workflow documentaire local. La validation complète du 10 août 2026 a produit :
 
-- `198 passed` pour la suite GPTMOSS sur la branche documentaire ;
+- `200 passed` pour la suite GPTMOSS sur la branche documentaire ;
 - 48/48 cas Edge réussis entre 360 × 740 et 1920 × 1080, avec des facteurs d'échelle de 100 % à 200 % ;
 - aucun débordement horizontal global et aucun élément signalé hors écran dans les scénarios vide, contenu, approbation, réglages et bibliothèque.
 

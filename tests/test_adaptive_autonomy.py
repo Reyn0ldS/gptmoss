@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import json
 from unittest.mock import AsyncMock, Mock
 from pathlib import Path
@@ -10,6 +11,7 @@ from gptmoss.capabilities.shell import ShellCapability
 from gptmoss.core.context import ContextEngine
 from gptmoss.core.adaptive import tool_call_fingerprint
 from gptmoss.core.delivery import build_delivery_contract
+from gptmoss.core.artifacts import ArtifactStore
 from gptmoss.core.event_bus import EventBus
 from gptmoss.core.execution import ExecutionEngine, ProviderUnavailableError, normalize_plan
 from gptmoss.core.skills import SkillRegistry
@@ -910,6 +912,50 @@ def test_step_gate_rejects_invalid_intermediate_document_before_handoff(tmp_path
 
     assert any("placeholder" in issue for issue in issues)
     assert not engine._can_engine_finalize("document-gate", step)
+
+
+def test_exhaustive_inventory_gate_requires_every_normalized_block_read(tmp_path):
+    engine, state = _engine(tmp_path, MockLLMProvider())
+    store = ArtifactStore(str(tmp_path / "artifacts"))
+    uploaded = store.save_base64(
+        "vision.txt",
+        base64.b64encode(
+            b"# Slide 1\n\nfirst\n\n# Slide 2\n\nsecond\n\n# Slide 3\n\nthird"
+        ).decode("ascii"),
+        "text/plain",
+    )
+    engine.artifact_store = store
+    execution = state.get_execution("coverage-gate")
+    execution.variables["attachment_ids"] = [uploaded["id"]]
+    document = store.document(uploaded["id"])
+    step = {
+        "description": "Inventory every explicit attachment and record complete coverage.",
+        "acceptance_criteria": ["All normalized blocks were read."],
+    }
+
+    partial = {
+        "artifact_id": uploaded["id"],
+        "total_blocks": len(document.blocks),
+        "blocks": [block.to_dict() for block in document.blocks[:2]],
+    }
+    engine._record_tool_result(
+        "coverage-gate", "documents", "read", {}, json.dumps(partial)
+    )
+
+    issues = engine._document_coverage_issues("coverage-gate", step)
+    assert issues
+    assert "vision.txt" in issues[0]
+
+    remainder = {
+        "artifact_id": uploaded["id"],
+        "total_blocks": len(document.blocks),
+        "blocks": [block.to_dict() for block in document.blocks[2:]],
+    }
+    engine._record_tool_result(
+        "coverage-gate", "documents", "read", {}, json.dumps(remainder)
+    )
+
+    assert engine._document_coverage_issues("coverage-gate", step) == []
 
 
 def test_rescue_strips_prefixed_fence_and_rejects_mock_random_tests():

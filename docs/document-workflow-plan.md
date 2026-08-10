@@ -198,6 +198,8 @@ Le second essai réel a révélé un faux positif de handoff : après trois lect
 
 Le redémarrage suivant a montré avant la première étape qu'un score encore renforcé par les mots génériques `ingestion` et `validation` ajoutait toujours `computer-vision-ml` aux trois skills explicitement demandés. L'exécution a été suspendue. Le contrat est corrigé à sa source : `agent_config.skills` est désormais une sélection explicite exhaustive, non tronquée par la limite du classement automatique et non complétée par une expertise simplement corrélée. Les skills autonomes nécessaires à un spécialiste continuent d'être ajoutés explicitement à sa sous-exécution. Le test réel doit repartir après validation et push de ce correctif.
 
+L'essai UTF-8 propre a ensuite produit un inventaire réellement fondé sur les quatre sources, mais a révélé deux défauts : le validateur ne reconnaissait que `block/blocks` alors que le rédacteur français employait `bloc/blocs`, et le spécialiste déclarait le PPTX entièrement lu après seulement 12 blocs sur 24, en confondant diapositives et blocs normalisés. Les locators français sont désormais reconnus avec les mêmes contrôles de bornes. Surtout, toute étape promettant un inventaire complet doit prouver dans son historique `documents.read` la couverture de chaque ordre de bloc de chaque pièce jointe. Validation : 50 tests ciblés, rejeu positif des 76 références du fichier réel et 200 tests complets réussis. Après redémarrage, le même essai doit rester bloqué jusqu'à la lecture des blocs PPTX 13 à 24.
+
 ## 5. Boucle de validation et stratégie Git
 
 Pour chaque incrément :
