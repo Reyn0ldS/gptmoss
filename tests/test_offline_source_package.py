@@ -42,6 +42,12 @@ def test_requirements_hash_is_independent_of_checked_out_line_endings(tmp_path):
     )
 
 
+def test_runtime_requirements_use_lf_in_git_archives():
+    attributes = (PROJECT_ROOT / ".gitattributes").read_text(encoding="utf-8").splitlines()
+
+    assert "requirements-runtime.txt text eol=lf" in attributes
+
+
 def test_archive_extraction_rejects_parent_traversal(tmp_path):
     archive_path = tmp_path / "unsafe.zip"
     destination = tmp_path / "runtime"

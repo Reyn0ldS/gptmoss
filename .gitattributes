@@ -1,1 +1,2 @@
 python-*-embed-amd64/** -text whitespace=-trailing-space conflict-marker-size=32
+requirements-runtime.txt text eol=lf
