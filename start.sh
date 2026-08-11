@@ -1,4 +1,9 @@
 #!/bin/bash
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
+
 echo "==================================================="
 echo "  Starting GPT-Moss Agentic Client Server"
 echo "==================================================="
@@ -11,6 +16,11 @@ fi
 echo "[INFO] Activating virtual environment..."
 source venv/bin/activate
 
-echo "[INFO] Launching server on default port (http://127.0.0.1:8000)...
-If running in background, check 'app.log' for details."
-python main.py
+CONTROL_PORT="${GPTMOSS_CONTROL_PORT:-8765}"
+echo "[INFO] Launching supervised server (application: http://127.0.0.1:8000)..."
+echo "[INFO] Server controls: http://127.0.0.1:${CONTROL_PORT}"
+python -B scripts/server_supervisor.py \
+    --python "$(command -v python)" \
+    --main "$SCRIPT_DIR/main.py" \
+    --control-port "$CONTROL_PORT" \
+    -- "$@"

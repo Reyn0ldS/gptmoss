@@ -79,7 +79,10 @@ def test_windows_launchers_share_runtime_detection():
     assert "--no-index" in install
     assert "PYTHONDONTWRITEBYTECODE=1" in install
     assert "PYTHONDONTWRITEBYTECODE=1" in start
-    assert '"!GPTMOSS_PYTHON!" -B "%~dp0main.py" %*' in start
+    assert "scripts\\server_supervisor.py" in start
+    assert '--python "!GPTMOSS_PYTHON!"' in start
+    assert '--main "%~dp0main.py"' in start
+    assert 'GPTMOSS_CONTROL_PORT=8765' in start
     for launcher in (install, start, offline_builder):
         assert 'pushd "%~dp0"' in launcher
         assert "popd" in launcher

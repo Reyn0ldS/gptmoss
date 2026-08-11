@@ -289,6 +289,28 @@ async def health():
     }
 
 
+@app.get("/api/runtime-control")
+async def runtime_control(response: Response):
+    """Return the loopback supervisor connection inherited by this process."""
+    supervisor_url = os.environ.get("GPTMOSS_SUPERVISOR_URL", "").rstrip("/")
+    supervisor_token = os.environ.get("GPTMOSS_SUPERVISOR_TOKEN", "")
+    parsed = urlsplit(supervisor_url) if supervisor_url else None
+    available = bool(
+        parsed
+        and parsed.scheme == "http"
+        and parsed.hostname in {"127.0.0.1", "localhost", "::1"}
+        and parsed.port
+        and supervisor_token
+        and os.environ.get("GPTMOSS_SUPERVISOR_MANAGED") == "1"
+    )
+    response.headers["Cache-Control"] = "no-store"
+    return {
+        "available": available,
+        "supervisor_url": supervisor_url if available else "",
+        "token": supervisor_token if available else "",
+    }
+
+
 @app.get("/readiness")
 async def readiness():
     ready = bool(

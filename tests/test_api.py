@@ -402,6 +402,10 @@ def test_api_settings_preserve_secret_and_context_budget(tmp_path):
     }
     assert client.get("/readiness").json() == {"status": "ready"}
 
+    unmanaged = client.get("/api/runtime-control")
+    assert unmanaged.status_code == 200
+    assert unmanaged.json() == {"available": False, "supervisor_url": "", "token": ""}
+
     settings = {
         "api_key": "secret-key",
         "base_url": "https://example.test/v1",
@@ -483,6 +487,30 @@ def test_gui_uses_sanitized_markdown_renderer():
     assert 'contentHtml = marked.parse(msg.content || "");' not in gui
     assert "--bg-card:" in gui
     assert "--text-normal:" in gui
+
+
+def test_runtime_control_only_exposes_a_managed_loopback_supervisor(monkeypatch):
+    client = ASGIClient(app)
+    monkeypatch.setenv("GPTMOSS_SUPERVISOR_MANAGED", "1")
+    monkeypatch.setenv("GPTMOSS_SUPERVISOR_URL", "http://127.0.0.1:8765")
+    monkeypatch.setenv("GPTMOSS_SUPERVISOR_TOKEN", "local-token")
+
+    response = client.get("/api/runtime-control")
+
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+    assert response.json() == {
+        "available": True,
+        "supervisor_url": "http://127.0.0.1:8765",
+        "token": "local-token",
+    }
+
+    monkeypatch.setenv("GPTMOSS_SUPERVISOR_URL", "http://192.0.2.10:8765")
+    assert client.get("/api/runtime-control").json() == {
+        "available": False,
+        "supervisor_url": "",
+        "token": "",
+    }
 
 
 def test_gui_management_api_complete_flow(tmp_path):
@@ -642,7 +670,13 @@ def test_gui_contains_complete_management_controls():
         "previewArtifact", "importLibrarySkill", "validateLibrarySkill", "saveMemory",
         "createSubagent", "library-diagnostics", "library-audit", "revealApiKey",
         "testLlmConnection", "collectSettingsPayload", ".docx,.pptx",
-        "document_blocks", "overflow-wrap:anywhere",
+        "document_blocks", "overflow-wrap:anywhere", "openServerModal",
+        "serverAction", "refreshServerStatus", 'id="server-modal"',
+        'id="server-start"', 'id="server-stop"', 'id="server-restart"',
+        'id="server-rebind"', "/api/runtime-control",
+        'id="library-document-search"', 'id="library-document-results"',
+        "/artifacts/search", 'id="library-agent-profiles"',
+        'id="library-evolution"', "/agent-profiles", "/evolution",
     ):
         assert marker in gui
 

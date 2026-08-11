@@ -84,6 +84,7 @@ def main() -> int:
             (480, 800, 2.0, "approval"),
             (768, 900, 1.25, "settings"),
             (1024, 768, 1.5, "library"),
+            (1024, 768, 1.25, "server"),
             (1366, 768, 1.0, "content"),
             (1920, 1080, 2.0, "empty"),
         ]
@@ -103,7 +104,7 @@ def main() -> int:
                     (1366, 768, 1.0),
                     (1920, 1080, 2.0),
                 )
-                for scenario in ("content", "approval", "settings", "library")
+                for scenario in ("content", "approval", "settings", "library", "server")
             ]
         )
     )

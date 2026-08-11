@@ -81,16 +81,26 @@ isolé. Le voyant **Serveur connecté** confirme uniquement le WebSocket de
 l'interface. Dans **Paramètres**, utilisez **Tester la connexion** pour contrôler
 séparément l'URL et le modèle LLM.
 
+Le bouton **Serveur** indique l'état du processus applicatif supervisé et permet
+de le **Démarrer**, l'**Arrêter**, le **Redémarrer** ou d'**Appliquer un autre
+port**. Si le port 8000 est déjà occupé ou si l'application est arrêtée, le
+contrôleur local reste accessible à l'adresse `http://127.0.0.1:8765`. Il ne
+termine jamais un processus étranger occupant le port demandé. Fermer la fenêtre
+de `start.bat`/`start.sh` arrête le superviseur et son enfant. Un lancement direct
+avec `python main.py` fonctionne toujours, mais la GUI signale alors que le
+contrôle du cycle de vie n'est pas disponible.
+
 ---
 
 ## 6. Centre de contrôle Web
 
 Le bouton **Bibliothèque** ouvre le centre d'administration complet :
 
-* **Documents et images** : aperçu local, rattachement à la prochaine tâche et suppression confirmée ;
+* **Documents et images** : aperçu local, recherche plein texte indexée, rattachement à la prochaine tâche et suppression confirmée ;
 * **Skills** : création, import `SKILL.md`, modification, validation de compatibilité, activation et suppression des skills du workspace ;
 * **Mémoire** : création, recherche, modification, provenance, expiration, validation et suppression ;
 * **Sous-agents** : création sous l'exécution sélectionnée, pause, reprise et annulation ;
+* **Profils et évolution** : profils spécialisés persistants, résultats obtenus et état de la génération/amélioration autonome des skills ;
 * **Diagnostics** : modèle, vision, capacités/actions, états, métriques, traces et erreurs ;
 * **Audit** : historique local expurgé des changements sensibles.
 

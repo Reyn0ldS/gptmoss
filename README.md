@@ -51,7 +51,7 @@ Depuis la racine du projet :
 .\start.bat
 ```
 
-`install.bat` crée un `venv` avec un Python complet ou configure directement le runtime portable, vérifie les dépendances, puis initialise `.env` et `workspace/config.json` s'ils n'existent pas. `start.bat` démarre ensuite le serveur sur le port 8000.
+`install.bat` crée un `venv` avec un Python complet ou configure directement le runtime portable, vérifie les dépendances, puis initialise `.env` et `workspace/config.json` s'ils n'existent pas. `start.bat` démarre un superviseur local sur le port 8765, puis l'application sur le port 8000. Le bouton **Serveur** de la GUI permet ensuite de l'arrêter, la démarrer, la redémarrer ou la réaffecter à un autre port, avec mise à jour de l'état réel.
 
 Les scripts Windows détectent automatiquement, dans cet ordre : un `venv` existant, un Python portable `python-*-embed-amd64` placé à la racine, puis le Python installé sur le système. La distribution Python *embeddable* ne contient ni `venv` ni `pip` ; GPTMOSS l'utilise donc directement comme runtime privé au lieu d'essayer de créer un environnement virtuel.
 
@@ -64,7 +64,9 @@ Le dépôt contient déjà Python 3.13 Win64 et toutes les dépendances dans `py
 .\start.bat
 ```
 
-`install.bat` configure le runtime embarqué, vérifie localement les imports et initialise les fichiers de configuration. Il ne télécharge rien en mode portable. `start.bat` sélectionne ensuite automatiquement ce runtime.
+`install.bat` configure le runtime embarqué, vérifie localement les imports et initialise les fichiers de configuration. Il ne télécharge rien en mode portable. `start.bat` sélectionne ensuite automatiquement ce runtime et lance le superviseur sans dépendance supplémentaire.
+
+Si le port 8000 est déjà occupé, ouvrez `http://127.0.0.1:8765` : le contrôleur reste disponible et permet de choisir un port libre sans arrêter le processus inconnu qui occupe 8000. Ce contrôleur écoute uniquement sur la boucle locale et ses commandes sont protégées par un jeton éphémère transmis à la GUI.
 
 ### Régénérer le paquet autonome sur une machine connectée
 
@@ -295,12 +297,14 @@ Options disponibles :
 Exemples :
 
 ```powershell
-# Serveur local sur un autre port
-python main.py --host 127.0.0.1 --port 8080 --workspace D:\GPTMOSS\workspace
+# Serveur supervisé local sur un autre port
+.\start.bat --host 127.0.0.1 --port 8080 --workspace D:\GPTMOSS\workspace
 
 # Tâche unique ; les demandes d'approbation sont posées dans le terminal
 python main.py --workspace .\workspace --task "Analyse ce dépôt et propose un plan de correction."
 ```
+
+Le port du contrôleur local peut être changé avant le lancement avec `$env:GPTMOSS_CONTROL_PORT=8876`. Un lancement direct par `python main.py` reste possible, mais les commandes de cycle de vie sont alors volontairement indisponibles dans la GUI.
 
 N'exposez pas le serveur sur un réseau non fiable sans ajouter une authentification et des protections réseau : l'API n'implémente pas d'authentification applicative.
 
@@ -571,6 +575,7 @@ Les documents ne sont pas concaténés puis tronqués aveuglément. GPTMOSS sél
 | Skill absent | Vérifier le nom, le frontmatter, l'encodage UTF-8 et redémarrer le serveur. |
 | `No module named venv` | Utiliser la dernière version complète du dépôt, qui contient le runtime préparé `python-3.13.14-embed-amd64`. Ne pas le remplacer par une archive embeddable nue. Le mode portable n'utilise pas `venv`. |
 | Dépendances absentes sur la machine hors-ligne | Le runtime n'a pas été transféré complètement. Reprendre le paquet autonome depuis Git ou exécuter `prepare-offline-source.bat` sur la machine connectée avant de transférer tout le dossier. |
+| `WinError 10048` / port 8000 déjà utilisé | Laisser `start.bat` ouvert, accéder au contrôleur sur `http://127.0.0.1:8765`, saisir un autre port puis cliquer **Appliquer le port**. GPTMOSS ne termine jamais le processus inconnu qui occupe le port. |
 | État ou mémoire à remettre à zéro | Arrêter le serveur, sauvegarder puis supprimer explicitement les fichiers concernés du workspace. |
 
 ## Tests du projet GPTMOSS
