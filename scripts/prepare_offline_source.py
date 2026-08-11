@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import traceback
 import urllib.request
 import zipfile
 from dataclasses import dataclass
@@ -75,10 +76,27 @@ def sha256_normalized_text_file(path: Path) -> str:
 
 
 def download_runtime(spec: RuntimeSpec, archive_path: Path) -> None:
-    print(f"Downloading {spec.source_url}")
+    print(f"Downloading {spec.source_url}", flush=True)
     request = urllib.request.Request(spec.source_url, headers={"User-Agent": "GPTMOSS offline builder"})
     with urllib.request.urlopen(request, timeout=120) as response, archive_path.open("wb") as output:
-        shutil.copyfileobj(response, output)
+        content_length = response.headers.get("Content-Length")
+        total_bytes = int(content_length) if content_length and content_length.isdigit() else 0
+        downloaded_bytes = 0
+        last_reported_percent = -10
+        while block := response.read(1024 * 1024):
+            output.write(block)
+            downloaded_bytes += len(block)
+            if total_bytes:
+                percent = downloaded_bytes * 100 // total_bytes
+                if percent >= last_reported_percent + 10 or downloaded_bytes >= total_bytes:
+                    print(
+                        f"  Python archive: {min(percent, 100)}% "
+                        f"({downloaded_bytes:,}/{total_bytes:,} bytes)",
+                        flush=True,
+                    )
+                    last_reported_percent = percent
+            elif downloaded_bytes == len(block) or downloaded_bytes % (8 * 1024 * 1024) < len(block):
+                print(f"  Python archive: {downloaded_bytes:,} bytes", flush=True)
     actual_hash = sha256_file(archive_path)
     if actual_hash != spec.sha256:
         raise RuntimeError(
@@ -242,10 +260,19 @@ def main() -> int:
     spec = runtime_spec(arguments.python_version, arguments.sha256, arguments.source_url)
     runtime_directory = prepare(spec)
     print("")
-    print(f"Autonomous offline package ready: {runtime_directory}")
-    print("Commit the generated runtime and offline-runtime-manifest.json to distribute it with Git.")
+    print(f"Autonomous offline runtime ready: {runtime_directory}")
+    print("The current GPTMOSS source directory is now self-contained for offline transfer.")
+    print("The application sources themselves come from the Git clone or downloaded GitHub ZIP.")
     return 0
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    except KeyboardInterrupt:
+        print("\n[ERROR] Offline preparation was cancelled.", file=sys.stderr)
+        raise SystemExit(130)
+    except Exception as error:
+        print(f"\n[ERROR] Offline preparation failed: {error}", file=sys.stderr)
+        traceback.print_exc()
+        raise SystemExit(1)
