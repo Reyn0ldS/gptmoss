@@ -10,6 +10,7 @@ from gptmoss.core.documents import (
     DOCX_CONTENT_TYPE,
     HTML_CONTENT_TYPE,
     PPTX_CONTENT_TYPE,
+    PDF_CONTENT_TYPE,
     DocumentParseError,
     UnsafeDocumentError,
     UnsupportedDocumentError,
@@ -94,6 +95,27 @@ def _make_pptx(path: Path) -> Path:
             SLIDE_TEMPLATE.format(title="Vision", body="Corpus local"),
         )
     return path
+
+
+def _make_pdf(path: Path) -> Path:
+    from pypdf import PdfWriter
+
+    writer = PdfWriter()
+    writer.add_blank_page(width=595, height=842)
+    writer.add_metadata({"/Title": "Dossier PDF local"})
+    with path.open("wb") as handle:
+        writer.write(handle)
+    return path
+
+
+def test_pdf_is_detected_and_preserves_page_boundaries(tmp_path: Path):
+    source = _make_pdf(tmp_path / "dossier.pdf")
+    assert detect_document_type(source) == PDF_CONTENT_TYPE
+    document = parse_document(source)
+    assert document.title == "Dossier PDF local"
+    assert document.parser == "pypdf"
+    assert document.metadata["page_count"] == 1
+    assert document.metadata["empty_pages"] == [1]
 
 
 def test_plain_text_preserves_structure_provenance_and_determinism(tmp_path: Path):

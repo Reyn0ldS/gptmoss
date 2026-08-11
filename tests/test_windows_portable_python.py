@@ -97,7 +97,8 @@ def test_offline_preparation_helper_validates_real_python_and_existing_runtime()
     )
 
     assert "import pip, platform, sys" in helper
-    assert "microsoft\\\\windowsapps" in helper
+    assert "genuine managed Python installation" in helper
+    assert "if key in seen:" in helper
     assert "verify_existing_runtime" in helper
     assert "--verify-only" in helper
     assert "TeeStream" in helper

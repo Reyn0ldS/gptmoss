@@ -621,6 +621,8 @@ class SimplePlanner(PlannerProvider):
         ]
         requirements = _assign_document_requirements(task, steps)
         return {
+            "delivery_profile": "professional-local",
+            "primary_artifact": primary,
             "analysis": {
                 **analysis,
                 "workstreams": [step["specialist"] for step in steps],
@@ -842,6 +844,8 @@ class SimplePlanner(PlannerProvider):
                     step["specialist"] = f"{role_title} Specialist"
                 step["status"] = "pending"
             self._validate_generated_plan(plan_data, analysis)
+            if _document_deliverable_task(task):
+                plan_data["delivery_profile"] = "professional-local"
             return plan_data
         except Exception as exc:
             logger.warning("Error or undersized LLM plan; using adaptive fallback: %s", exc)

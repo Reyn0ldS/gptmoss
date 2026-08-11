@@ -10,6 +10,7 @@ from gptmoss.capabilities.devteam import DeveloperTeamCapability
 from gptmoss.capabilities.documents import DocumentCapability
 from gptmoss.capabilities.filesystem import FilesystemCapability
 from gptmoss.capabilities.shell import ShellCapability
+from gptmoss.capabilities.memory import MemoryCapability
 from gptmoss.interfaces.capability import get_actions
 
 
@@ -25,6 +26,7 @@ FEATURE_CONTRACTS = {
     "execution_lifecycle": {
         "routes": {("POST", "/executions"), ("GET", "/executions"),
                    ("GET", "/executions/{execution_id}"),
+                   ("GET", "/executions/{execution_id}/delivery"),
                    ("GET", "/executions/{execution_id}/metrics"),
                    ("GET", "/executions/{execution_id}/unified-feed"),
                    ("POST", "/executions/{execution_id}/approve"),
@@ -35,7 +37,9 @@ FEATURE_CONTRACTS = {
                    ("DELETE", "/executions/{execution_id}"),
                    ("POST", "/executions/clear-all")},
         "tests": {"test_execution_control_api_preserves_transition_chronology",
-                  "test_approval_endpoints_record_ordered_scope_decisions"},
+                  "test_approval_endpoints_record_ordered_scope_decisions",
+                  "test_delivery_package_contains_docx_manifest_assurance_and_sources",
+                  "test_professional_delivery_download_route_is_scoped_to_execution"},
     },
     "projects_and_documents": {
         "routes": {("GET", "/projects"), ("POST", "/projects"),
@@ -83,6 +87,7 @@ CAPABILITY_MODES = {
     "shell": {"execute": "sync-process"},
     "agent": {"spawn": "async-background", "status": "sync-observation", "execute_subtask": "async-blocking"},
     "devteam": {"approve_quality_gate": "human-gate", "build_project": "async-sequential-pipeline"},
+    "memory": {"search": "async-read", "propose": "async-pending-mutation"},
 }
 
 CONFIGURATION_OWNERS = {
@@ -136,6 +141,7 @@ def test_every_capability_action_declares_its_execution_mode():
         "shell": ShellCapability,
         "agent": AgentCapability,
         "devteam": DeveloperTeamCapability,
+        "memory": MemoryCapability,
     }
     actual = {name: set(get_actions(cls)) for name, cls in classes.items()}
     declared = {name: set(actions) for name, actions in CAPABILITY_MODES.items()}

@@ -2,6 +2,7 @@ import asyncio
 import base64
 from io import BytesIO
 import json
+from pathlib import Path
 from unittest.mock import AsyncMock
 from zipfile import ZIP_DEFLATED, ZipFile
 
@@ -547,6 +548,41 @@ def test_runtime_control_only_exposes_a_managed_loopback_supervisor(monkeypatch)
         "supervisor_url": "",
         "token": "",
     }
+
+
+def test_professional_delivery_download_route_is_scoped_to_execution(tmp_path):
+    from gptmoss.capabilities.filesystem import FilesystemCapability
+
+    event_bus = EventBus()
+    state_engine = StateEngine()
+    llm = MockLLMProvider()
+    engine = ExecutionEngine(
+        event_bus, state_engine, ContextEngine(state_engine, RAMMemoryProvider()),
+        llm, SimplePlanner(llm), SimplePolicyProvider(),
+    )
+    engine.register_capability("filesystem", FilesystemCapability(str(tmp_path)))
+    init_app(RuntimeKernel(event_bus, state_engine, engine), engine, state_engine, event_bus)
+    state = state_engine.get_execution("delivery-test")
+    delivery_dir = tmp_path / ".gptmoss" / "deliveries" / "delivery-test"
+    delivery_dir.mkdir(parents=True)
+    archive = delivery_dir / "report-delivery.zip"
+    archive.write_bytes(b"PK\x05\x06" + b"\0" * 18)
+    state.results["delivery_package"] = {
+        "archive_path": str(archive), "profile": "professional-local",
+        "archive_sha256": "digest", "archive_size_bytes": archive.stat().st_size,
+    }
+    client = ASGIClient(app)
+
+    metadata = client.get("/executions/delivery-test/delivery")
+    assert metadata.status_code == 200
+    assert metadata.json()["download_url"].endswith("?download=true")
+    downloaded = client.get("/executions/delivery-test/delivery?download=true")
+    assert downloaded.status_code == 200
+    assert downloaded.headers["content-type"] == "application/zip"
+    assert downloaded.content == archive.read_bytes()
+
+    state.results["delivery_package"]["archive_path"] = str(tmp_path / "outside.zip")
+    assert client.get("/executions/delivery-test/delivery?download=true").status_code == 404
 
 
 def test_gui_management_api_complete_flow(tmp_path, monkeypatch):

@@ -350,6 +350,7 @@ Routes principales :
 | `GET /executions/{id}` | État, plan, variables et conversation. |
 | `GET /executions/{id}/unified-feed` | Fil des messages, sous-agents compris. |
 | `GET /executions/{id}/metrics` | Compteurs et durées de télémétrie. |
+| `GET /executions/{id}/delivery` | Métadonnées ou téléchargement ZIP du paquet professionnel assuré. |
 | `POST /executions` | Crée une exécution. |
 | `GET /projects` | Liste les projets configurés. |
 | `POST /projects` | Crée atomiquement un projet et son dossier. |
@@ -368,7 +369,7 @@ Routes principales :
 | `GET /artifacts/search` | Recherche localement dans les chunks avec filtres de source, format, titre et type. |
 | `GET /artifacts/{id}/preview` | Renvoie un aperçu texte ou image local. |
 | `DELETE /artifacts/{id}` | Supprime la source, sa normalisation et ses entrées d'index. |
-| `GET` / `POST /memory` | Filtre les mémoires ou crée une entrée. |
+| `GET` / `POST /memory` | Filtre par projet, portée et type, ou crée une proposition de mémoire. |
 | `PUT /memory/{id}` | Modifie valeur, provenance, validation et expiration. |
 | `GET /api/diagnostics` | Capacités, compatibilité vision, métriques, traces et erreurs. |
 | `GET /api/audit` | Journal local expurgé des changements de réglages. |
@@ -430,6 +431,8 @@ Le pipeline logiciel ne bloque plus l'agent de réparation derrière une suite d
 Les moteurs de jeu, Blender et autres applications propres à un projet restent des outils externes. Le plan fournit `external_tools` et `execution_routines` avec sondes de disponibilité, paramètres, étapes opérateur, commandes ou appels API non interactifs, sorties attendues, validation, dépannage et retour arrière. GPTMOSS ne prétend pas piloter une interface graphique qu’il n’a pas réellement exécutée.
 
 Les sorties déclarées dans `artifact_validations` sont contrôlées dès la fin de l'étape qui les produit, avant leur transmission aux spécialistes suivants, puis de nouveau par l'assurance finale. Les validateurs intégrés inspectent JSON, OBJ et GLB. Le validateur `document` contrôle de façon déclarative les sections, exigences, tables de traçabilité, références locales bornées, sources autorisées, liens externes, placeholders, balises de raisonnement résiduelles, répétitions, terminologie, paragraphes non sourcés et métriques minimales d'un Markdown ou TXT. Même sans politique détaillée, un texte intermédiaire ne peut pas passer avec un placeholder manifeste. Une erreur critique bloque la garantie de livraison. Pour un travail fondé sur des pièces jointes, la récupération d'inactivité ne fabrique jamais le document manquant depuis un contexte privé de son corpus. Les validations structurelles ne prouvent ni le photoréalisme, ni le rendu Blender, ni la justesse métier ; ces points restent soumis aux critères explicites et à la revue appropriée.
+
+Les tâches de rédaction professionnelle activent le profil `professional-local`. Le moteur impose alors son propre plancher de qualité, inventorie les pièces jointes réelles et refuse les textes trop courts, dupliqués, non sourcés ou contenant des placeholders. Après réussite de l'assurance finale, GPTMOSS produit sous `.gptmoss/deliveries/<execution-id>/` un DOCX mis en forme, le rapport d'assurance, un manifeste SHA-256 et une archive ZIP téléchargeable depuis l'interface. Ce paquet n'est jamais créé avant le passage des contrôles.
 
 États possibles :
 
@@ -514,7 +517,7 @@ Consultez aussi [SKILLS.md](SKILLS.md) pour les règles de compatibilité de ski
 
 Les artefacts sont stockés sous `<workspace>/uploads/`. Un fichier reçoit un identifiant UUID, un fichier de métadonnées et une empreinte SHA-256. Les documents reçoivent aussi une représentation normalisée mise en cache et des chunks dans un index lexical local persistant.
 
-Types acceptés : TXT/Markdown, JSON, CSV, HTML local, DOCX, PPTX, PNG, JPEG et WebP. La taille est pilotée par `max_upload_bytes` ; `0` n'impose pas de plafond applicatif fixe. Les noms sont assainis, les images sont contrôlées par signature et le contenu réel des documents est détecté. DOCX et PPTX sont analysés localement avec les modules ZIP/XML standard ; les archives dangereuses sont refusées. PDF et OCR restent différés.
+Types acceptés : TXT/Markdown, JSON, CSV, HTML local, DOCX, PPTX, PDF texte, PNG, JPEG et WebP. La taille est pilotée par `max_upload_bytes` ; `0` n'impose pas de plafond applicatif fixe. Les noms sont assainis, les images sont contrôlées par signature et le contenu réel des documents est détecté. DOCX et PPTX sont analysés localement avec les modules ZIP/XML standard ; PDF est extrait localement par page avec `pypdf`, inclus dans le runtime offline. Les archives dangereuses sont refusées. L'OCR des PDF numérisés reste différé et les pages sans texte sont signalées explicitement.
 
 Les parseurs ne chargent aucune ressource distante d'un HTML ou d'un document Office. La recherche accent-insensible couvre tout le corpus et conserve fichier, titres, blocs et diapositives dans la provenance. Consultez le [guide complet du workflow documentaire local](docs/local-document-workflow.md) pour les quatre formats prioritaires, l'API de recherche, les références, les politiques qualité, le point d'entrée portable et le diagnostic.
 
@@ -550,6 +553,8 @@ Les documents ne sont pas concaténés puis tronqués aveuglément. GPTMOSS sél
 | Mémoire de session | mémoire du processus | Non persistée ; propre à la session. |
 | Télémétrie | `telemetry.jsonl` | Événements horodatés et données assainies. |
 | Artefacts | `uploads/` | Fichiers déposés et métadonnées. |
+
+La mémoire durable est typée (`fact`, `decision`, `preference`, `constraint`, `lesson`) et cloisonnée par projet. Un agent peut rechercher les entrées validées ou proposer une nouvelle entrée ; il ne peut ni valider sa propre proposition ni la rendre globale. La validation humaine conserve la provenance et un remplacement validé masque la version obsolète sans effacer son historique.
 
 `max_context_chars` est un plancher lorsque la gestion adaptative est active : le budget grandit avec la tâche, les exigences et les étapes. Les sorties d’outils utilisent elles aussi un budget croissant, sans modifier la trace complète sauvegardée. Si le fournisseur refuse encore la taille, GPTMOSS apprend une enveloppe plus petite, conserve le système et l’ordre récent des outils, puis retente. Les recherches de mémoire automatique ne réutilisent que les entrées validées et non expirées. Les traces masquent les champs sensibles connus (`api_key`, `authorization`, `token`, `password`, `secret`).
 
@@ -632,7 +637,7 @@ Une image n'est réellement transmise au modèle que si le panneau **Diagnostics
 
 ### Créer, rechercher, modifier et valider une mémoire
 
-La section **Mémoire persistante** permet de saisir le contenu, sa provenance, une expiration facultative en jours et son état de validation. Une mémoire non validée est conservée mais n'est pas réutilisée automatiquement par l'agent.
+La section **Mémoire persistante** permet de saisir le contenu, son type, sa portée, sa provenance, une expiration facultative en jours et son état de validation. La portée projet est la valeur sûre par défaut ; une portée globale doit être choisie explicitement. Une mémoire non validée est conservée mais n'est pas réutilisée automatiquement par l'agent.
 
 - utilisez le champ de filtre pour rechercher sans recharger la page ;
 - **Modifier** recharge l'entrée dans le formulaire ;

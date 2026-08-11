@@ -20,7 +20,7 @@ PROJECT_ROOT = SCRIPT_DIRECTORY.parent
 BUILDER_SCRIPT = SCRIPT_DIRECTORY / "prepare_offline_source.py"
 MANIFEST_PATH = PROJECT_ROOT / "offline-runtime-manifest.json"
 LOG_PATH = PROJECT_ROOT / "offline-preparation.log"
-REQUIRED_IMPORTS = "fastapi, httpx, openai, pydantic, pytest, uvicorn, websockets"
+REQUIRED_IMPORTS = "fastapi, httpx, openai, pydantic, pypdf, pytest, uvicorn, websockets"
 
 
 class TeeStream:
@@ -29,7 +29,11 @@ class TeeStream:
 
     def write(self, value: str) -> int:
         for stream in self.streams:
-            stream.write(value)
+            try:
+                stream.write(value)
+            except UnicodeEncodeError:
+                encoding = getattr(stream, "encoding", None) or "ascii"
+                stream.write(value.encode(encoding, errors="replace").decode(encoding))
             stream.flush()
         return len(value)
 
@@ -50,7 +54,10 @@ def _candidate_commands() -> Iterable[tuple[str, list[str], str]]:
             continue
         normalized = os.path.normcase(os.path.abspath(executable))
         key = (normalized, tuple(prefix))
-        if key in seen or "\\microsoft\\windowsapps\\" in normalized:
+        # A WindowsApps path can now be either the old non-functional Store
+        # alias or a genuine managed Python installation. The executable probe
+        # below is authoritative, so do not reject candidates by path name.
+        if key in seen:
             continue
         seen.add(key)
         yield executable, prefix, label
