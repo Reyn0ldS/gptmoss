@@ -13,7 +13,12 @@ from gptmoss.core.adaptive import tool_call_fingerprint
 from gptmoss.core.delivery import build_delivery_contract
 from gptmoss.core.artifacts import ArtifactStore
 from gptmoss.core.event_bus import EventBus
-from gptmoss.core.execution import ExecutionEngine, ProviderUnavailableError, normalize_plan
+from gptmoss.core.execution import (
+    ExecutionEngine,
+    ProviderConfigurationError,
+    ProviderUnavailableError,
+    normalize_plan,
+)
 from gptmoss.core.skills import SkillRegistry
 from gptmoss.core.state import StateEngine
 from gptmoss.memory.ram import RAMMemoryProvider
@@ -586,6 +591,62 @@ async def test_transient_llm_errors_are_retried_without_losing_execution(tmp_pat
 
     assert response["content"] == "recovered"
     assert no_wait.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_provider_authentication_error_is_actionable_and_never_retried(tmp_path):
+    class UnauthorizedLLM(MockLLMProvider):
+        def __init__(self):
+            super().__init__()
+            self.calls = 0
+
+        async def completion(self, *args, **kwargs):
+            self.calls += 1
+            raise RuntimeError("Error code: 401 - {'error': 'Unauthorized'}")
+
+    llm = UnauthorizedLLM()
+    engine, _ = _engine(tmp_path, llm)
+
+    with pytest.raises(ProviderConfigurationError, match="Paramètres"):
+        await engine._completion_with_recovery("unauthorized", messages=[])
+
+    assert llm.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_unauthorized_specialist_is_not_replaced_by_an_identical_retry(tmp_path):
+    class UnauthorizedLLM(MockLLMProvider):
+        async def completion(self, *args, **kwargs):
+            raise RuntimeError("Error code: 401 - {'error': 'Unauthorized'}")
+
+    engine, state = _engine(tmp_path, UnauthorizedLLM())
+    engine.max_step_retries = 3
+    parent = state.get_execution("unauthorized-parent")
+    parent.current_plan = {"steps": [{
+        "id": 0,
+        "role": "analyst",
+        "specialist": "Local Corpus Evidence Analyst",
+        "description": "Inventory every explicit attachment",
+        "dependencies": [],
+        "expertise": ["document evidence"],
+        "required_artifacts": [],
+        "acceptance_criteria": ["Record source coverage"],
+        "verification_commands": [],
+    }]}
+
+    await engine.execute_task(
+        "unauthorized-parent",
+        "Inventory every explicit attachment without Internet evidence",
+    )
+
+    children = [
+        execution for execution in state.executions.values()
+        if execution.variables.get("parent_execution_id") == "unauthorized-parent"
+    ]
+    assert parent.status == "failed"
+    assert len(children) == 1
+    assert parent.current_plan["steps"][0].get("retry_count", 0) == 0
+    assert "401/403" in parent.results["error"]
 
 
 @pytest.mark.asyncio

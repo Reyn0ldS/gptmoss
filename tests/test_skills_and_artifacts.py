@@ -1,4 +1,5 @@
 import base64
+import errno
 from io import BytesIO
 import json
 from pathlib import Path
@@ -7,6 +8,7 @@ from zipfile import ZIP_DEFLATED, ZipFile
 import pytest
 
 from gptmoss.core.artifacts import ArtifactStore
+from gptmoss.core import durable_io
 from gptmoss.core.skills import SkillRegistry
 
 
@@ -140,6 +142,56 @@ def test_artifact_store_removes_failed_document_upload(tmp_path):
         )
 
     assert list(store.root.iterdir()) == []
+
+
+def test_artifact_store_retries_transient_unc_document_writes(tmp_path, monkeypatch):
+    store = ArtifactStore(str(tmp_path))
+    original_write = durable_io._write_once
+    attempts = 0
+
+    def flaky_write(path, payload):
+        nonlocal attempts
+        if ".document.json." in path.name:
+            attempts += 1
+            if attempts < 3:
+                raise OSError(errno.EINVAL, "transient UNC redirector failure")
+        return original_write(path, payload)
+
+    monkeypatch.setattr(durable_io, "_write_once", flaky_write)
+    monkeypatch.setattr(durable_io.time, "sleep", lambda _delay: None)
+
+    metadata = store.save_base64(
+        "requirements.docx",
+        base64.b64encode(_minimal_docx_bytes()).decode("ascii"),
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    )
+
+    assert attempts == 3
+    assert store.document(metadata["id"]).title == "Exigences locales"
+    assert not list(store.root.glob(".*.tmp"))
+
+
+def test_artifact_store_cleans_a_persistent_unc_write_failure(tmp_path, monkeypatch):
+    store = ArtifactStore(str(tmp_path))
+    original_write = durable_io._write_once
+
+    def failing_write(path, payload):
+        if ".document.json." in path.name:
+            raise OSError(errno.EINVAL, "persistent UNC redirector failure")
+        return original_write(path, payload)
+
+    monkeypatch.setattr(durable_io, "_write_once", failing_write)
+    monkeypatch.setattr(durable_io.time, "sleep", lambda _delay: None)
+
+    with pytest.raises(OSError, match="persistent UNC"):
+        store.save_base64(
+            "requirements.docx",
+            base64.b64encode(_minimal_docx_bytes()).decode("ascii"),
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        )
+
+    assert list(store.root.iterdir()) == []
+    assert store.document_index.stats()["documents"] == 0
 
 
 def test_artifact_store_rebuilds_a_corrupt_persistent_index(tmp_path):

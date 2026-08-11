@@ -1326,7 +1326,7 @@
                     </div>
                 </div>
                 <label class="form-label" for="task-input">Décrivez la tâche à accomplir</label>
-                <input type="file" id="task-attachments" multiple accept=".docx,.pptx,.txt,.md,.json,.csv,.html,.htm,.png,.jpg,.jpeg,.webp" style="margin-bottom: 10px; width: 100%; color: var(--text-muted);"><textarea class="task-textarea" id="task-input" placeholder="Ex: Crée un fichier de salutations, ou analyse le dossier actuel..."></textarea>
+                <input type="file" id="task-attachments" multiple accept=".docx,.pptx,.txt,.md,.json,.csv,.html,.htm,.png,.jpg,.jpeg,.webp" onchange="resetTaskAttachmentUploads()" style="margin-bottom: 10px; width: 100%; color: var(--text-muted);"><textarea class="task-textarea" id="task-input" placeholder="Ex: Crée un fichier de salutations, ou analyse le dossier actuel..."></textarea>
                 <button id="task-submit-btn" class="task-submit-btn" onclick="submitNewTask()">Démarrer l'exécution</button>
             </div>
         </div>
@@ -1411,6 +1411,7 @@
         let socket = null;
         let websocketReconnectTimer = null;
         const selectedLibraryArtifacts = new Set();
+        const uploadedTaskAttachments = new Map();
         let runtimeControl = null;
         let runtimeStatusTimer = null;
         let pendingServerRedirectPort = null;
@@ -1806,7 +1807,12 @@
                             } else if (data.type === "ExecutionCompleted") {
                                 showToast("Félicitations, la tâche est terminée !", "success");
                             } else if (data.type === "ExecutionFailed") {
-                                showToast(`Erreur d'exécution : ${data.payload.error}`, "error");
+                                const error = String(data.payload.error || "Erreur inconnue");
+                                if (/401|403|unauthori[sz]ed|authenti(?:cation|fication)|invalid api key/i.test(error)) {
+                                    showToast("Authentification LLM refusée. Corrigez la clé dans Paramètres, testez la connexion, puis cliquez Reprendre.", "error");
+                                } else {
+                                    showToast(`Erreur d'exécution : ${error}`, "error");
+                                }
                             }
                         }
                     }
@@ -1884,7 +1890,8 @@
                 const btnDelete = document.getElementById("btn-delete");
                 
                 btnPause.style.display = exec.status === "running" ? "block" : "none";
-                btnResume.style.display = ((exec.status === "paused" && !exec.variables?.pending_approval && !exec.variables?.pending_scope_approval) || exec.status === "waiting_provider") ? "block" : "none";
+                const resumableFailure = exec.status === "failed" && !exec.variables?.parent_execution_id;
+                btnResume.style.display = ((exec.status === "paused" && !exec.variables?.pending_approval && !exec.variables?.pending_scope_approval) || exec.status === "waiting_provider" || resumableFailure) ? "block" : "none";
                 btnCancel.style.display = (["running", "paused", "pending", "waiting_provider"].includes(exec.status)) ? "block" : "none";
                 btnDelete.style.display = "block";
 
@@ -2147,6 +2154,7 @@
                 const data = await res.json();
                 const newId = data.execution_id;
                 selectedLibraryArtifacts.clear();
+                uploadedTaskAttachments.clear();
                 const attachmentInput = document.getElementById("task-attachments");
                 if (attachmentInput) attachmentInput.value = "";
                 
@@ -2541,7 +2549,7 @@
             try {
                 const response = await requestApi("/api/settings/test-connection", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(collectSettingsPayload())});
                 const result = await response.json();
-                showToast(`Connexion réussie (${result.models_count} modèles, modèle ${result.model_available ? "disponible" : "non listé"}).`, result.model_available ? "success" : "warning");
+                showToast(`Connexion et inférence réussies (${result.models_count} modèles, modèle ${result.model_available ? "disponible" : "non listé"}).`, result.model_available ? "success" : "warning");
             } catch (err) { showToast("Test LLM échoué : " + err.message, "error"); }
             finally { button.disabled = false; button.textContent = "Tester la connexion"; }
         }
@@ -2567,6 +2575,14 @@
                 closeSettingsModal(); loadProjectOptions(); fetchExecutions();
             } catch (err) { showToast("Erreur lors de l'enregistrement : " + err.message, "error"); }
         }
+        function resetTaskAttachmentUploads() {
+            uploadedTaskAttachments.clear();
+        }
+
+        function taskAttachmentKey(file) {
+            return `${file.name}\u0000${file.size}\u0000${file.lastModified}`;
+        }
+
         async function uploadSelectedAttachments() {
             const files = Array.from(document.getElementById("task-attachments")?.files || []);
             const allowed = {
@@ -2588,17 +2604,27 @@
                 "csv":"text/csv", "html":"text/html", "htm":"text/html"
             };
             const ids = Array.from(selectedLibraryArtifacts);
-            for (const file of files) {
+            for (let index = 0; index < files.length; index++) {
+                const file = files[index];
+                const cacheKey = taskAttachmentKey(file);
+                if (uploadedTaskAttachments.has(cacheKey)) {
+                    ids.push(uploadedTaskAttachments.get(cacheKey));
+                    continue;
+                }
                 const extension = file.name.includes(".") ? file.name.split(".").pop().toLowerCase() : "";
                 const type = allowed[file.type] || extensionTypes[extension] || "";
                 if (!type) throw new Error(`Format non pris en charge : ${file.name}`);
+                const submitButton = document.getElementById("task-submit-btn");
+                if (submitButton) submitButton.textContent = `Dépôt ${index + 1}/${files.length}…`;
                 const data = await file.arrayBuffer();
                 const bytes = new Uint8Array(data); let binary = "";
                 bytes.forEach(byte => binary += String.fromCharCode(byte));
                 const response = await requestApi("/artifacts", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({filename:file.name, content_type:type, content_base64:btoa(binary)})});
-                ids.push((await response.json()).id);
+                const artifactId = (await response.json()).id;
+                uploadedTaskAttachments.set(cacheKey, artifactId);
+                ids.push(artifactId);
             }
-            return ids;
+            return Array.from(new Set(ids));
         }
 
         async function openLibraryModal() {

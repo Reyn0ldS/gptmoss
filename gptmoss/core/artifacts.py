@@ -8,10 +8,16 @@ import os
 import re
 import time
 import uuid
+from contextlib import suppress
 from pathlib import Path
 from typing import Any, Dict, List
 
 from gptmoss.core.corpus import LocalDocumentIndex
+from gptmoss.core.durable_io import (
+    unlink_resilient,
+    write_bytes_atomic,
+    write_text_atomic,
+)
 from gptmoss.core.documents import (
     NormalizedDocument,
     SUPPORTED_DOCUMENT_TYPES,
@@ -63,10 +69,11 @@ class ArtifactStore:
         artifact_id = str(uuid.uuid4())
         safe_name = self._safe_name(filename)
         path = self.root / f"{artifact_id}_{safe_name}"
-        path.write_bytes(data)
         document_path: Path | None = None
         metadata_path = self.root / f"{artifact_id}.json"
+        indexed = False
         try:
+            write_bytes_atomic(path, data)
             metadata = {
                 "id": artifact_id,
                 "filename": safe_name,
@@ -84,7 +91,7 @@ class ArtifactStore:
                     supplied_content_type=declared_type or None,
                 ).with_filename(safe_name)
                 document_path = self.root / f"{artifact_id}.document.json"
-                document_path.write_text(document.to_json(), encoding="utf-8")
+                write_text_atomic(document_path, document.to_json())
                 metadata.update(
                     {
                         "content_type": document.content_type,
@@ -100,17 +107,24 @@ class ArtifactStore:
                     artifact_id,
                     document,
                 )
-            metadata_path.write_text(
+                indexed = True
+            write_text_atomic(
+                metadata_path,
                 json.dumps(metadata, ensure_ascii=False),
-                encoding="utf-8",
             )
             return metadata
         except (OSError, ValueError):
-            self.document_index.remove_document(artifact_id, persist=False)
-            path.unlink(missing_ok=True)
+            try:
+                self.document_index.remove_document(artifact_id, persist=indexed)
+            except OSError:
+                self.document_index.remove_document(artifact_id, persist=False)
+            with suppress(OSError):
+                unlink_resilient(path)
             if document_path is not None:
-                document_path.unlink(missing_ok=True)
-            metadata_path.unlink(missing_ok=True)
+                with suppress(OSError):
+                    unlink_resilient(document_path)
+            with suppress(OSError):
+                unlink_resilient(metadata_path)
             raise
 
     def _document_metadata(self) -> list[dict[str, Any]]:

@@ -398,6 +398,18 @@ async def upload_artifact(req: UploadArtifactRequest):
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except OSError as exc:
+        logger.warning(
+            "Artifact persistence failed after filesystem retries: %s",
+            exc,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Le stockage du workspace est momentanément indisponible. "
+                "Vérifiez le partage réseau puis relancez uniquement les fichiers en échec."
+            ),
+        ) from exc
     public_fields = (
         "id", "filename", "content_type", "size_bytes", "sha256", "created_at",
         "document_title", "document_blocks", "document_parser",
@@ -1153,12 +1165,38 @@ async def test_connection(req: SettingsRequest):
             response = await client.get(url, headers=headers)
             response.raise_for_status()
             payload = response.json()
+            chat_response = await client.post(
+                req.base_url.rstrip("/") + "/chat/completions",
+                headers=headers,
+                json={
+                    "model": req.model_name,
+                    "messages": [{"role": "user", "content": "Reply with OK."}],
+                    "max_tokens": 1,
+                    "temperature": 0,
+                },
+            )
+            chat_response.raise_for_status()
+            chat_payload = chat_response.json()
+            if not isinstance(chat_payload.get("choices"), list) or not chat_payload["choices"]:
+                raise ValueError("Provider returned no chat completion choice.")
     except httpx.HTTPStatusError as exc:
-        raise HTTPException(status_code=502, detail=f"Provider rejected the connection (HTTP {exc.response.status_code}).") from exc
+        endpoint = "chat completions" if exc.request.method == "POST" else "model catalog"
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                f"Provider rejected {endpoint} (HTTP {exc.response.status_code}). "
+                "Verify the API key and its inference permissions."
+            ),
+        ) from exc
     except (httpx.HTTPError, ValueError, OSError) as exc:
         raise HTTPException(status_code=502, detail=f"Unable to connect to the provider: {exc}") from exc
     models = [str(item.get("id")) for item in payload.get("data", []) if isinstance(item, dict) and item.get("id")]
-    return {"status": "connected", "model_available": req.model_name in models, "models_count": len(models)}
+    return {
+        "status": "connected",
+        "model_available": req.model_name in models,
+        "models_count": len(models),
+        "chat_completion": True,
+    }
 
 @app.post("/api/settings")
 async def update_settings(req: SettingsRequest):

@@ -259,6 +259,18 @@ class ProviderUnavailableError(RuntimeError):
         self.original_error = original_error
 
 
+class ProviderConfigurationError(RuntimeError):
+    """A permanent provider refusal that requires a settings change before retry."""
+
+    def __init__(self, original_error: Exception):
+        super().__init__(
+            "Authentification LLM refusée (HTTP 401/403). Ouvrez Paramètres, "
+            "corrigez la clé API, utilisez Tester la connexion, puis reprenez "
+            "l'exécution parente."
+        )
+        self.original_error = original_error
+
+
 class ExecutionEngine:
     """
     Execution Engine handles the execution loop of tasks step-by-step.
@@ -329,14 +341,19 @@ class ExecutionEngine:
         return self._capabilities.get(capability_name.lower())
 
     @staticmethod
-    def _is_transient_llm_error(error: Exception) -> bool:
+    def _is_permanent_llm_error(error: Exception) -> bool:
         text = (error.__class__.__name__ + " " + str(error)).lower()
         permanent_markers = ("authentication", "permissiondenied", "invalid api key", "401", "403")
+        return any(marker in text for marker in permanent_markers)
+
+    @classmethod
+    def _is_transient_llm_error(cls, error: Exception) -> bool:
+        text = (error.__class__.__name__ + " " + str(error)).lower()
         transient_markers = (
             "connection", "timeout", "timed out", "ratelimit", "rate limit", "429",
             "internalserver", "server error", "502", "503", "504", "temporar", "unavailable",
         )
-        return not any(marker in text for marker in permanent_markers) and any(
+        return not cls._is_permanent_llm_error(error) and any(
             marker in text for marker in transient_markers
         )
 
@@ -347,6 +364,8 @@ class ExecutionEngine:
             try:
                 return await self.llm_provider.completion(**kwargs)
             except Exception as error:
+                if self._is_permanent_llm_error(error):
+                    raise ProviderConfigurationError(error) from error
                 if not self._is_transient_llm_error(error):
                     raise
                 if consecutive_errors >= min(4, self.max_step_iterations):
@@ -1610,11 +1629,23 @@ class ExecutionEngine:
             ))
 
             planning_started = time.perf_counter()
-            plan_result = await self.planner.plan(
-                task, context, schemas,
-                parent_execution_id=state.variables.get("parent_execution_id"),
-                delegated_step=state.variables.get("delegated_step"),
-            )
+            try:
+                plan_result = await self.planner.plan(
+                    task, context, schemas,
+                    parent_execution_id=state.variables.get("parent_execution_id"),
+                    delegated_step=state.variables.get("delegated_step"),
+                )
+            except ProviderUnavailableError:
+                raise
+            except Exception as error:
+                if self._is_permanent_llm_error(error):
+                    raise ProviderConfigurationError(error) from error
+                if self._is_transient_llm_error(error):
+                    raise ProviderUnavailableError(
+                        "LLM provider is temporarily unavailable; execution state was preserved.",
+                        error,
+                    ) from error
+                raise
             plan_result = normalize_plan(plan_result)
             plan_result = merge_inherited_requirements(
                 plan_result, state.variables.get("inherited_requirements")
@@ -1936,7 +1967,13 @@ class ExecutionEngine:
                         step["delivery"] = delivery
                         result = json.dumps(delivery, ensure_ascii=False)
                     else:
-                        raise RuntimeError(f"Sub-agent {role_name} stopped with status: {sub_state.status}")
+                        child_error = str(
+                            sub_state.results.get("error")
+                            or f"status: {sub_state.status}"
+                        )
+                        raise RuntimeError(
+                            f"Sub-agent {role_name} stopped: {child_error}"
+                        )
                 else:
                     # Execute step loop locally
                     if specialization.get("profile"):
@@ -1994,6 +2031,18 @@ class ExecutionEngine:
             except Exception as e:
                 if not sub_id:
                     self._record_specialization_outcome(execution_id, step, False, str(e))
+                if self._is_permanent_llm_error(e):
+                    step["status"] = "failed"
+                    step["error"] = str(e)
+                    await self.event_bus.publish(Event(
+                        type="StepFailed",
+                        payload={
+                            "execution_id": execution_id,
+                            "step_index": step_index,
+                            "error": str(e),
+                        },
+                    ))
+                    raise
                 repair_step = next((
                     candidate for candidate in steps
                     if candidate.get("status") == "pending"
