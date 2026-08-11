@@ -19,12 +19,13 @@ import xml.etree.ElementTree as ET
 
 DOCX_CONTENT_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 PPTX_CONTENT_TYPE = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+PDF_CONTENT_TYPE = "application/pdf"
 HTML_CONTENT_TYPE = "text/html"
 TEXT_CONTENT_TYPES = frozenset(
     {"text/plain", "text/markdown", "application/json", "text/csv"}
 )
 SUPPORTED_DOCUMENT_TYPES = frozenset(
-    {*TEXT_CONTENT_TYPES, HTML_CONTENT_TYPE, DOCX_CONTENT_TYPE, PPTX_CONTENT_TYPE}
+    {*TEXT_CONTENT_TYPES, HTML_CONTENT_TYPE, DOCX_CONTENT_TYPE, PPTX_CONTENT_TYPE, PDF_CONTENT_TYPE}
 )
 
 _EXTENSION_TYPES = {
@@ -37,6 +38,7 @@ _EXTENSION_TYPES = {
     ".htm": HTML_CONTENT_TYPE,
     ".docx": DOCX_CONTENT_TYPE,
     ".pptx": PPTX_CONTENT_TYPE,
+    ".pdf": PDF_CONTENT_TYPE,
 }
 _URL_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://")
 _SPACE_RE = re.compile(r"[ \t\f\v]+")
@@ -353,6 +355,9 @@ def detect_document_type(
         ):
             return PPTX_CONTENT_TYPE
         raise UnsupportedDocumentError("ZIP archive is not a supported DOCX or PPTX")
+
+    if sample.startswith(b"%PDF-"):
+        return PDF_CONTENT_TYPE
 
     if _looks_like_html(sample):
         return HTML_CONTENT_TYPE
@@ -898,6 +903,72 @@ class PPTXDocumentParser:
         )
 
 
+class PDFDocumentParser:
+    """Extract page text locally with explicit page provenance."""
+
+    name = "pypdf"
+    version = "1"
+    content_types = frozenset({PDF_CONTENT_TYPE})
+
+    def parse(
+        self,
+        path: Path,
+        *,
+        document_id: str,
+        content_type: str,
+        archive_policy: ArchiveSafetyPolicy,
+    ) -> NormalizedDocument:
+        try:
+            from pypdf import PdfReader
+            from pypdf.errors import PdfReadError
+        except ImportError as exc:
+            raise DocumentParseError(
+                "PDF support requires the bundled pypdf dependency"
+            ) from exc
+        try:
+            reader = PdfReader(str(path), strict=False)
+            if reader.is_encrypted:
+                try:
+                    unlocked = reader.decrypt("")
+                except Exception as exc:
+                    raise DocumentParseError(
+                        "Encrypted PDF cannot be opened locally"
+                    ) from exc
+                if not unlocked:
+                    raise DocumentParseError("Encrypted PDF cannot be opened locally")
+            builder = _BlockBuilder(document_id, path.name)
+            empty_pages = []
+            for number, page in enumerate(reader.pages, 1):
+                try:
+                    text = page.extract_text() or ""
+                except Exception as exc:
+                    raise DocumentParseError(
+                        f"PDF text extraction failed on page {number}: {exc}"
+                    ) from exc
+                paragraphs = [
+                    item.strip()
+                    for item in re.split(r"\n\s*\n", text)
+                    if item.strip()
+                ]
+                if not paragraphs and text.strip():
+                    paragraphs = [text.strip()]
+                if not paragraphs:
+                    empty_pages.append(number)
+                for paragraph in paragraphs:
+                    builder.add(
+                        "paragraph", paragraph, page_number=number,
+                        locator=f"page:{number}",
+                    )
+            title = str((reader.metadata or {}).get("/Title") or "").strip()
+        except PdfReadError as exc:
+            raise DocumentParseError("Invalid PDF document") from exc
+        return _document(
+            path, document_id, content_type, title or path.stem, self, builder,
+            page_count=len(reader.pages), empty_pages=empty_pages,
+            external_resources_loaded=False, title_generated=not bool(title),
+        )
+
+
 class DocumentParserRegistry:
     def __init__(self, parsers: Iterable[DocumentParser] = ()) -> None:
         self._parsers: dict[str, DocumentParser] = {}
@@ -922,7 +993,10 @@ class DocumentParserRegistry:
 
 
 DEFAULT_DOCUMENT_PARSERS = DocumentParserRegistry(
-    (PlainTextParser(), HTMLDocumentParser(), DOCXDocumentParser(), PPTXDocumentParser())
+    (
+        PlainTextParser(), HTMLDocumentParser(), DOCXDocumentParser(),
+        PPTXDocumentParser(), PDFDocumentParser(),
+    )
 )
 
 

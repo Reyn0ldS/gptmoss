@@ -22,11 +22,12 @@ from configure_embedded_python import configure_runtime
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 RUNTIME_REQUIREMENTS = PROJECT_ROOT / "requirements-runtime.txt"
+RUNTIME_CONSTRAINTS = PROJECT_ROOT / "constraints-runtime.txt"
 DEFAULT_VERSION = "3.13.14"
 KNOWN_SHA256 = {
     "3.13.14": "90b4e5b9898b72d744650524bff92377c367f44bd5fbd09e3148656c080ad907",
 }
-REQUIRED_IMPORTS = "fastapi, httpx, openai, pydantic, pytest, uvicorn, websockets"
+REQUIRED_IMPORTS = "fastapi, httpx, openai, pydantic, pypdf, pytest, uvicorn, websockets"
 
 
 @dataclass(frozen=True)
@@ -137,6 +138,8 @@ def install_target_dependencies(spec: RuntimeSpec, site_packages: Path) -> None:
         str(site_packages),
         "--requirement",
         str(RUNTIME_REQUIREMENTS),
+        "--constraint",
+        str(RUNTIME_CONSTRAINTS),
     ]
     print(f"Resolving wheels for CPython {spec.major_minor} on Windows amd64...")
     subprocess.run(command, check=True)
@@ -200,7 +203,17 @@ def replace_runtime(staged_runtime: Path, destination: Path) -> None:
             backup.rename(destination)
         raise
     if backup.exists():
-        shutil.rmtree(backup)
+        try:
+            shutil.rmtree(backup)
+        except OSError as error:
+            # The old embedded interpreter can remain locked briefly on
+            # Windows (antivirus scanning is enough). The new runtime has
+            # already been validated and moved atomically into place, so do
+            # not invalidate the build solely because cleanup is deferred.
+            print(
+                f"[WARNING] New runtime installed; old backup cleanup was deferred: {error}",
+                flush=True,
+            )
 
 
 def write_manifest(spec: RuntimeSpec, runtime_directory: Path) -> None:
@@ -216,6 +229,9 @@ def write_manifest(spec: RuntimeSpec, runtime_directory: Path) -> None:
         "requirements_sha256": sha256_normalized_text_file(requirements),
         "requirements_hash_mode": "utf-8-lf",
         "requirements_file": requirements.name,
+        "constraints_sha256": sha256_normalized_text_file(RUNTIME_CONSTRAINTS),
+        "constraints_hash_mode": "utf-8-lf",
+        "constraints_file": RUNTIME_CONSTRAINTS.name,
         "packages": package_versions(site_packages),
         "runtime_directory": runtime_directory.name,
         "runtime_file_count": len(files),

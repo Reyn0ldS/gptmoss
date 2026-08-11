@@ -29,6 +29,8 @@ from gptmoss.core.delivery import (
     path_is_owned,
 )
 from gptmoss.core.adaptive import AdaptiveRuntimePolicy, tool_call_fingerprint
+from gptmoss.core.professional_delivery import apply_professional_profile
+from gptmoss.core.delivery_package import build_delivery_package
 
 ROLE_DISPLAY_NAMES = {
     "architect": "Architecte",
@@ -1704,6 +1706,11 @@ class ExecutionEngine:
                                 "Keep the project paused or approve only an adapter/configuration deliverable.",
                             ],
                         })
+            plan_result = apply_professional_profile(
+                plan_result,
+                self.artifact_store,
+                state.variables.get("attachment_ids", []),
+            )
             self.telemetry.record("plan_generated", execution_id, duration_ms=round((time.perf_counter() - planning_started) * 1000, 2), steps=len(plan_result.get("steps", [])))
             state.current_plan = plan_result
             state.variables["delivery_contract"] = build_delivery_contract(
@@ -2269,6 +2276,14 @@ class ExecutionEngine:
                         ))
                         break
                     state.status = "completed"
+                    workspace = self._delivery_workspace(execution_id)
+                    if workspace:
+                        package = build_delivery_package(
+                            workspace, execution_id, state.current_plan,
+                            assurance_report,
+                        )
+                        if package:
+                            state.results["delivery_package"] = package
                     state.results["deliveries"] = [
                         state.results.get("steps", {}).get(str(step.get("id"))) for step in steps
                     ]

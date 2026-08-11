@@ -1,12 +1,15 @@
 {
-  "created_at": "2026-07-28T12:18:00.282989+00:00",
+  "created_at": "2026-08-11T12:07:27.717004+00:00",
   "python_version": "3.13.14",
   "platform": "win_amd64",
   "source_url": "https://www.python.org/ftp/python/3.13.14/python-3.13.14-embed-amd64.zip",
   "source_sha256": "90b4e5b9898b72d744650524bff92377c367f44bd5fbd09e3148656c080ad907",
-  "requirements_sha256": "5308f1a13f25321859ce66098e48e104e141d720a8dee5c873257c11829889df",
+  "requirements_sha256": "2983544d9336d1e8970dc10d80f992d03f5cde65f0f53b711659af05fe57f390",
   "requirements_hash_mode": "utf-8-lf",
   "requirements_file": "requirements-runtime.txt",
+  "constraints_sha256": "ef9773f04a623bd46e256cb1ace61c29f3f4fbff898eb5dce0fcf5e265f727e3",
+  "constraints_hash_mode": "utf-8-lf",
+  "constraints_file": "constraints-runtime.txt",
   "packages": {
     "Pygments": "2.20.0",
     "annotated-doc": "0.0.4",
@@ -28,6 +31,7 @@
     "pluggy": "1.6.0",
     "pydantic": "2.13.4",
     "pydantic_core": "2.46.4",
+    "pypdf": "6.15.0",
     "pytest": "9.1.1",
     "pytest-asyncio": "1.4.0",
     "python-dotenv": "1.2.2",
@@ -40,6 +44,6 @@
     "websockets": "16.1.1"
   },
   "runtime_directory": "python-3.13.14-embed-amd64",
-  "runtime_file_count": 2722,
-  "runtime_size_bytes": 48345380
+  "runtime_file_count": 2786,
+  "runtime_size_bytes": 50006863
 }

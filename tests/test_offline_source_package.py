@@ -46,6 +46,7 @@ def test_runtime_requirements_use_lf_in_git_archives():
     attributes = (PROJECT_ROOT / ".gitattributes").read_text(encoding="utf-8").splitlines()
 
     assert "requirements-runtime.txt text eol=lf" in attributes
+    assert "constraints-runtime.txt text eol=lf" in attributes
 
 
 def test_archive_extraction_rejects_parent_traversal(tmp_path):
@@ -74,6 +75,9 @@ def test_committed_runtime_matches_manifest():
     requirements = PROJECT_ROOT / manifest["requirements_file"]
     assert manifest["requirements_hash_mode"] == "utf-8-lf"
     assert manifest["requirements_sha256"] == builder.sha256_normalized_text_file(requirements)
+    constraints = PROJECT_ROOT / manifest["constraints_file"]
+    assert manifest["constraints_hash_mode"] == "utf-8-lf"
+    assert manifest["constraints_sha256"] == builder.sha256_normalized_text_file(constraints)
     assert manifest["runtime_file_count"] == len(files)
     assert manifest["runtime_size_bytes"] == sum(path.stat().st_size for path in files)
     assert max(path.stat().st_size for path in files) < 100 * 1024 * 1024

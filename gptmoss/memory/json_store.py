@@ -4,6 +4,7 @@ import uuid
 import logging
 import re
 import time
+import threading
 from typing import List, Dict, Any, Optional
 from gptmoss.interfaces.memory import MemoryProvider
 
@@ -21,11 +22,12 @@ class JSONMemoryProvider(MemoryProvider):
         self.memories: List[Dict[str, Any]] = []
         self.session_memories: Dict[str, List[Dict[str, Any]]] = {}
         self._index: Dict[str, set[str]] = {}
+        self._lock = threading.RLock()
         self._load_from_disk()
 
     @staticmethod
     def _tokens(value: Any) -> set[str]:
-        return {token for token in re.findall(r"[\\w'-]+", str(value).lower()) if len(token) > 1}
+        return {token for token in re.findall(r"[\w'-]+", str(value).lower()) if len(token) > 1}
 
     @staticmethod
     def _is_expired(item: Dict[str, Any], now: Optional[float] = None) -> bool:
@@ -34,10 +36,15 @@ class JSONMemoryProvider(MemoryProvider):
 
     def _normalise(self, item: Dict[str, Any], legacy: bool = False) -> Dict[str, Any]:
         metadata = dict(item.get("metadata") or {})
+        had_scope = "scope" in item or "scope" in metadata
         created_at = float(item.get("created_at", metadata.pop("created_at", time.time())))
         expires_at = item.get("expires_at", metadata.pop("expires_at", None))
         if expires_at is None and metadata.get("ttl_seconds") is not None:
             expires_at = created_at + float(metadata.pop("ttl_seconds"))
+        scope = str(item.get("scope") or metadata.pop("scope", "project" if had_scope else "global")).lower()
+        if scope not in {"project", "user", "global"}:
+            scope = "project"
+        kind = str(item.get("kind") or metadata.pop("kind", "fact")).lower()
         return {
             "id": item.get("id") or str(uuid.uuid4()),
             "value": item.get("value", ""),
@@ -46,6 +53,14 @@ class JSONMemoryProvider(MemoryProvider):
             "expires_at": float(expires_at) if expires_at is not None else None,
             "provenance": item.get("provenance") or metadata.pop("provenance", {"source": "legacy" if legacy else "runtime"}),
             "validated": bool(item.get("validated", True if legacy else metadata.pop("validated", False))),
+            "kind": kind,
+            "scope": scope,
+            "project_id": item.get("project_id") or metadata.pop("project_id", None),
+            "user_id": item.get("user_id") or metadata.pop("user_id", None),
+            "source_execution_id": item.get("source_execution_id") or metadata.pop("source_execution_id", None),
+            "source_artifacts": list(item.get("source_artifacts") or metadata.pop("source_artifacts", [])),
+            "supersedes_id": item.get("supersedes_id") or metadata.pop("supersedes_id", None),
+            "superseded_by": item.get("superseded_by") or metadata.pop("superseded_by", None),
         }
 
     def _rebuild_index(self) -> None:
@@ -79,13 +94,16 @@ class JSONMemoryProvider(MemoryProvider):
             self.memories = []
 
     def _save_to_disk(self):
-        try:
-            temp_path = self.file_path + ".tmp"
-            with open(temp_path, "w", encoding="utf-8") as f:
-                json.dump(self.memories, f, indent=2, ensure_ascii=False)
-            os.replace(temp_path, self.file_path)
-        except Exception as e:
-            logger.error(f"Failed to save memories to file: {e}")
+        with self._lock:
+            try:
+                temp_path = self.file_path + ".tmp"
+                with open(temp_path, "w", encoding="utf-8") as f:
+                    json.dump(self.memories, f, indent=2, ensure_ascii=False)
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(temp_path, self.file_path)
+            except Exception as e:
+                logger.error(f"Failed to save memories to file: {e}")
 
     async def search(self, query: str, limit: int = 5, session_id: Optional[str] = None, include_pending: bool = False, **kwargs) -> List[Dict[str, Any]]:
         """Search validated persistent memories plus short-lived session memory."""
@@ -94,8 +112,28 @@ class JSONMemoryProvider(MemoryProvider):
         query_tokens = self._tokens(query)
         candidates = list(self.session_memories.get(session_id, [])) if session_id else []
         candidate_ids = set().union(*(self._index.get(token, set()) for token in query_tokens)) if query_tokens else set()
+        project_id = kwargs.get("project_id")
+        user_id = kwargs.get("user_id")
+        requested_scope = kwargs.get("scope")
+        include_global = bool(kwargs.get("include_global", False))
+        requested_kind = kwargs.get("kind")
         for item in self.memories:
             if item["id"] in candidate_ids or not query_tokens:
+                if item.get("superseded_by"):
+                    continue
+                if requested_kind and item.get("kind") != requested_kind:
+                    continue
+                if requested_scope and item.get("scope") != requested_scope:
+                    continue
+                if project_id is not None:
+                    project_match = item.get("scope") == "project" and item.get("project_id") == project_id
+                    global_match = include_global and item.get("scope") == "global"
+                    if not (project_match or global_match):
+                        continue
+                elif user_id is not None and not (
+                    item.get("scope") == "user" and item.get("user_id") == user_id
+                ):
+                    continue
                 if item["validated"] or include_pending:
                     candidates.append(item)
 
@@ -111,13 +149,31 @@ class JSONMemoryProvider(MemoryProvider):
         """Store a persistent memory pending explicit validation by default."""
         created_at = time.time()
         key = str(uuid.uuid4())
-        self.memories.append(self._normalise({
+        candidate = self._normalise({
             "id": key, "value": value, "metadata": metadata or {}, "created_at": created_at,
             "expires_at": created_at + ttl_seconds if ttl_seconds is not None else None,
             "provenance": provenance or {"source": "runtime"}, "validated": validated,
-        }))
-        self._rebuild_index()
-        self._save_to_disk()
+            "kind": kwargs.get("kind", "fact"), "scope": kwargs.get("scope", "project"),
+            "project_id": kwargs.get("project_id"), "user_id": kwargs.get("user_id"),
+            "source_execution_id": kwargs.get("source_execution_id"),
+            "source_artifacts": kwargs.get("source_artifacts") or [],
+            "supersedes_id": kwargs.get("supersedes_id"),
+        })
+        signature = (
+            " ".join(str(candidate["value"]).casefold().split()), candidate["kind"],
+            candidate["scope"], candidate.get("project_id"), candidate.get("user_id"),
+        )
+        with self._lock:
+            for item in self.memories:
+                existing = (
+                    " ".join(str(item["value"]).casefold().split()), item.get("kind"),
+                    item.get("scope"), item.get("project_id"), item.get("user_id"),
+                )
+                if existing == signature and not item.get("superseded_by") and not self._is_expired(item):
+                    return str(item["id"])
+            self.memories.append(candidate)
+            self._rebuild_index()
+            self._save_to_disk()
         return key
 
     async def store_session(self, session_id: str, value: Any, metadata: Optional[Dict[str, Any]] = None) -> str:
@@ -130,26 +186,38 @@ class JSONMemoryProvider(MemoryProvider):
         return key
 
     async def validate(self, key: str, validated_by: str = "system") -> bool:
-        for item in self.memories:
-            if item["id"] == key:
-                item["validated"] = True
-                item["validated_by"] = validated_by
-                item["validated_at"] = time.time()
-                self._save_to_disk()
-                return True
+        with self._lock:
+            for item in self.memories:
+                if item["id"] == key:
+                    item["validated"] = True
+                    item["validated_by"] = validated_by
+                    item["validated_at"] = time.time()
+                    supersedes_id = item.get("supersedes_id")
+                    if supersedes_id:
+                        for previous in self.memories:
+                            if previous["id"] == supersedes_id:
+                                previous["superseded_by"] = key
+                                previous["validated"] = False
+                                break
+                    self._save_to_disk()
+                    return True
         return False
 
     async def update(self, key: str, value: Any, metadata: Optional[Dict[str, Any]] = None, provenance: Optional[Dict[str, Any]] = None, validated: bool = False, ttl_seconds: Optional[float] = None, **kwargs) -> bool:
-        for item in self.memories:
-            if item["id"] == key:
-                item["value"] = value
-                item["metadata"] = metadata or {}
-                item["provenance"] = provenance or item.get("provenance") or {"source": "gui"}
-                item["validated"] = validated
-                item["expires_at"] = time.time() + ttl_seconds if ttl_seconds is not None else None
-                self._rebuild_index()
-                self._save_to_disk()
-                return True
+        with self._lock:
+            for item in self.memories:
+                if item["id"] == key:
+                    item["value"] = value
+                    item["metadata"] = metadata or {}
+                    item["provenance"] = provenance or item.get("provenance") or {"source": "gui"}
+                    item["validated"] = validated
+                    item["expires_at"] = time.time() + ttl_seconds if ttl_seconds is not None else None
+                    for field in ("kind", "scope", "project_id", "user_id", "source_execution_id", "source_artifacts", "supersedes_id"):
+                        if field in kwargs:
+                            item[field] = kwargs[field]
+                    self._rebuild_index()
+                    self._save_to_disk()
+                    return True
         return False
 
     async def clear_session(self, session_id: str) -> None:
@@ -157,12 +225,13 @@ class JSONMemoryProvider(MemoryProvider):
 
     async def delete(self, key: str, **kwargs) -> bool:
         """Delete matching memory item and save."""
-        for idx, item in enumerate(self.memories):
-            if item["id"] == key:
-                self.memories.pop(idx)
-                self._rebuild_index()
-                self._save_to_disk()
-                return True
+        with self._lock:
+            for idx, item in enumerate(self.memories):
+                if item["id"] == key:
+                    self.memories.pop(idx)
+                    self._rebuild_index()
+                    self._save_to_disk()
+                    return True
         return False
 
     async def summarize(self, **kwargs) -> str:
@@ -174,6 +243,34 @@ class JSONMemoryProvider(MemoryProvider):
         for item in valid_memories:
             lines.append(f"- {item['value']}")
         return "\n".join(lines)
+
+    def list_memories(self, **filters) -> List[Dict[str, Any]]:
+        """Return non-expired records using the same explicit scope boundaries as search."""
+        project_id = filters.get("project_id")
+        include_global = bool(filters.get("include_global", False))
+        scope = filters.get("scope")
+        kind = filters.get("kind")
+        validated = filters.get("validated")
+        query = str(filters.get("query") or "").casefold()
+        results = []
+        for item in self.memories:
+            if self._is_expired(item):
+                continue
+            if project_id is not None:
+                project_match = item.get("scope") == "project" and item.get("project_id") == project_id
+                global_match = include_global and item.get("scope") == "global"
+                if not (project_match or global_match):
+                    continue
+            if scope and item.get("scope") != scope:
+                continue
+            if kind and item.get("kind") != kind:
+                continue
+            if validated is not None and bool(item.get("validated")) is not bool(validated):
+                continue
+            if query and query not in str(item.get("value", "")).casefold():
+                continue
+            results.append(dict(item))
+        return sorted(results, key=lambda item: float(item.get("created_at", 0)), reverse=True)
 
     async def compress(self, **kwargs) -> None:
         """Stub compression."""

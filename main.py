@@ -21,6 +21,7 @@ from gptmoss.capabilities import (
     DeveloperTeamCapability,
     DocumentCapability,
     FilesystemCapability,
+    MemoryCapability,
     ShellCapability,
 )
 from gptmoss.planners import SimplePlanner
@@ -246,6 +247,9 @@ def bootstrap_runtime(workspace_root: str):
 
     document_cap = DocumentCapability(artifact_store)
     exec_engine.register_capability("documents", document_cap)
+
+    memory_cap = MemoryCapability(memory_provider)
+    exec_engine.register_capability("memory", memory_cap)
     
     shell_cap = ShellCapability(workspace_path, state_engine, safe_mode=safe_shell_mode, timeout_seconds=shell_timeout_seconds, max_output_chars=shell_max_output_chars)
     exec_engine.register_capability("shell", shell_cap)

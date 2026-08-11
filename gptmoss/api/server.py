@@ -13,7 +13,7 @@ from urllib.parse import urlsplit
 import httpx
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, BackgroundTasks, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel, Field
 
 # GUI HTML path
@@ -63,6 +63,13 @@ class MemoryRequest(BaseModel):
     provenance: Dict[str, Any] = Field(default_factory=lambda: {"source": "gui"})
     validated: bool = False
     ttl_seconds: Optional[float] = Field(default=None, ge=1, le=31_536_000)
+    kind: str = Field(default="fact", pattern=r"^(fact|decision|preference|constraint|lesson)$")
+    scope: str = Field(default="project", pattern=r"^(project|user|global)$")
+    project_id: Optional[str] = "proj-default"
+    user_id: Optional[str] = None
+    source_execution_id: Optional[str] = None
+    source_artifacts: List[str] = Field(default_factory=list)
+    supersedes_id: Optional[str] = None
 
 class SubAgentRequest(BaseModel):
     task: str = Field(min_length=1)
@@ -585,8 +592,16 @@ async def delete_skill(name: str):
     return {"status": "deleted"}
 
 @app.get("/memory")
-async def list_memory(q: str = "", validated: Optional[bool] = None):
+async def list_memory(
+    q: str = "", validated: Optional[bool] = None, scope: str = "",
+    project_id: Optional[str] = None, kind: str = "", include_global: bool = False,
+):
     provider = app_state.execution_engine.context_engine.memory_provider
+    if hasattr(provider, "list_memories"):
+        return provider.list_memories(
+            query=q, validated=validated, scope=scope or None,
+            project_id=project_id, kind=kind or None, include_global=include_global,
+        )
     items = list(getattr(provider, "memories", []))
     if q:
         query = q.casefold()
@@ -598,13 +613,26 @@ async def list_memory(q: str = "", validated: Optional[bool] = None):
 @app.post("/memory", status_code=201)
 async def create_memory(req: MemoryRequest):
     provider = app_state.execution_engine.context_engine.memory_provider
-    memory_id = await provider.store(req.value, metadata=req.metadata, provenance=req.provenance, validated=req.validated, ttl_seconds=req.ttl_seconds)
+    memory_id = await provider.store(
+        req.value, metadata=req.metadata, provenance=req.provenance,
+        validated=req.validated, ttl_seconds=req.ttl_seconds, kind=req.kind,
+        scope=req.scope, project_id=req.project_id, user_id=req.user_id,
+        source_execution_id=req.source_execution_id,
+        source_artifacts=req.source_artifacts, supersedes_id=req.supersedes_id,
+    )
     return {"id": memory_id, "status": "created"}
 
 @app.put("/memory/{memory_id}")
 async def update_memory(memory_id: str, req: MemoryRequest):
     provider = app_state.execution_engine.context_engine.memory_provider
-    if not hasattr(provider, "update") or not await provider.update(memory_id, value=req.value, metadata=req.metadata, provenance=req.provenance, validated=req.validated, ttl_seconds=req.ttl_seconds):
+    if not hasattr(provider, "update") or not await provider.update(
+        memory_id, value=req.value, metadata=req.metadata,
+        provenance=req.provenance, validated=req.validated,
+        ttl_seconds=req.ttl_seconds, kind=req.kind, scope=req.scope,
+        project_id=req.project_id, user_id=req.user_id,
+        source_execution_id=req.source_execution_id,
+        source_artifacts=req.source_artifacts, supersedes_id=req.supersedes_id,
+    ):
         raise HTTPException(status_code=404, detail="Memory not found.")
     return {"status": "updated"}
 
@@ -691,6 +719,29 @@ async def get_execution(execution_id: str):
         "results": state.results,
         "messages": convo.messages
     }
+
+@app.get("/executions/{execution_id}/delivery")
+async def get_execution_delivery(execution_id: str, download: bool = False):
+    if not app_state.state_engine or execution_id not in app_state.state_engine.executions:
+        raise HTTPException(status_code=404, detail="Execution not found.")
+    state = app_state.state_engine.get_execution(execution_id)
+    package = state.results.get("delivery_package")
+    if not isinstance(package, dict) or not package.get("archive_path"):
+        raise HTTPException(status_code=404, detail="No professional delivery package is available.")
+    archive = Path(str(package["archive_path"])).resolve()
+    filesystem = _filesystem_capability()
+    if not filesystem:
+        raise HTTPException(status_code=500, detail="Filesystem capability not initialized.")
+    workspace = Path(filesystem._get_workspace_for_execution(execution_id)).resolve()
+    delivery_root = (workspace / ".gptmoss" / "deliveries" / execution_id).resolve()
+    if archive.parent != delivery_root or not archive.is_file():
+        raise HTTPException(status_code=404, detail="Delivery archive is unavailable.")
+    if download:
+        return FileResponse(archive, media_type="application/zip", filename=archive.name)
+    return {
+        key: value for key, value in package.items()
+        if key not in {"docx_path", "manifest_path", "archive_path"}
+    } | {"download_url": f"/executions/{execution_id}/delivery?download=true"}
 
 @app.get("/executions/{execution_id}/subagents")
 async def list_subagents(execution_id: str):
