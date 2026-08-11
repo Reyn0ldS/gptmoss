@@ -5,6 +5,7 @@
   "source_url": "https://www.python.org/ftp/python/3.13.14/python-3.13.14-embed-amd64.zip",
   "source_sha256": "90b4e5b9898b72d744650524bff92377c367f44bd5fbd09e3148656c080ad907",
   "requirements_sha256": "5308f1a13f25321859ce66098e48e104e141d720a8dee5c873257c11829889df",
+  "requirements_hash_mode": "utf-8-lf",
   "requirements_file": "requirements-runtime.txt",
   "packages": {
     "Pygments": "2.20.0",
