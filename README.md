@@ -78,6 +78,8 @@ Après une modification de `requirements-runtime.txt` ou pour actualiser Python,
 
 Le constructeur télécharge CPython embeddable depuis Python.org, vérifie son SHA-256, résout uniquement les wheels d'exécution compatibles CPython 3.13/Windows amd64, les installe dans `Lib\site-packages`, teste le runtime et écrit `offline-runtime-manifest.json`. Le runtime préparé et le manifeste sont versionnés dans Git afin que les utilisateurs hors-ligne n'aient pas à répéter cette opération. `pytest` et `pytest-asyncio` font partie du runtime opérationnel : les agents QA peuvent ainsi tester les projets sans télécharger de paquet.
 
+Un double-clic sur `prepare-offline-source.bat` conserve désormais la fenêtre ouverte et écrit le diagnostic complet dans `offline-preparation.log`. Le script ignore l'alias factice `python.exe` du Microsoft Store et exige un vrai Python 64 bits avec `pip` uniquement lorsqu'une reconstruction est nécessaire. Si le runtime livré dans l'archive est déjà complet, il le vérifie et indique qu'aucun téléchargement n'est requis. Utilisez `prepare-offline-source.bat --verify-only` pour effectuer seulement cette vérification. Ce constructeur ne télécharge pas le code source GPTMOSS : celui-ci provient du clone Git ou de l'archive ZIP GitHub.
+
 Ne copiez pas un `venv` entre deux machines : les environnements virtuels ne sont pas portables.
 
 Avec une installation Python complète, une autre solution hors-ligne consiste à créer un dossier `wheelhouse` sur la machine connectée :

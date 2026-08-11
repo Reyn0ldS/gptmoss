@@ -83,9 +83,44 @@ def test_windows_launchers_share_runtime_detection():
     assert '--python "!GPTMOSS_PYTHON!"' in start
     assert '--main "%~dp0main.py"' in start
     assert 'GPTMOSS_CONTROL_PORT=8765' in start
+    assert "prepare_offline_source_launcher.py" in offline_builder
+    assert "offline-preparation.log" in offline_builder
+    assert "GPTMOSS_NO_PAUSE" in offline_builder
     for launcher in (install, start, offline_builder):
         assert 'pushd "%~dp0"' in launcher
         assert "popd" in launcher
+
+
+def test_offline_preparation_helper_validates_real_python_and_existing_runtime():
+    helper = (PROJECT_ROOT / "scripts" / "prepare_offline_source_launcher.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert "import pip, platform, sys" in helper
+    assert "microsoft\\\\windowsapps" in helper
+    assert "verify_existing_runtime" in helper
+    assert "--verify-only" in helper
+    assert "TeeStream" in helper
+
+
+@WINDOWS_ONLY
+def test_offline_builder_double_click_wrapper_can_verify_bundled_runtime():
+    environment = os.environ.copy()
+    environment["GPTMOSS_NO_PAUSE"] = "1"
+    environment["PYTHONDONTWRITEBYTECODE"] = "1"
+    result = subprocess.run(
+        ["cmd.exe", "/d", "/c", "prepare-offline-source.bat", "--verify-only"],
+        cwd=PROJECT_ROOT,
+        check=False,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "Offline runtime preparation completed" in result.stdout
+    assert "already present and operational" in result.stdout
 
 
 def test_main_anchors_default_runtime_files_to_project_root():

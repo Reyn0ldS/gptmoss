@@ -16,6 +16,7 @@ wheelhouse/
 
 # Runtime data and logs
 app.log
+offline-preparation.log
 workspace/config.json
 workspace/state_store.json
 workspace/memories.json
