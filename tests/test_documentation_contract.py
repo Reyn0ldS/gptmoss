@@ -39,8 +39,15 @@ def test_document_workflow_does_not_invalidate_offline_runtime_manifest():
         (ROOT / "offline-runtime-manifest.json").read_text(encoding="utf-8")
     )
     requirements = ROOT / manifest["requirements_file"]
-    digest = hashlib.sha256(requirements.read_bytes()).hexdigest()
+    normalized_requirements = (
+        requirements.read_text(encoding="utf-8")
+        .replace("\r\n", "\n")
+        .replace("\r", "\n")
+        .encode("utf-8")
+    )
+    digest = hashlib.sha256(normalized_requirements).hexdigest()
 
+    assert manifest["requirements_hash_mode"] == "utf-8-lf"
     assert manifest["requirements_sha256"] == digest
     assert "python-docx" not in requirements.read_text(encoding="utf-8").lower()
     assert "python-pptx" not in requirements.read_text(encoding="utf-8").lower()
