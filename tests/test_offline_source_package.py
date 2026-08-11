@@ -31,6 +31,17 @@ def test_default_runtime_source_is_pinned_and_verified():
     assert spec.directory_name == "python-3.13.14-embed-amd64"
 
 
+def test_requirements_hash_is_independent_of_checked_out_line_endings(tmp_path):
+    lf_file = tmp_path / "requirements-lf.txt"
+    crlf_file = tmp_path / "requirements-crlf.txt"
+    lf_file.write_bytes(b"first>=1\nsecond>=2\n")
+    crlf_file.write_bytes(b"first>=1\r\nsecond>=2\r\n")
+
+    assert builder.sha256_normalized_text_file(lf_file) == builder.sha256_normalized_text_file(
+        crlf_file
+    )
+
+
 def test_archive_extraction_rejects_parent_traversal(tmp_path):
     archive_path = tmp_path / "unsafe.zip"
     destination = tmp_path / "runtime"
@@ -55,7 +66,8 @@ def test_committed_runtime_matches_manifest():
     assert runtime.is_dir()
     assert (runtime / "python.exe").is_file()
     requirements = PROJECT_ROOT / manifest["requirements_file"]
-    assert manifest["requirements_sha256"] == sha256_file(requirements)
+    assert manifest["requirements_hash_mode"] == "utf-8-lf"
+    assert manifest["requirements_sha256"] == builder.sha256_normalized_text_file(requirements)
     assert manifest["runtime_file_count"] == len(files)
     assert manifest["runtime_size_bytes"] == sum(path.stat().st_size for path in files)
     assert max(path.stat().st_size for path in files) < 100 * 1024 * 1024

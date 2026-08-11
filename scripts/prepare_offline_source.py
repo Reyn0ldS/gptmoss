@@ -68,6 +68,12 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def sha256_normalized_text_file(path: Path) -> str:
+    content = path.read_text(encoding="utf-8")
+    normalized = content.replace("\r\n", "\n").replace("\r", "\n")
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
 def download_runtime(spec: RuntimeSpec, archive_path: Path) -> None:
     print(f"Downloading {spec.source_url}")
     request = urllib.request.Request(spec.source_url, headers={"User-Agent": "GPTMOSS offline builder"})
@@ -189,7 +195,8 @@ def write_manifest(spec: RuntimeSpec, runtime_directory: Path) -> None:
         "platform": "win_amd64",
         "source_url": spec.source_url,
         "source_sha256": spec.sha256,
-        "requirements_sha256": sha256_file(requirements),
+        "requirements_sha256": sha256_normalized_text_file(requirements),
+        "requirements_hash_mode": "utf-8-lf",
         "requirements_file": requirements.name,
         "packages": package_versions(site_packages),
         "runtime_directory": runtime_directory.name,
