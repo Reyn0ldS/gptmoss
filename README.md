@@ -566,6 +566,7 @@ Les documents ne sont pas concaténés puis tronqués aveuglément. GPTMOSS sél
 | Symptôme | Vérifications et correction |
 |---|---|
 | Erreur de connexion au LLM | Vérifier `base_url`, `api_key`, `model_name`, la connectivité et le certificat TLS. Les chemins sont sensibles à la casse : utiliser le `/v1` réellement exposé par le serveur. Pour une CA privée, renseigner de préférence `ssl_cert_path`. |
+| `401 Unauthorized` pendant une tâche | Dans **Paramètres**, corriger la clé API puis utiliser **Tester la connexion**. Le test contrôle le catalogue et une inférence minimale réelle ; après succès, sélectionner l'exécution parente en échec et cliquer **Reprendre**. Les erreurs 401/403 ne sont pas retentées automatiquement. |
 | Erreur TLS | Garder `ssl_verify: true`; pour une PKI interne, fournir `ssl_cert_path`. Désactiver la vérification seulement pour un environnement explicitement contrôlé. |
 | L'outil n'est pas appelé | Vérifier la politique, les skills sélectionnés et la compatibilité tool-calling du modèle. GPTMOSS normalise les balises textuelles `<tool_call>` de Qwen et utilise un repli par prompt si l'appel natif échoue. |
 | Exécution bloquée en pause | Lire l'état puis appeler `/approve` ou `/reject` si une approbation est en attente ; sinon `/resume`. |
@@ -575,6 +576,7 @@ Les documents ne sont pas concaténés puis tronqués aveuglément. GPTMOSS sél
 | Skill absent | Vérifier le nom, le frontmatter, l'encodage UTF-8 et redémarrer le serveur. |
 | `No module named venv` | Utiliser la dernière version complète du dépôt, qui contient le runtime préparé `python-3.13.14-embed-amd64`. Ne pas le remplacer par une archive embeddable nue. Le mode portable n'utilise pas `venv`. |
 | Dépendances absentes sur la machine hors-ligne | Le runtime n'a pas été transféré complètement. Reprendre le paquet autonome depuis Git ou exécuter `prepare-offline-source.bat` sur la machine connectée avant de transférer tout le dossier. |
+| Dépôt de documents instable sur un partage UNC | La persistance retente les erreurs transitoires et publie atomiquement les fichiers. Vérifier néanmoins les droits et la disponibilité du partage ; relancer la soumission ne redépose que les fichiers de la sélection courante qui n'avaient pas encore réussi. |
 | `WinError 10048` / port 8000 déjà utilisé | Laisser `start.bat` ouvert, accéder au contrôleur sur `http://127.0.0.1:8765`, saisir un autre port puis cliquer **Appliquer le port**. GPTMOSS ne termine jamais le processus inconnu qui occupe le port. |
 | État ou mémoire à remettre à zéro | Arrêter le serveur, sauvegarder puis supprimer explicitement les fichiers concernés du workspace. |
 

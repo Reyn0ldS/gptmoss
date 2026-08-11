@@ -513,7 +513,7 @@ def test_runtime_control_only_exposes_a_managed_loopback_supervisor(monkeypatch)
     }
 
 
-def test_gui_management_api_complete_flow(tmp_path):
+def test_gui_management_api_complete_flow(tmp_path, monkeypatch):
     """The GUI management endpoints work together and never expose secrets in audit data."""
     from gptmoss.capabilities.filesystem import FilesystemCapability
     from gptmoss.core.skills import SkillRegistry
@@ -573,6 +573,19 @@ def test_gui_management_api_complete_flow(tmp_path):
     assert search.json()["results"][0]["provenance"][0]["source_name"] == "architecture.docx"
     assert client.get("/artifacts/search?q=").status_code == 400
 
+    with monkeypatch.context() as patch:
+        def fail_unc_write(*_args, **_kwargs):
+            raise OSError(22, "transient UNC redirector failure")
+
+        patch.setattr(exec_engine.artifact_store, "save_base64", fail_unc_write)
+        unavailable = client.post("/artifacts", json={
+            "filename": "retry.md",
+            "content_type": "text/markdown",
+            "content_base64": base64.b64encode(b"retry").decode(),
+        })
+        assert unavailable.status_code == 503
+        assert "workspace" in unavailable.json()["detail"]
+
     skill = {"name": "gui-review", "description": "Review", "instructions": "Review carefully.", "allowed_capabilities": ["filesystem"]}
     assert client.post("/skills", json=skill).status_code == 201
     listed_skill = next(item for item in client.get("/skills").json() if item["name"] == "gui-review")
@@ -629,8 +642,33 @@ def test_gui_management_api_complete_flow(tmp_path):
     from threading import Thread
 
     class ModelsHandler(BaseHTTPRequestHandler):
+        reject_chat = False
+
         def do_GET(self):
             payload = json.dumps({"data": [{"id": "model"}]}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length", "0"))
+            request = json.loads(self.rfile.read(length) or b"{}")
+            assert self.path == "/v1/chat/completions"
+            assert request["model"] == "model"
+            assert request["max_tokens"] == 1
+            if type(self).reject_chat:
+                payload = json.dumps({"error": "Unauthorized"}).encode()
+                self.send_response(401)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+                return
+            payload = json.dumps({
+                "choices": [{"message": {"role": "assistant", "content": "OK"}}],
+            }).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(payload)))
@@ -648,7 +686,18 @@ def test_gui_management_api_complete_flow(tmp_path):
             **settings, "base_url": f"http://127.0.0.1:{provider.server_port}/v1"
         })
         assert connection.status_code == 200
-        assert connection.json() == {"status": "connected", "model_available": True, "models_count": 1}
+        assert connection.json() == {
+            "status": "connected",
+            "model_available": True,
+            "models_count": 1,
+            "chat_completion": True,
+        }
+        ModelsHandler.reject_chat = True
+        denied = client.post("/api/settings/test-connection", json={
+            **settings, "base_url": f"http://127.0.0.1:{provider.server_port}/v1"
+        })
+        assert denied.status_code == 502
+        assert "chat completions (HTTP 401)" in denied.json()["detail"]
     finally:
         provider.shutdown()
         provider.server_close()
@@ -677,6 +726,8 @@ def test_gui_contains_complete_management_controls():
         'id="library-document-search"', 'id="library-document-results"',
         "/artifacts/search", 'id="library-agent-profiles"',
         'id="library-evolution"', "/agent-profiles", "/evolution",
+        "uploadedTaskAttachments", "resetTaskAttachmentUploads",
+        "resumableFailure", "Authentification LLM refusée",
     ):
         assert marker in gui
 

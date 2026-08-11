@@ -13,6 +13,7 @@ from threading import RLock
 from typing import Any, Iterable
 import unicodedata
 
+from gptmoss.core.durable_io import write_text_atomic
 from gptmoss.core.documents import DocumentBlock, NormalizedDocument
 
 
@@ -272,13 +273,10 @@ class LocalDocumentIndex:
         }
 
     def _persist(self) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = self.path.with_name(self.path.name + ".tmp")
-        temporary.write_text(
+        write_text_atomic(
+            self.path,
             json.dumps(self._payload(), ensure_ascii=False, sort_keys=True),
-            encoding="utf-8",
         )
-        temporary.replace(self.path)
 
     def fingerprints(self) -> dict[str, str]:
         with self._lock:

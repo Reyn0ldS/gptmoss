@@ -335,7 +335,9 @@ def main():
         app = init_app(kernel, exec_engine, state_engine, event_bus)
         
         logger.info(f"Starting MOSS Runtime Server on http://{args.host}:{args.port}")
-        uvicorn.run(app, host=args.host, port=args.port)
+        # Legacy Windows consoles render ANSI escape bytes as visible arrows.
+        # Keep colored Uvicorn logs where terminals support them reliably.
+        uvicorn.run(app, host=args.host, port=args.port, use_colors=os.name != "nt")
 
 if __name__ == "__main__":
     main()
