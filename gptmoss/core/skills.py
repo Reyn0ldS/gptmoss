@@ -60,8 +60,18 @@ class SkillRegistry:
             name = str(fields.get("name") or path.parent.name).strip().lower()
             if not re.fullmatch("[a-z0-9][a-z0-9_-]*", name):
                 continue
+            raw_capabilities = fields.get(
+                "allowed_capabilities",
+                fields.get("allowed-tools", []),
+            )
+            if isinstance(raw_capabilities, str):
+                raw_capabilities = [
+                    item
+                    for item in re.split(r"[\s,]+", raw_capabilities)
+                    if item
+                ]
             skill = Skill(name, str(fields.get("description") or ""), instructions,
-                          [str(item).lower() for item in fields.get("allowed_capabilities", [])],
+                          [str(item).lower() for item in raw_capabilities],
                           str(path), hashlib.sha256(text.encode("utf-8")).hexdigest())
             self.skills[name] = skill
             discovered.append(skill)
@@ -135,6 +145,13 @@ class SkillRegistry:
                 selected.append(skill)
                 seen.add(skill.name)
 
+        # Per-execution requested skills are an explicit selection contract,
+        # not seed words for an unrelated fourth skill. Autonomous specialist
+        # skills are appended to this same requested list before selection.
+        # Keep every explicit item even when it exceeds the automatic ranking limit.
+        if requested:
+            return selected
+
         task_lower = task.lower()
         task_tokens = self._tokens(task_lower)
         scored = []
@@ -148,7 +165,10 @@ class SkillRegistry:
                 score += 5
             description_tokens = self._tokens(skill.description)
             score += len(task_tokens & description_tokens) * 2
-            if score:
+            # A single incidental token (for example a local filename such as
+            # vision.pptx) is not enough to activate unrelated expertise.
+            # Explicitly requested and preferred skills remain unconditional.
+            if score >= 2:
                 scored.append((score, skill))
         scored.sort(key=lambda item: (-item[0], item[1].name))
         for _, skill in scored:

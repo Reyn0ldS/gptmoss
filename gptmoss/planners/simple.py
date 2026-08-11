@@ -8,19 +8,25 @@ from typing import Any, Dict, List
 
 from gptmoss.interfaces.llm import LLMProvider
 from gptmoss.interfaces.planner import PlannerProvider
+from gptmoss.core.delivery import extract_requirements
 
 logger = logging.getLogger("gptmoss.planners.simple")
 
 DOMAIN_MARKERS = {
     "software-engineering": ("application", "logiciel", "programme", "software", "code", "api", "site web", "project", "projet"),
-    "computer-vision": ("image", "photo", "visage", "face", "segmentation", "vision"),
+    "computer-vision": ("image", "photo", "visage", "face", "segmentation", "vision par ordinateur", "computer vision"),
     "machine-learning": ("ia", "ai", "modèle", "model", "apprentissage", "inférence", "inference"),
     "3d-graphics": ("3d", "maillage", "mesh", "texture", "rendu", "render"),
     "human-avatar": ("avatar", "corps", "body", "humain", "human", "visage", "face"),
-    "digital-garments": ("vêtement", "vetement", "garment", "cloth", "habiller", "porter"),
-    "user-interface": ("interface", "ui", "web", "desktop", "utilisateur"),
+    "digital-garments": ("vêtement", "vetement", "garment", "cloth", "habiller", "essayage virtuel"),
+    "user-interface": ("interface utilisateur", "user interface", "ui", "web", "desktop", "utilisateur"),
     "data-privacy": ("visage", "face", "biométr", "biometr", "personnel", "privacy", "rgpd", "gdpr"),
     "offline-delivery": ("hors-ligne", "hors ligne", "offline", "portable", "autonome"),
+    "document-workflow": (
+        "docx", "pptx", "corpus documentaire", "analyse documentaire",
+        "document analysis", "rédaction professionnelle", "long-form document",
+        "matrice de traçabilité", "evidence matrix",
+    ),
 }
 
 # Correct Unicode spellings coexist with historical mojibake strings so old
@@ -69,6 +75,317 @@ def analyze_task_complexity(task: str) -> Dict[str, Any]:
         level, minimum = "low", 1
     return {"level": level, "score": score, "domains": domains,
             "requested_outcomes": requested_outcomes, "suggested_min_steps": minimum}
+
+
+_ARTIFACT_NAME = re.compile(
+    r"(?<![\w./-])([A-Za-z0-9][A-Za-z0-9_.-]*\.(?:md|json|txt|html|docx|pptx))(?![\w.-])",
+    flags=re.IGNORECASE,
+)
+
+
+def _document_deliverable_task(task: str) -> bool:
+    """Distinguish source-grounded writing from generic software documentation."""
+    text = str(task or "")
+    lowered = text.casefold()
+    formats = {
+        suffix for suffix in ("docx", "pptx", "txt", "html", "markdown")
+        if re.search(rf"(?<!\w){suffix}(?!\w)", lowered)
+    }
+    source_signals = sum(
+        marker in lowered
+        for marker in (
+            "corpus", "pièces jointes", "pieces jointes", "attached files",
+            "fichiers locaux", "local files", "documents.inventory", "documents.search",
+        )
+    )
+    writing_signal = any(
+        marker in lowered
+        for marker in (
+            "rédige", "redige", "rédaction", "redaction", "dossier", "rapport",
+            "synthèse", "synthese", "livrable", "long-form", "write a", "produce a",
+        )
+    )
+    explicit_validator = bool(re.search(
+        r"(?i)(?:validator\s*=\s*document|validator[^\n]{0,20}document|"
+        r"document-analysis|document quality)",
+        text,
+    ))
+    return explicit_validator or (writing_signal and (len(formats) >= 2 or source_signals >= 2))
+
+
+def _requested_output_artifacts(task: str) -> List[str]:
+    """Extract output filenames without mistaking inline source citations for outputs."""
+    outputs: List[str] = []
+    for line in str(task or "").splitlines():
+        if not re.match(r"\s*(?:\d+[.)]|[-*])\s+", line):
+            continue
+        match = _ARTIFACT_NAME.search(line)
+        if match and match.group(1) not in outputs:
+            outputs.append(match.group(1))
+    verb_pattern = re.compile(
+        r"(?i)\b(?:crée|cree|produis|génère|genere|write|create|produce|generate)"
+        r"[^\r\n]{0,100}?" + _ARTIFACT_NAME.pattern
+    )
+    for match in verb_pattern.finditer(str(task or "")):
+        filename = match.group(1)
+        if filename and filename not in outputs:
+            outputs.append(filename)
+    return outputs
+
+
+def _expanded_identifier_ranges(task: str) -> List[str]:
+    identifiers: List[str] = []
+    pattern = re.compile(
+        r"\b([A-Z][A-Z0-9]{1,12})-(\d{2,4})\s*"
+        r"(?:à|a|to|through|–|-)\s*(?:\1-)?(\d{2,4})\b",
+        flags=re.IGNORECASE,
+    )
+    for match in pattern.finditer(str(task or "")):
+        prefix, start_text, end_text = match.groups()
+        start, end = int(start_text), int(end_text)
+        if end < start or end - start > 200:
+            continue
+        width = max(len(start_text), len(end_text))
+        for value in range(start, end + 1):
+            identifier = f"{prefix.upper()}-{value:0{width}d}"
+            if identifier not in identifiers:
+                identifiers.append(identifier)
+    return identifiers
+
+
+def _required_document_headings(task: str) -> List[str]:
+    match = re.search(
+        r"(?is)sections?[^\n:]{0,160}(?:exactement|exactly)\s*:\s*"
+        r"(.+?)(?:\r?\n\s*\r?\n|\bChaque\b|\bEvery\b)",
+        str(task or ""),
+    )
+    if not match:
+        return []
+    headings = []
+    for item in match.group(1).split(";"):
+        heading = item.strip().strip(". ")
+        if heading and len(heading) <= 160 and heading not in headings:
+            headings.append(heading)
+    return headings
+
+
+def _source_inventory(task: str, outputs: List[str]) -> Dict[str, Dict[str, int]]:
+    inventory: Dict[str, Dict[str, int]] = {}
+    pattern = re.compile(
+        r"\b([A-Za-z0-9][A-Za-z0-9_.-]*\.(?:docx|pptx|txt|html))\s+"
+        r"(blocks|slides)\s*=\s*(\d+)",
+        flags=re.IGNORECASE,
+    )
+    output_names = {item.casefold() for item in outputs}
+    for filename, unit, count in pattern.findall(str(task or "")):
+        if filename.casefold() in output_names:
+            continue
+        key = "slides" if unit.casefold() == "slides" else "blocks"
+        inventory[filename] = {key: int(count)}
+    return inventory
+
+
+def _named_integer(task: str, name: str) -> int | None:
+    match = re.search(
+        rf"(?i)\b{re.escape(name)}\s*=\s*(\d[\d _]*)",
+        str(task or ""),
+    )
+    if not match:
+        return None
+    return int(match.group(1).replace(" ", "").replace("_", ""))
+
+
+def _document_validation_policy(
+    task: str, outputs: List[str], primary: str
+) -> Dict[str, Any]:
+    inventory = _source_inventory(task, outputs)
+    constraints: Dict[str, Any] = {}
+    headings = _required_document_headings(task)
+    identifiers = _expanded_identifier_ranges(task)
+    if headings:
+        constraints["required_headings"] = headings
+    section_words = _named_integer(task, "min_section_words")
+    if section_words is not None:
+        constraints["min_section_words"] = section_words
+    if identifiers:
+        constraints["required_requirement_ids"] = identifiers
+        if "required_traceability_ids" in str(task):
+            constraints["required_traceability_ids"] = identifiers
+    if inventory:
+        constraints["required_source_files"] = list(inventory)
+        constraints["source_inventory"] = inventory
+    for name in (
+        "require_local_references", "require_bounded_references",
+        "require_claim_references", "forbid_external_links", "forbid_placeholders",
+    ):
+        if re.search(rf"(?i)\b{re.escape(name)}\s*=\s*true\b", str(task or "")):
+            constraints[name] = True
+    for name in (
+        "claim_min_words", "duplicate_min_words", "max_duplicate_paragraphs",
+    ):
+        value = _named_integer(task, name)
+        if value is not None:
+            constraints[name] = value
+    minimums: Dict[str, int] = {}
+    minimum_match = re.search(r"(?is)\bminimums\b(.{0,160})", str(task or ""))
+    if minimum_match:
+        for metric in ("words", "local_references", "cited_sources", "headings"):
+            match = re.search(
+                rf"(?i)\b{metric}\s*=\s*(\d[\d _]*)", minimum_match.group(1)
+            )
+            if match:
+                minimums[metric] = int(
+                    match.group(1).replace(" ", "").replace("_", "")
+                )
+    if minimums:
+        constraints["minimums"] = minimums
+    return {
+        "path": primary,
+        "validator": "document",
+        "required": True,
+        "constraints": constraints,
+    }
+
+
+def _supporting_document_validation_policies(
+    task: str, steps: List[Dict[str, Any]], primary: str
+) -> List[Dict[str, Any]]:
+    """Give every reusable document artifact a deterministic acceptance floor."""
+    inventory = _source_inventory(task, [
+        str(path)
+        for step in steps
+        for path in step.get("required_artifacts", [])
+    ])
+    identifiers = _expanded_identifier_ranges(task)
+    forbid_external = bool(
+        re.search(r"(?i)\bforbid_external_links\s*=\s*true\b", task)
+        or re.search(r"(?i)\b(?:aucun|sans)\s+(?:lien|url).*internet", task)
+    )
+    policies: List[Dict[str, Any]] = []
+    seen = {primary.replace("\\", "/")}
+    for step in steps:
+        for raw_path in step.get("required_artifacts", []):
+            path = str(raw_path).replace("\\", "/")
+            if path in seen:
+                continue
+            seen.add(path)
+            suffix = os.path.splitext(path)[1].lower()
+            if suffix == ".json":
+                policies.append({
+                    "path": path,
+                    "validator": "json",
+                    "required": True,
+                    "constraints": {"min_size_bytes": 20},
+                })
+                continue
+            if suffix not in {".md", ".txt", ".html"}:
+                continue
+            lower = path.casefold()
+            source_grounded = (
+                lower.startswith("analysis/")
+                and not any(marker in lower for marker in ("quality", "audit"))
+            ) or any(marker in lower for marker in (
+                "requirement", "exigence", "evidence", "preuve", "decision", "adr",
+            ))
+            complete_source_coverage = any(marker in lower for marker in (
+                "corpus-inventory", "requirement", "exigence", "evidence", "preuve",
+            ))
+            minimum_words = 300 if source_grounded else 120
+            constraints: Dict[str, Any] = {
+                "forbid_placeholders": True,
+                "minimums": {"words": minimum_words},
+            }
+            if forbid_external:
+                constraints["forbid_external_links"] = True
+            if source_grounded:
+                constraints["require_local_references"] = True
+                constraints["minimums"]["local_references"] = 3
+                if inventory:
+                    constraints["source_inventory"] = inventory
+                    constraints["require_bounded_references"] = True
+            if complete_source_coverage and inventory:
+                constraints["required_source_files"] = list(inventory)
+                constraints["minimums"]["local_references"] = max(
+                    4, len(inventory)
+                )
+                if "corpus-inventory" in lower:
+                    constraints["require_source_coverage"] = True
+            if identifiers and any(marker in lower for marker in (
+                "requirement", "exigence", "evidence", "preuve",
+            )):
+                constraints["required_requirement_ids"] = identifiers
+                constraints["required_traceability_ids"] = identifiers
+            policies.append({
+                "path": path,
+                "validator": "document",
+                "required": True,
+                "constraints": constraints,
+            })
+    return policies
+
+
+def _assign_document_requirements(
+    task: str, steps: List[Dict[str, Any]]
+) -> List[Dict[str, Any]]:
+    """Map document requirements to bounded owners instead of lexical accidents."""
+    requirements = extract_requirements(task)
+    by_id = {int(step["id"]): step for step in steps}
+    producer_ids = [0, 1, 2, 3, 4, 5, 6, 7, 10]
+    for step in steps:
+        step["requirement_ids"] = []
+    for requirement in requirements:
+        statement = str(requirement["statement"]).casefold()
+        targets: List[int]
+        if "crée dans le projet les huit fichiers" in statement or "cree dans le projet les huit fichiers" in statement:
+            targets = [1, 2, 7, 10]
+        elif any(marker in statement for marker in (
+            "requirements-matrix", "evidence-matrix", "matrice", "toutes les exigences",
+        )):
+            targets = [1]
+        elif any(marker in statement for marker in (
+            "decisions-register", "contradiction", "paliers chiffr", "autorité compétente",
+        )):
+            targets = [2]
+        elif any(marker in statement for marker in (
+            "quality-policy", "quality-report", "review-report", "validateur document",
+            "delivery_assurance", "auditeur final",
+        )):
+            targets = [10]
+        elif any(marker in statement for marker in (
+            "inventorier intégralement", "inventorier integralement",
+            "capability documents", "documents.inventory", "recherche puis lis",
+            "pièces jointes locales", "pieces jointes locales",
+        )):
+            targets = [0]
+        elif any(marker in statement for marker in (
+            "sécurité", "securite", "sec-001", "identité", "identite",
+        )):
+            targets = [4]
+        elif any(marker in statement for marker in (
+            "rto", "rpo", "capacité", "capacite", "déploiement", "deploiement",
+            "résilience", "resilience", "observabilité", "observabilite",
+        )):
+            targets = [5]
+        elif any(marker in statement for marker in (
+            "migration", "coexistence", "feuille de route",
+        )):
+            targets = [6]
+        elif "chaque auteur doit relire" in statement:
+            targets = producer_ids
+        elif any(marker in statement for marker in (
+            "fichiers locaux comme sources", "aucune recherche web", "numéros doivent être réels",
+            "numeros doivent etre reels", "aucun placeholder", "aucune url externe",
+        )):
+            targets = [0, 1, 2, 3, 4, 5, 6, 7, 10]
+        else:
+            targets = [7]
+        for target in targets:
+            if target in by_id:
+                by_id[target]["requirement_ids"].append(requirement["id"])
+        # The final independent reviewer validates every user requirement.
+        if 11 in by_id:
+            by_id[11]["requirement_ids"].append(requirement["id"])
+    return requirements
 
 
 def _step(step_id: int, role: str, specialist: str, description: str,
@@ -172,9 +489,163 @@ class SimplePlanner(PlannerProvider):
         }
 
     @staticmethod
+    def _document_fallback(task: str, analysis: Dict[str, Any]) -> Dict[str, Any]:
+        """Preserve a source-grounded document delivery when LLM planning is unusable."""
+        outputs = _requested_output_artifacts(task)
+        primary = next(
+            (
+                item for item in outputs
+                if item.casefold() in {"architecture.md", "dossier.md", "deliverable.md"}
+            ),
+            None,
+        )
+        if primary is None:
+            primary = next(
+                (
+                    item for item in outputs
+                    if item.casefold().endswith(".md")
+                    and not any(
+                        marker in item.casefold()
+                        for marker in ("matrix", "matrice", "report", "rapport", "review", "audit")
+                    )
+                ),
+                "deliverable.md",
+            )
+        if primary not in outputs:
+            outputs.insert(0, primary)
+
+        def select(*markers: str) -> List[str]:
+            return [
+                item for item in outputs
+                if item != primary and any(marker in item.casefold() for marker in markers)
+            ]
+
+        matrices = select("requirement", "exigence", "evidence", "preuve", "matrix", "matrice")
+        decisions = select("decision", "adr")
+        quality = select("quality", "qualite", "qualité")
+        review = select("review", "audit", "revue")
+        assigned = {primary, *matrices, *decisions, *quality, *review}
+        remaining = [item for item in outputs if item not in assigned]
+
+        steps = [
+            _step(
+                0, "architect", "Local Corpus Evidence Analyst",
+                "Inventory every explicit attachment with the documents capability, inspect all formats and boundaries, search each decision topic, and record source coverage without using Internet evidence.",
+                [], ["document analysis", "local provenance", "coverage auditing"],
+                ["analysis/corpus-inventory.md"],
+                ["Every attached source, block range or slide range, contradiction, and unread area is explicit."],
+            ),
+            _step(
+                1, "architect", "Requirements & Traceability Architect",
+                "Extract all requirements, constraints, acceptance gates, decisions, risks, and open questions from the inventoried corpus; build complete source-to-section and requirement coverage matrices.",
+                [0], ["requirements engineering", "traceability", "evidence matrices"],
+                matrices or ["analysis/requirements-and-evidence.md"],
+                ["Every mandatory source identifier is mapped to evidence and a planned deliverable section."],
+            ),
+            _step(
+                2, "architect", "Architecture Decision Analyst",
+                "Resolve or explicitly escalate source contradictions, compare alternatives against stated drivers, and record proposed decisions, consequences, risks, owners, and validation evidence.",
+                [0, 1], ["architecture decisions", "trade-off analysis", "governance"],
+                decisions or ["analysis/decision-register.md"],
+                ["Contradictions remain visible and every proposed decision has authority and validation status."],
+            ),
+            _step(
+                3, "architect", "Application, Integration & Data Architect",
+                "Design consistent context, logical component, interface, data ownership, lifecycle, ingestion, indexing, retrieval, and generation views grounded in local evidence.",
+                [1, 2], ["application architecture", "integration", "data architecture"],
+                ["analysis/application-data-architecture.md"],
+                ["Components, flows, contracts, failure behavior, provenance, and data lifecycle are implementable and mutually consistent."],
+            ),
+            _step(
+                4, "security", "Identity, Security & Privacy Architect",
+                "Threat-model the proposed architecture; specify identity, authorization-before-content, trust zones, secrets, audit, prompt-injection controls, privacy, retention, and residual risk using source evidence.",
+                [1, 2, 3], ["zero trust", "privacy", "threat modeling", "audit"],
+                ["analysis/security-privacy-architecture.md"],
+                ["Every material security requirement has a control, verification method, owner, and residual risk."],
+            ),
+            _step(
+                5, "architect", "Platform, Capacity & SRE Architect",
+                "Design deployment, capacity, scaling, observability, backup, recovery, failover, support, and continuity; reconcile conflicting service targets with measurable tiers.",
+                [1, 2, 3, 4], ["platform engineering", "capacity", "SRE", "continuity"],
+                ["analysis/platform-sre-architecture.md"],
+                ["Capacity and resilience decisions use sourced volumes, concurrency, RPO/RTO, tests, and operational ownership."],
+            ),
+            _step(
+                6, "architect", "Migration & Operating Model Architect",
+                "Define phased coexistence, reconciliation, checkpoints, rollback, decommissioning, responsibilities, decision forums, readiness gates, roadmap, costs, and unresolved prerequisites.",
+                [1, 2, 3, 4, 5], ["migration", "operating model", "roadmaps", "rollback"],
+                ["analysis/migration-operating-model.md"],
+                ["Each phase has entry/exit evidence, rollback, reconciliation, ownership, and measurable acceptance."],
+            ),
+            _step(
+                7, "writer", "Professional Architecture Dossier Editor",
+                "Synthesize the approved analyses into the requested long-form primary document and any remaining outputs. Preserve exact required headings, stable identifiers, nearby bounded local references, terminology, distinctions between fact and recommendation, and non-repetitive professional prose.",
+                [1, 2, 3, 4, 5, 6],
+                ["long-form technical writing", "architecture communication", "source grounding"],
+                [primary, *remaining],
+                ["The primary document is complete, coherent, readable, locally sourced, and satisfies all declared structural and minimum-content constraints."],
+            ),
+            _step(
+                8, "qa", "Independent Document Quality Analyst",
+                "Read the actual requested outputs, run a clean independent coverage and provenance review, identify exact missing headings, identifiers, traceability rows, source bounds, unsupported claims, repetitions, placeholders, terminology conflicts, and inconsistencies.",
+                [7], ["document QA", "provenance audit", "quality gates"],
+                ["analysis/document-quality-findings.md"],
+                ["Findings cite exact files and locations and include actionable repair instructions; no self-authored quality claim is accepted as evidence."],
+            ),
+            _step(
+                9, "debugger", "Autonomous Document Repair Editor",
+                "Repair the primary document and non-QA supporting artifacts from concrete independent findings, then reread the affected sections and remove all critical validation failures without weakening the requested policy.",
+                [8], ["document repair", "root-cause correction", "cross-section consistency"],
+                [], ["All critical findings are corrected or explicitly escalated with a truthful reason."],
+            ),
+            _step(
+                10, "writer", "Quality Evidence & Review Editor",
+                "Produce the requested frozen policy, machine-readable quality report, readable synthesis, and review report from the corrected files and actual independent findings. Never claim a passing result that the evidence does not support.",
+                [9], ["quality evidence", "professional reporting", "residual risk"],
+                [*quality, *review] or ["quality-policy.json", "quality-report.json", "quality-report.md", "review-report.md"],
+                ["The reports are truthful, internally consistent, and derived from the actual final files and independent findings."],
+            ),
+            _step(
+                11, "qa", "Final Deterministic Delivery Reviewer",
+                "Independently inspect every final requested file, rerun the declared document policy conceptually against actual content, compare the JSON and Markdown quality reports, and record exact pass/fail evidence without editing author-owned outputs.",
+                [10], ["deterministic validation", "acceptance audit", "residual risk"],
+                ["analysis/final-delivery-audit.md"],
+                ["Every mandatory file, policy result, traceability claim, contradiction, and residual risk is independently checked."],
+            ),
+            _step(
+                12, "coordinator", "Final Requirement Traceability Auditor",
+                "Audit every user requirement against the final files, local evidence, declared artifact validator, repair history, and residual risks; do not claim completion while a mandatory gap or critical validation failure remains.",
+                [8, 9, 10, 11], ["delivery assurance", "traceability", "evidence-based completion"],
+                [], ["Every mandatory requirement has final implementation and independent validation evidence."],
+            ),
+        ]
+        requirements = _assign_document_requirements(task, steps)
+        return {
+            "analysis": {
+                **analysis,
+                "workstreams": [step["specialist"] for step in steps],
+                "mvp_boundary": "Complete source-grounded document delivery; rich Office/PDF rendering is not inferred.",
+            },
+            "scope_changes": [],
+            "interfaces": [],
+            "external_tools": [],
+            "execution_routines": [],
+            "requirements": requirements,
+            "artifact_validations": [
+                _document_validation_policy(task, outputs, primary),
+                *_supporting_document_validation_policies(task, steps, primary),
+            ],
+            "launch_commands": [],
+            "steps": steps,
+            "rationale": "Deterministic local-document fallback preserving explicit outputs, provenance, repair, and final quality gates.",
+        }
+
+    @staticmethod
     def _fallback_plan(task: str, analysis: Dict[str, Any] | None = None) -> Dict[str, Any]:
         analysis = analysis or analyze_task_complexity(task)
         domains = set(analysis["domains"])
+        if _document_deliverable_task(task):
+            return SimplePlanner._document_fallback(task, analysis)
         if {"computer-vision", "3d-graphics", "human-avatar", "digital-garments"} <= domains:
             return SimplePlanner._cross_domain_fallback(task, analysis)
         if "software-engineering" in domains:
@@ -336,6 +807,7 @@ class SimplePlanner(PlannerProvider):
             f"Delivery environment: platform={os.name}; dependencies and model weights may not be downloaded during offline execution. "
             "Use portable Python/pytest verification commands and dependency-light implementations.\n"
             "Use canonical roles only from architect, security, developer, qa, debugger, writer, coordinator, but create as many distinct domain specialists as required. "
+            "A delegated specialist is bounded to its own assignment by default. Set allow_nested_delegation=true on a step only when that specialist genuinely requires a subordinate team and explain why in the rationale; never use it to duplicate sibling steps. "
             "Multiple differently specialized developers and testers are expected.\n"
             f"For {analysis['level']} complexity, provide at least {analysis['suggested_min_steps']} substantive steps unless a smaller complete DAG is explicitly justified. "
             "Parallelize independent work and depend on existing outputs so work is not repeated.\n"
@@ -346,7 +818,7 @@ class SimplePlanner(PlannerProvider):
             "Implementation must be runnable and must not silently substitute random/mock behavior. If weights, hardware, datasets, or services are unavailable, build a truthful deterministic prototype and explicit adapter contract, document the limitation, and test both paths.\n"
             "Do not list pretrained checkpoint files as artifacts an agent can create. For a human avatar plus clothing task, reconstruct a coherent canonical full body and fit garments to that body; a face/head mesh alone is not an avatar that can wear clothing.\n"
             "For unavailable or project-specific engines and desktop tools, do not pretend to run them. Declare top-level external_tools and execution_routines containing availability probes, installation/configuration parameters, exact commands or API calls, expected outputs, rollback guidance, and independent validation. "
-            "Declare top-level artifact_validations with path, validator, required, and machine-readable constraints. Built-in validators include json, obj, and glb; projects may register more.\n"
+            "Declare top-level artifact_validations with path, validator, required, and machine-readable constraints. Built-in validators include json, document/markdown/txt, obj, and glb; projects may register more. For professional documents, declare required_headings, required_requirement_ids, required_traceability_ids, required_source_files, source_inventory, minimums, and the local-reference/content gates appropriate to the assignment.\n"
             "End with autonomous repair after acceptance testing and a final delivery auditor that cannot claim success without evidence.\n"
             "Acceptance must be independent of implementation: include clean-room launch/CLI/API user journeys and interface/signature checks, not only tests written by implementation agents. "
             "For browser or responsive interfaces, include computed-layout acceptance in Microsoft Edge/Chromium at representative widths 320, 480, 768, and 1366 pixels. Assert that content is readable, not clipped, and either fits or has an intentional reachable scrollbar. "

@@ -16,7 +16,13 @@ from gptmoss.core import (EventBus, StateEngine, ContextEngine, ExecutionEngine,
                           AgentProfileRegistry, AutonomousSkillLifecycle)
 from gptmoss.providers import QwenProvider
 from gptmoss.memory import JSONMemoryProvider
-from gptmoss.capabilities import FilesystemCapability, ShellCapability, AgentCapability, DeveloperTeamCapability
+from gptmoss.capabilities import (
+    AgentCapability,
+    DeveloperTeamCapability,
+    DocumentCapability,
+    FilesystemCapability,
+    ShellCapability,
+)
 from gptmoss.planners import SimplePlanner
 from gptmoss.policies import SimplePolicyProvider
 from gptmoss.api import init_app
@@ -237,6 +243,9 @@ def bootstrap_runtime(workspace_root: str):
     filesystem_cap = FilesystemCapability(workspace_path, state_engine)
     filesystem_cap.update_workspace_config(workspace_path, restrict_to_workspace, allow_subfolders)
     exec_engine.register_capability("filesystem", filesystem_cap)
+
+    document_cap = DocumentCapability(artifact_store)
+    exec_engine.register_capability("documents", document_cap)
     
     shell_cap = ShellCapability(workspace_path, state_engine, safe_mode=safe_shell_mode, timeout_seconds=shell_timeout_seconds, max_output_chars=shell_max_output_chars)
     exec_engine.register_capability("shell", shell_cap)

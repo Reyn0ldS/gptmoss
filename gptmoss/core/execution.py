@@ -20,6 +20,7 @@ from gptmoss.interfaces.capability import generate_action_schema, get_actions
 from gptmoss.core.observability import TraceRecorder
 from gptmoss.core.skills import SkillRegistry
 from gptmoss.core.artifacts import ArtifactStore
+from gptmoss.core.artifact_validation import validate_artifact
 from gptmoss.core.evolution import AgentProfileRegistry, AutonomousSkillLifecycle
 from gptmoss.core.delivery import (
     build_delivery_contract,
@@ -589,6 +590,114 @@ class ExecutionEngine:
         return [path for path in step.get("required_artifacts", [])
                 if not self._artifact_exists(execution_id, path)]
 
+    def _step_artifact_validation_issues(
+        self, execution_id: str, step: Dict[str, Any]
+    ) -> List[str]:
+        """Validate each completed step artifact before allowing downstream reuse."""
+        state = self.state_engine.get_execution(execution_id)
+        specifications = {
+            str(item.get("path") or "").replace("\\", "/"): item
+            for item in (state.current_plan or {}).get("artifact_validations", [])
+            if isinstance(item, dict) and item.get("path")
+        }
+        filesystem = self.get_capability("filesystem")
+        if not filesystem or not hasattr(filesystem, "_resolve_path"):
+            return []
+        issues = []
+        for path in step.get("required_artifacts", []):
+            normalized = str(path).replace("\\", "/")
+            if not self._artifact_exists(execution_id, normalized):
+                continue
+            specification = specifications.get(normalized, {})
+            suffix = os.path.splitext(normalized)[1].lower()
+            validator = specification.get("validator")
+            constraints = dict(specification.get("constraints") or {})
+            # Even a planner without an explicit policy must not advance a
+            # generated text artifact containing placeholders or model-thought tags.
+            if not specification and suffix in {".md", ".txt", ".html"}:
+                validator = "document"
+                constraints["forbid_placeholders"] = True
+            try:
+                resolved = filesystem._resolve_path(normalized, execution_id)
+                report = validate_artifact(
+                    resolved, validator=validator, constraints=constraints,
+                )
+            except (OSError, PermissionError, TypeError, ValueError) as error:
+                issues.append(f"{normalized}: validation could not run: {error}")
+                continue
+            if not report.get("valid", False):
+                failures = report.get("failures") or ["artifact validation failed"]
+                issues.extend(f"{normalized}: {message}" for message in failures[:12])
+        return issues
+
+    def _document_coverage_issues(
+        self, execution_id: str, step: Dict[str, Any]
+    ) -> List[str]:
+        """Require tool evidence for assignments claiming exhaustive corpus inventory."""
+        state = self.state_engine.get_execution(execution_id)
+        attached = {
+            str(item) for item in state.variables.get("attachment_ids", []) if item
+        }
+        if not attached or not self.artifact_store:
+            return []
+        assignment = " ".join([
+            str(step.get("description") or ""),
+            " ".join(str(item) for item in step.get("acceptance_criteria", [])),
+        ]).casefold()
+        inventory_markers = ("inventory", "inventor", "inventaire")
+        exhaustive_markers = ("every", "all ", "complete", "exhaust", "integr")
+        exhaustive_assignment = any(
+            marker in assignment for marker in exhaustive_markers
+        ) or bool(re.search(r"\bint.gr", assignment))
+        if not (
+            any(marker in assignment for marker in inventory_markers)
+            and exhaustive_assignment
+        ):
+            return []
+        covered: Dict[str, set[int]] = {artifact_id: set() for artifact_id in attached}
+        history = state.variables.get("tool_call_history", [])
+        for item in history:
+            if item.get("capability") != "documents" or item.get("action") != "read":
+                continue
+            try:
+                payload = json.loads(str(item.get("result") or ""))
+            except (TypeError, ValueError):
+                continue
+            artifact_id = str(payload.get("artifact_id") or "")
+            if artifact_id not in covered:
+                continue
+            for block in payload.get("blocks") or []:
+                try:
+                    covered[artifact_id].add(int(block["order"]))
+                except (KeyError, TypeError, ValueError):
+                    continue
+        issues = []
+        inventory = {
+            str(item.get("artifact_id")): item
+            for item in self.artifact_store.document_index.inventory()
+            if str(item.get("artifact_id")) in attached
+        }
+        for artifact_id in sorted(attached):
+            item = inventory.get(artifact_id, {})
+            try:
+                total = int(item.get("block_count") or len(
+                    self.artifact_store.document(artifact_id).blocks
+                ))
+            except (OSError, KeyError, TypeError, ValueError):
+                issues.append(f"prove complete document coverage for attachment {artifact_id}")
+                continue
+            missing = sorted(set(range(total)) - covered.get(artifact_id, set()))
+            if missing:
+                display = ", ".join(str(index + 1) for index in missing[:20])
+                if len(missing) > 20:
+                    display += f", and {len(missing) - 20} more"
+                filename = str(item.get("filename") or artifact_id)
+                issues.append(
+                    f"read every normalized block of {filename}; "
+                    f"missing 1-based block(s): {display}"
+                )
+        return issues
+
     def _capability_gaps(self, state) -> List[Dict[str, Any]]:
         """Describe unavailable input modalities without pretending to use them."""
         gaps = []
@@ -1069,6 +1178,14 @@ class ExecutionEngine:
         text_suffixes = {".py", ".md", ".txt", ".json", ".html", ".css", ".js",
                          ".toml", ".yaml", ".yml", ".bat", ".ps1", ".sh"}
         candidates = [path for path in missing if os.path.splitext(path)[1].lower() in text_suffixes][:4]
+        if state.variables.get("attachment_ids"):
+            # A detached rescue prompt does not contain the complete attached
+            # corpus and therefore cannot honestly synthesize grounded prose.
+            source_document_suffixes = {".md", ".txt", ".json", ".html"}
+            candidates = [
+                path for path in candidates
+                if os.path.splitext(path)[1].lower() not in source_document_suffixes
+            ]
         contracts = self._source_contract_summary(execution_id)
         rescued = []
         for path in candidates:
@@ -1170,6 +1287,8 @@ class ExecutionEngine:
                    if not self._artifact_exists(execution_id, path)]
         if missing:
             issues.append("create non-empty required artifacts: " + ", ".join(missing))
+        issues.extend(self._document_coverage_issues(execution_id, step))
+        issues.extend(self._step_artifact_validation_issues(execution_id, step))
 
         if role_key in {"qa", "debugger", "coordinator"}:
             fake_packages = self._fake_dependency_packages(execution_id)
@@ -1500,6 +1619,11 @@ class ExecutionEngine:
             plan_result = merge_inherited_requirements(
                 plan_result, state.variables.get("inherited_requirements")
             )
+            inherited_validations = state.variables.get("inherited_artifact_validations")
+            if isinstance(inherited_validations, list) and inherited_validations:
+                plan_result["artifact_validations"] = [
+                    dict(item) for item in inherited_validations if isinstance(item, dict)
+                ]
             if state.variables.get("capability_gaps"):
                 scope_changes = plan_result.setdefault("scope_changes", [])
                 known_statements = {
@@ -1683,6 +1807,16 @@ class ExecutionEngine:
                         if key not in {"id", "dependencies", "status", "assigned_execution_id", "delivery", "result", "error"}
                     }
                     sub_exec.variables["attachment_ids"] = state.variables.get("attachment_ids", [])
+                    owned_artifacts = {
+                        str(path).replace("\\", "/")
+                        for path in step.get("required_artifacts", [])
+                    }
+                    sub_exec.variables["inherited_artifact_validations"] = [
+                        dict(item)
+                        for item in (state.current_plan or {}).get("artifact_validations", [])
+                        if isinstance(item, dict)
+                        and str(item.get("path") or "").replace("\\", "/") in owned_artifacts
+                    ]
                     parent_requirements = (
                         state.variables.get("delivery_contract", {}).get("requirements", [])
                     )
@@ -2414,7 +2548,12 @@ class ExecutionEngine:
                 allowed_capabilities=allowed_capabilities,
                 delegation_depth=int(state.variables.get("delegation_depth", 0)),
                 suppress_delegation=(
-                    delegated_plan or schema_role in {"qa", "debugger", "coordinator"}
+                    delegated_plan
+                    or schema_role in {"qa", "debugger", "coordinator"}
+                    or (
+                        is_sub_agent
+                        and not bool(step.get("allow_nested_delegation", False))
+                    )
                 ),
             )
 
@@ -2429,10 +2568,25 @@ class ExecutionEngine:
                 attachment_text_budget = self.artifact_store.max_text_chars
                 if not attachment_text_budget and self.adaptive_resource_management:
                     attachment_text_budget = int(context.get("context_budget_chars") or 0)
+                attachment_query = "\n".join(
+                    str(value)
+                    for value in (
+                        state.variables.get("task"),
+                        step.get("description"),
+                        step.get("specialist"),
+                        " ".join(str(item) for item in step.get("expertise", [])),
+                        " ".join(
+                            str(item)
+                            for item in step.get("acceptance_criteria", [])
+                        ),
+                    )
+                    if value
+                )[:8_000]
                 context["attachments"] = self.artifact_store.context_items(
                     state.variables["attachment_ids"],
                     getattr(self.llm_provider, "supports_vision", False),
                     max_text_chars=attachment_text_budget,
+                    query=attachment_query,
                 )
 
             # Request LLM completion
@@ -2462,6 +2616,19 @@ class ExecutionEngine:
             if skills:
                 base_prompt += "\n\nActive skills:\n" + "\n\n".join(
                     f"[{skill.name}]\n{skill.instructions}" for skill in skills
+                )
+            if state.variables.get("attachment_ids"):
+                base_prompt += (
+                    "\n\nLocal document workflow: attached documents are parsed and indexed "
+                    "without Internet access. Initial excerpts are selected from the whole corpus "
+                    "for this assignment and include source, section, block range, and chunk ID. "
+                    "Use documents.inventory, documents.search, documents.read, and "
+                    "documents.read_chunk to verify coverage or retrieve omitted sections. "
+                    "The documents.read start_block parameter is a zero-based normalized-block "
+                    "offset, while local citation locators are one-based. A PPTX commonly has "
+                    "multiple normalized blocks per slide: cite its provenance slide_number "
+                    "within inventory citation_bounds, never its block order or block count. "
+                    "Never claim complete corpus coverage from excerpts alone."
                 )
             
             if role_key == "architect":
@@ -2526,6 +2693,7 @@ class ExecutionEngine:
                 "\nAct autonomously inside the project workspace: inspect existing prerequisite artifacts, implement the assignment, "
                 "run relevant checks, diagnose failures, fix root causes, and rerun checks before finishing. Do not merely describe "
                 "what should be done. Do not redo validated dependency work. Never claim an artifact or successful test that you did not create or execute."
+                " Inherited requirements are context for this assignment; they never expand your ownership. Create or edit only the exact Required artifacts and Owned paths above. Do not create sibling-step deliverables, alternate root-level copies, quality reports owned by later reviewers, or extra subprojects."
                 " Do not install dependencies online or create fake dependency packages inside the project."
             )
 
@@ -2546,7 +2714,16 @@ class ExecutionEngine:
             llm_messages.append({"role": "system", "content": role_prompt})
             for attachment in context.get("attachments", []):
                 if attachment.get("text") is not None:
-                    llm_messages.append({"role": "user", "content": f"Attached file {attachment['filename']}:\n{attachment['text']}"})
+                    llm_messages.append({
+                        "role": "user",
+                        "content": (
+                            f"Retrieved local content from attached file "
+                            f"{attachment['filename']}:\n"
+                            f"Selection metadata: "
+                            f"{json.dumps(attachment.get('retrieval', {}), ensure_ascii=False)}\n"
+                            f"{attachment['text']}"
+                        ),
+                    })
                 elif attachment.get("image_url"):
                     llm_messages.append({"role": "user", "content": [
                         {"type": "text", "text": f"Attached image: {attachment['filename']}"},

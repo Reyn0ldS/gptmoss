@@ -526,8 +526,20 @@ def build_delivery_contract(plan: Dict[str, Any], task: str) -> Dict[str, Any]:
                 "command": command,
                 "independent": str(step.get("role") or "") in INDEPENDENT_ROLES,
             })
+    software_suffixes = {
+        ".py", ".pyi", ".js", ".jsx", ".ts", ".tsx", ".java", ".kt",
+        ".cs", ".go", ".rs", ".c", ".cc", ".cpp", ".h", ".hpp",
+        ".rb", ".php", ".swift", ".scala", ".sh", ".ps1", ".bat",
+    }
     software_delivery = any(
-        str(step.get("role") or "") in {"developer", "qa", "debugger"}
+        str(step.get("role") or "") == "developer"
+        or any(Path(path).suffix.lower() in software_suffixes
+               for path in _strings(step.get("required_artifacts")))
+        or any(re.search(
+            r"(?i)\b(?:pytest|unittest|npm\s+(?:run\s+)?test|cargo\s+test|"
+            r"go\s+test|dotnet\s+test|mvn\s+test|gradle\w*\s+test)\b",
+            command,
+        ) for command in _strings(step.get("verification_commands")))
         for step in plan.get("steps", [])
     )
     contract = {

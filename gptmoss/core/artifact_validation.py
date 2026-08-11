@@ -10,6 +10,8 @@ from collections import Counter
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, Optional
 
+from gptmoss.core.document_quality import validate_document
+
 
 ValidationReport = Dict[str, Any]
 Validator = Callable[[Path, Dict[str, Any]], ValidationReport]
@@ -604,3 +606,7 @@ def validate_artifact(
 register_artifact_validator("obj", validate_obj)
 register_artifact_validator("glb", validate_glb)
 register_artifact_validator("json", validate_json)
+register_artifact_validator("document", validate_document)
+register_artifact_validator("markdown", validate_document)
+register_artifact_validator("md", validate_document)
+register_artifact_validator("txt", validate_document)

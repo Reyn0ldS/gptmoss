@@ -1,0 +1,4 @@
+interface:
+  display_name: "Analyse documentaire locale"
+  short_description: "Analyser et tracer un corpus documentaire local"
+  default_prompt: "Use $document-analysis to analyze the attached local corpus with full provenance."

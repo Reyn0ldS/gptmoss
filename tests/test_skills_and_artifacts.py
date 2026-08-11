@@ -1,5 +1,8 @@
 import base64
+from io import BytesIO
+import json
 from pathlib import Path
+from zipfile import ZIP_DEFLATED, ZipFile
 
 import pytest
 
@@ -7,11 +10,73 @@ from gptmoss.core.artifacts import ArtifactStore
 from gptmoss.core.skills import SkillRegistry
 
 
+def _minimal_docx_bytes() -> bytes:
+    payload = BytesIO()
+    document_xml = """<?xml version="1.0" encoding="UTF-8"?>
+    <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+      <w:body>
+        <w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Exigences locales</w:t></w:r></w:p>
+        <w:p><w:r><w:t>Les sources restent sur le poste.</w:t></w:r></w:p>
+      </w:body>
+    </w:document>"""
+    with ZipFile(payload, "w", ZIP_DEFLATED) as archive:
+        archive.writestr("word/document.xml", document_xml)
+    return payload.getvalue()
+
+
 def test_skill_registry_discovers_and_selects_builtin_skill():
     registry = SkillRegistry([str(Path(__file__).resolve().parents[1] / "gptmoss" / "skills")])
     selected = registry.select("Write Python code with tests", requested=["secure-python"])
     assert selected[0].name == "secure-python"
     assert selected[0].allowed_capabilities == ["filesystem", "shell"]
+
+
+def test_explicit_skill_selection_is_complete_and_not_auto_augmented():
+    registry = SkillRegistry([str(Path(__file__).resolve().parents[1] / "gptmoss" / "skills")])
+
+    selected = registry.select(
+        "Analyze ingestion from vision.pptx and deliver final validation",
+        requested=["document-analysis", "documentation", "project-architecture"],
+        limit=1,
+    )
+
+    assert [skill.name for skill in selected] == [
+        "document-analysis", "documentation", "project-architecture",
+    ]
+
+
+def test_professional_document_skills_use_standard_tools_and_quality_gates():
+    root = Path(__file__).resolve().parents[1] / "gptmoss" / "skills"
+    registry = SkillRegistry([str(root)])
+
+    analysis = registry.skills["document-analysis"]
+    documentation = registry.skills["documentation"]
+    architecture = registry.skills["project-architecture"]
+
+    for skill in (analysis, documentation, architecture):
+        assert skill.allowed_capabilities == ["documents", "filesystem"]
+        assert "TODO" not in skill.instructions
+        report = registry.validate(
+            name=skill.name,
+            description=skill.description,
+            instructions=skill.instructions,
+            allowed_capabilities=skill.allowed_capabilities,
+            registered_capabilities={"documents", "filesystem"},
+        )
+        assert report["valid"], report
+
+    assert registry.select(
+        "Analyze the attached DOCX corpus and trace every requirement",
+        requested=["document-analysis"],
+    )[0].name == "document-analysis"
+    assert "documents.search" in analysis.instructions
+    assert "traceability matrix" in documentation.instructions
+    assert "migration" in architecture.instructions
+
+    interface = (
+        root / "document-analysis" / "agents" / "openai.yaml"
+    ).read_text(encoding="utf-8")
+    assert "$document-analysis" in interface
 
 
 def test_skill_compatibility_report_maps_known_external_tools(tmp_path):
@@ -32,6 +97,76 @@ def test_artifact_store_handles_text_and_rejects_invalid_image(tmp_path):
 
     with pytest.raises(ValueError, match="Invalid PNG"):
         store.save_base64("bad.png", payload, "image/png")
+
+
+def test_artifact_store_normalizes_docx_and_reuses_cached_structure(tmp_path):
+    store = ArtifactStore(str(tmp_path))
+    metadata = store.save_base64(
+        "requirements.bin",
+        base64.b64encode(_minimal_docx_bytes()).decode("ascii"),
+        "application/octet-stream",
+    )
+
+    assert metadata["content_type"].endswith("wordprocessingml.document")
+    assert metadata["document_title"] == "Exigences locales"
+    assert metadata["document_blocks"] == 2
+    assert Path(metadata["document_path"]).is_file()
+
+    document = store.document(metadata["id"])
+    context = store.context_items([metadata["id"]])
+    assert document.title == "Exigences locales"
+    assert "Les sources restent sur le poste." in store.preview_text(metadata["id"])
+    assert context[0]["document"]["block_count"] == 2
+    assert context[0]["text_compacted"] is False
+    results = store.search_documents("sources poste")
+    assert results[0]["artifact_id"] == metadata["id"]
+    assert results[0]["provenance"][0]["source_name"] == "requirements.bin"
+
+    reloaded = ArtifactStore(str(tmp_path))
+    assert reloaded.search_documents("sources poste") == results
+    reloaded.delete(metadata["id"])
+    assert reloaded.search_documents("sources poste") == []
+    assert reloaded.document_index.stats()["documents"] == 0
+
+
+def test_artifact_store_removes_failed_document_upload(tmp_path):
+    store = ArtifactStore(str(tmp_path))
+
+    with pytest.raises(ValueError):
+        store.save_base64(
+            "broken.docx",
+            base64.b64encode(b"not an OOXML archive").decode("ascii"),
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        )
+
+    assert list(store.root.iterdir()) == []
+
+
+def test_artifact_store_rebuilds_a_corrupt_persistent_index(tmp_path):
+    store = ArtifactStore(str(tmp_path))
+    metadata = store.save_base64(
+        "requirements.docx",
+        base64.b64encode(_minimal_docx_bytes()).decode("ascii"),
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    )
+    index_path = store.document_index.path
+    index_path.write_text("{corrupt", encoding="utf-8")
+
+    recovered = ArtifactStore(str(tmp_path))
+
+    assert recovered.document_index.load_error == ""
+    assert recovered.search_documents("sources locales")[0]["artifact_id"] == metadata["id"]
+
+
+def test_artifact_store_recovers_an_empty_corrupt_index(tmp_path):
+    store = ArtifactStore(str(tmp_path))
+    store.document_index.path.write_text("{corrupt", encoding="utf-8")
+
+    recovered = ArtifactStore(str(tmp_path))
+
+    assert recovered.document_index.load_error == ""
+    assert recovered.document_index.stats()["documents"] == 0
+    assert json.loads(recovered.document_index.path.read_text(encoding="utf-8"))["version"] == 1
 
 
 @pytest.mark.parametrize(

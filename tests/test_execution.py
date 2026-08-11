@@ -253,6 +253,15 @@ def test_sub_agent_capabilities_filtering():
     assert any("agent__spawn" in act for act in child_actions)
     assert any("filesystem__read" in act for act in child_actions)
 
+    bounded_child_actions = [
+        schema["function"]["name"]
+        for schema in engine.get_capabilities_schemas(
+            is_sub_agent=True, suppress_delegation=True
+        )
+    ]
+    assert not any("agent__" in action for action in bounded_child_actions)
+    assert any("filesystem__read" in action for action in bounded_child_actions)
+
     engine.allow_nested_delegation = False
     restricted_child_actions = [
         schema["function"]["name"]

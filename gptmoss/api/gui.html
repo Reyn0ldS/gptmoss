@@ -1072,6 +1072,9 @@
         .library-panel input:not([type=checkbox]), .library-panel textarea { width:100%; box-sizing:border-box; margin:4px 0; padding:8px; color:var(--text-normal); background:var(--bg-input); border:1px solid var(--border-color); border-radius:5px; }
         .library-panel textarea { min-height:90px; resize:vertical; }
         .diagnostic-output { max-height:300px; overflow:auto; white-space:pre-wrap; overflow-wrap:anywhere; font-size:11px; color:var(--text-muted); }
+        .library-header { gap:8px; align-items:flex-start; }
+        .library-header h3 { min-width:0; overflow-wrap:anywhere; }
+        .library-header .btn-control { flex:0 0 auto; white-space:nowrap; overflow-wrap:normal; }
 
         @media (max-width: 1280px) {
             .sidebar { width: 260px; }
@@ -1124,12 +1127,16 @@
 
         @media (max-width: 768px) {
             html {
-                overflow-x: auto;
+                width: 100%;
+                max-width: 100%;
+                overflow-x: hidden;
                 overflow-y: auto;
             }
             body {
                 flex-direction: column;
-                overflow-x: auto;
+                width: 100%;
+                max-width: 100%;
+                overflow-x: hidden;
                 overflow-y: visible;
                 height: auto;
                 min-height: 100vh;
@@ -1137,18 +1144,58 @@
             }
             .sidebar {
                 width: 100%;
+                max-width: 100%;
                 height: auto;
                 max-height: 250px;
                 border-right: none;
                 border-bottom: 1px solid var(--border-color);
             }
-            .main-content { width: 100%; min-height: 60vh; overflow: visible; }
+            .main-content {
+                width: 100%;
+                max-width: 100%;
+                min-height: 60vh;
+                overflow-x: hidden;
+                overflow-y: visible;
+            }
+            .landing-view {
+                width: 100%;
+                max-width: 100%;
+                overflow-x: hidden;
+            }
+            .landing-title,
+            .landing-subtitle {
+                max-width: 100%;
+                overflow-wrap: anywhere;
+            }
             .detail-view { height: auto; min-height: 60vh; }
             .detail-header { padding: 14px 16px; }
             .detail-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
             .detail-actions .badge { grid-column: 1 / -1; justify-self: start; }
-            .task-form-container { padding: 16px; }
-            .task-form-container > div:first-child { flex-wrap: wrap; gap: 10px; }
+            .task-form-container {
+                width: 100%;
+                max-width: 100%;
+                padding: 16px;
+                overflow: hidden;
+            }
+            .task-form-container > div:first-child {
+                width: 100%;
+                min-width: 0;
+                flex-wrap: wrap;
+                gap: 10px;
+            }
+            .task-form-container > div:first-child > div {
+                min-width: 0;
+                max-width: 100%;
+                flex-wrap: wrap;
+            }
+            #task-attachments {
+                display: block;
+                min-width: 0;
+                max-width: 100%;
+                overflow: hidden;
+                text-overflow: ellipsis;
+                font-size: 11px;
+            }
             #task-project-select { width: min(100%, 180px) !important; }
             .toast-container { left: 12px; right: 12px; bottom: 12px; }
             .toast { min-width: 0; max-width: none; width: 100%; }
@@ -1190,6 +1237,27 @@
             }
             .task-form-container {
                 padding: 14px;
+            }
+            .landing-view {
+                padding: 12px;
+            }
+            .landing-title {
+                font-size: 20px;
+            }
+            .landing-subtitle {
+                margin-bottom: 20px;
+            }
+            .sidebar-footer {
+                display: grid !important;
+                grid-template-columns: repeat(3, minmax(0, 1fr));
+                gap: 6px !important;
+                padding: 8px 10px !important;
+            }
+            .sidebar-footer .btn-control {
+                width: 100%;
+                min-width: 0;
+                padding: 6px 3px;
+                font-size: 10px;
             }
             .modal-overlay {
                 padding: 6px;
@@ -1247,7 +1315,7 @@
                     </div>
                 </div>
                 <label class="form-label" for="task-input">Décrivez la tâche à accomplir</label>
-                <input type="file" id="task-attachments" multiple accept=".txt,.md,.json,.csv,.png,.jpg,.jpeg,.webp" style="margin-bottom: 10px; width: 100%; color: var(--text-muted);"><textarea class="task-textarea" id="task-input" placeholder="Ex: Crée un fichier de salutations, ou analyse le dossier actuel..."></textarea>
+                <input type="file" id="task-attachments" multiple accept=".docx,.pptx,.txt,.md,.json,.csv,.html,.htm,.png,.jpg,.jpeg,.webp" style="margin-bottom: 10px; width: 100%; color: var(--text-muted);"><textarea class="task-textarea" id="task-input" placeholder="Ex: Crée un fichier de salutations, ou analyse le dossier actuel..."></textarea>
                 <button id="task-submit-btn" class="task-submit-btn" onclick="submitNewTask()">Démarrer l'exécution</button>
             </div>
         </div>
@@ -2486,10 +2554,28 @@
         }
         async function uploadSelectedAttachments() {
             const files = Array.from(document.getElementById("task-attachments")?.files || []);
-            const allowed = {"text/plain":"text/plain","text/markdown":"text/markdown","application/json":"application/json","text/csv":"text/csv","image/png":"image/png","image/jpeg":"image/jpeg","image/webp":"image/webp"};
+            const allowed = {
+                "text/plain":"text/plain",
+                "text/markdown":"text/markdown",
+                "application/json":"application/json",
+                "text/csv":"text/csv",
+                "text/html":"text/html",
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document":"application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                "application/vnd.openxmlformats-officedocument.presentationml.presentation":"application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                "image/png":"image/png",
+                "image/jpeg":"image/jpeg",
+                "image/webp":"image/webp"
+            };
+            const extensionTypes = {
+                "docx":"application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                "pptx":"application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                "txt":"text/plain", "md":"text/markdown", "json":"application/json",
+                "csv":"text/csv", "html":"text/html", "htm":"text/html"
+            };
             const ids = Array.from(selectedLibraryArtifacts);
             for (const file of files) {
-                const type = allowed[file.type] || (file.name.endsWith(".md") ? "text/markdown" : "");
+                const extension = file.name.includes(".") ? file.name.split(".").pop().toLowerCase() : "";
+                const type = allowed[file.type] || extensionTypes[extension] || "";
                 if (!type) throw new Error(`Format non pris en charge : ${file.name}`);
                 const data = await file.arrayBuffer();
                 const bytes = new Uint8Array(data); let binary = "";
@@ -2511,7 +2597,7 @@
             if (activeExecutionId) calls.push(requestApi(`/executions/${activeExecutionId}/subagents`).then(r=>r.json()));
             const [artifacts, skills, memories, diagnostics, audit, subagents=[]] = await Promise.all(calls);
             librarySkills = skills; libraryMemories = memories;
-            document.getElementById("library-artifacts").innerHTML = artifacts.map(a=>`<div class="library-row"><label><input type="checkbox" ${selectedLibraryArtifacts.has(a.id) ? "checked" : ""} onchange="toggleArtifactAttachment('${a.id}',this.checked)"> ${escapeHTML(a.filename)}</label><span>${Math.ceil(a.size_bytes/1024)} Ko</span><span><button onclick="previewArtifact('${a.id}')">Aperçu</button> <button onclick="deleteArtifact('${a.id}')">Supprimer</button></span></div>`).join("") || "Aucun fichier.";
+            document.getElementById("library-artifacts").innerHTML = artifacts.map(a=>`<div class="library-row"><label><input type="checkbox" ${selectedLibraryArtifacts.has(a.id) ? "checked" : ""} onchange="toggleArtifactAttachment('${a.id}',this.checked)"> ${escapeHTML(a.filename)}<small>${escapeHTML(a.document_title || a.content_type || "")}${Number.isInteger(a.document_blocks) ? ` — ${a.document_blocks} blocs` : ""}</small></label><span>${Math.ceil(a.size_bytes/1024)} Ko</span><span><button onclick="previewArtifact('${a.id}')">Aperçu</button> <button onclick="deleteArtifact('${a.id}')">Supprimer</button></span></div>`).join("") || "Aucun fichier.";
             document.getElementById("library-skills").innerHTML = skills.map(s=>`<div class="library-row"><span><b>${escapeHTML(s.name)}</b> — ${escapeHTML(s.description || "")}</span><span>${s.allowed_capabilities.map(escapeHTML).join(", ") || "sans capacité"}</span><span><button onclick="validateLibrarySkill('${s.name}')">Valider</button> ${s.editable ? `<button onclick="editLibrarySkill('${s.name}')">Modifier</button> <button onclick="deleteLibrarySkill('${s.name}')">Supprimer</button>` : "intégré"} <button onclick="toggleSkillActivation('${s.name}')">Activer/désactiver</button></span></div>`).join("") || "Aucun skill.";
             document.getElementById("library-memory").innerHTML = memories.map(m=>`<div class="library-row"><span>${escapeHTML(String(m.value))}<small>source : ${escapeHTML(String((m.provenance||{}).source||"inconnue"))}</small></span><span>${m.validated ? "validée" : "en attente"}</span><span>${m.validated ? "" : `<button onclick="validateMemory('${m.id}')">Valider</button>`} <button onclick="editMemory('${m.id}')">Modifier</button> <button onclick="deleteMemory('${m.id}')">Supprimer</button></span></div>`).join("") || "Aucune mémoire.";
             document.getElementById("library-diagnostics").textContent = JSON.stringify({model:diagnostics.model, vision:diagnostics.supports_vision, capabilities:diagnostics.capabilities, executions:diagnostics.execution_statuses, metrics:diagnostics.metrics, errors:diagnostics.errors, traces:diagnostics.recent_events}, null, 2);
@@ -2525,7 +2611,18 @@
                 const box = document.getElementById("library-preview"); box.innerHTML = "";
                 const title = document.createElement("b"); title.textContent = data.filename; box.appendChild(title);
                 if (data.preview_type === "image") { const img=document.createElement("img"); img.src=data.data_url; img.alt=data.filename; img.style.cssText="display:block;max-width:100%;max-height:420px;margin-top:8px"; box.appendChild(img); }
-                else { const pre=document.createElement("pre"); pre.textContent=data.text; pre.style.whiteSpace="pre-wrap"; box.appendChild(pre); }
+                else {
+                    if (data.document) {
+                        const details=document.createElement("small");
+                        details.style.cssText="display:block;color:var(--text-muted);overflow-wrap:anywhere";
+                        details.textContent=`${data.document.title || "Sans titre"} — ${data.document.block_count} blocs — ${data.document.parser}`;
+                        box.appendChild(details);
+                    }
+                    const pre=document.createElement("pre");
+                    pre.textContent=data.text;
+                    pre.style.cssText="white-space:pre-wrap;max-width:100%;overflow-wrap:anywhere;word-break:break-word";
+                    box.appendChild(pre);
+                }
             } catch (err) { showToast(err.message, "error"); }
         }
         async function deleteArtifact(id) { if (!confirm("Supprimer définitivement ce fichier ?")) return; await requestApi(`/artifacts/${id}`, {method:"DELETE"}); selectedLibraryArtifacts.delete(id); refreshLibrary(); }
@@ -2728,7 +2825,7 @@
     </div>
     <div id="library-modal" class="modal-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.8);z-index:1100;justify-content:center;align-items:center;">
       <div class="settings-container" style="background:var(--bg-card);width:min(1100px,96vw);max-height:94vh;overflow:auto;padding:22px;">
-        <div style="display:flex;justify-content:space-between;position:sticky;top:0;background:var(--bg-card);z-index:2"><h3>Centre de contrôle GPTMOSS</h3><button class="btn-control" onclick="closeLibraryModal()">Fermer</button></div>
+        <div class="library-header" style="display:flex;justify-content:space-between;position:sticky;top:0;background:var(--bg-card);z-index:2"><h3>Centre de contrôle GPTMOSS</h3><button class="btn-control" onclick="closeLibraryModal()">Fermer</button></div>
         <section class="library-panel"><h4>Documents et images</h4><p style="font-size:11px;color:var(--text-muted)">Cochez un fichier pour le rattacher à la prochaine tâche. Les aperçus restent locaux.</p><div id="library-artifacts"></div><div id="library-preview" style="margin-top:10px;max-height:480px;overflow:auto"></div></section>
         <section class="library-panel"><h4>Skills</h4><div id="library-skills"></div><div class="library-grid"><div><input type="file" accept=".md,text/markdown" onchange="importLibrarySkill(this)"><small>Importer un fichier SKILL.md (262 Ko maximum).</small></div><div><input id="library-skill-name" placeholder="nom-du-skill"><input id="library-skill-description" placeholder="Description"><textarea id="library-skill-instructions" placeholder="Instructions du skill"></textarea><div><label><input type="checkbox" name="library-cap" value="filesystem"> Fichiers</label> <label><input type="checkbox" name="library-cap" value="shell"> Shell</label> <label><input type="checkbox" name="library-cap" value="agent"> Agents</label> <label><input type="checkbox" name="library-cap" value="devteam"> Équipe</label></div><button class="btn-control resume" onclick="createLibrarySkill()">Créer / mettre à jour</button> <button class="btn-control" onclick="resetSkillForm()">Réinitialiser</button></div></div></section>
         <section class="library-panel"><h4>Mémoire persistante</h4><input id="library-memory-search" placeholder="Filtrer les mémoires" oninput="clearTimeout(this._timer);this._timer=setTimeout(refreshLibrary,250)"><div id="library-memory"></div><div class="library-grid"><textarea id="library-memory-value" placeholder="Information à mémoriser"></textarea><div><input id="library-memory-source" value="gui" placeholder="Provenance"><input id="library-memory-ttl" type="number" min="1" max="365" placeholder="Expiration en jours (facultatif)"><label><input id="library-memory-validated" type="checkbox"> Valider immédiatement</label><br><button id="library-memory-save" class="btn-control resume" onclick="saveMemory()">Créer</button> <button class="btn-control" onclick="resetMemoryForm()">Réinitialiser</button></div></div></section>

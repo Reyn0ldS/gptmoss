@@ -22,6 +22,7 @@ GUI_FILE_PATH = os.path.join(CURRENT_DIR, "gui.html")
 
 from gptmoss.core import EventBus, Event, StateEngine, RuntimeKernel, ExecutionEngine, DEFAULT_SYSTEM_PROMPT
 from gptmoss.core.artifacts import ArtifactStore
+from gptmoss.capabilities.documents import DocumentCapability
 from gptmoss.core.evolution import AgentProfileRegistry, AutonomousSkillLifecycle
 from gptmoss.core.skills import SkillRegistry
 
@@ -213,13 +214,27 @@ def _artifact_store() -> Optional[ArtifactStore]:
         return None
     store = app_state.execution_engine.artifact_store
     if store:
+        _synchronize_document_capability(store)
         return store
     filesystem = _filesystem_capability()
     if not filesystem:
         return None
     store = ArtifactStore(filesystem.workspace_root)
     app_state.execution_engine.artifact_store = store
+    _synchronize_document_capability(store)
     return store
+
+def _synchronize_document_capability(store: ArtifactStore) -> None:
+    if not app_state.execution_engine:
+        return
+    capability = app_state.execution_engine.get_capability("documents")
+    if capability and hasattr(capability, "update_store"):
+        capability.update_store(store)
+    elif not capability:
+        app_state.execution_engine.register_capability(
+            "documents",
+            DocumentCapability(store),
+        )
 
 def _runtime_config_path() -> Optional[Path]:
     if app_state.config_path:
@@ -361,7 +376,12 @@ async def upload_artifact(req: UploadArtifactRequest):
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return {key: metadata[key] for key in ("id", "filename", "content_type", "size_bytes", "sha256", "created_at")}
+    public_fields = (
+        "id", "filename", "content_type", "size_bytes", "sha256", "created_at",
+        "document_title", "document_blocks", "document_parser",
+        "document_parser_version", "document_chunks",
+    )
+    return {key: metadata[key] for key in public_fields if key in metadata}
 
 
 @app.get("/artifacts")
@@ -374,10 +394,53 @@ async def list_artifacts():
     for path in store.root.glob("*.json"):
         try:
             metadata = json.loads(path.read_text(encoding="utf-8"))
-            items.append({key: metadata[key] for key in ("id", "filename", "content_type", "size_bytes", "sha256", "created_at")})
+            required_fields = {
+                "id", "filename", "content_type", "size_bytes", "sha256",
+                "created_at",
+            }
+            if not required_fields.issubset(metadata):
+                continue
+            public_fields = (
+                "id", "filename", "content_type", "size_bytes", "sha256",
+                "created_at", "document_title", "document_blocks",
+                "document_parser", "document_parser_version",
+                "document_chunks",
+            )
+            items.append(
+                {key: metadata[key] for key in public_fields if key in metadata}
+            )
         except (OSError, KeyError, json.JSONDecodeError):
             continue
     return sorted(items, key=lambda item: item["created_at"], reverse=True)
+
+@app.get("/artifacts/search")
+async def search_artifacts(
+    q: str,
+    limit: int = 8,
+    artifact_id: Optional[List[str]] = None,
+    content_type: Optional[List[str]] = None,
+    heading: Optional[str] = None,
+    kind: Optional[List[str]] = None,
+):
+    store = _artifact_store()
+    if not store:
+        raise HTTPException(status_code=500, detail="Artifact storage not initialized.")
+    query = q.strip()
+    if not query:
+        raise HTTPException(status_code=400, detail="A non-empty local search query is required.")
+    results = store.search_documents(
+        query,
+        limit=max(1, min(int(limit), 100)),
+        artifact_ids=artifact_id,
+        content_types=content_type,
+        heading=heading,
+        kinds=kind,
+    )
+    return {
+        "query": query,
+        "results": results,
+        "index": store.document_index.stats(),
+    }
 
 @app.get("/artifacts/{artifact_id}/preview")
 async def preview_artifact(artifact_id: str):
@@ -392,8 +455,22 @@ async def preview_artifact(artifact_id: str):
     try:
         metadata = store.get(artifact_id)
         path = Path(metadata["path"])
-        if metadata["content_type"] in ArtifactStore.TEXT_TYPES:
-            return {"id": metadata["id"], "filename": metadata["filename"], "preview_type": "text", "content_type": metadata["content_type"], "text": path.read_text(encoding="utf-8", errors="replace")}
+        if metadata["content_type"] in ArtifactStore.DOCUMENT_TYPES:
+            document = store.document(artifact_id)
+            return {
+                "id": metadata["id"],
+                "filename": metadata["filename"],
+                "preview_type": "document",
+                "content_type": metadata["content_type"],
+                "text": document.to_markdown().rstrip("\n"),
+                "document": {
+                    "id": document.id,
+                    "title": document.title,
+                    "parser": document.parser,
+                    "parser_version": document.parser_version,
+                    "block_count": len(document.blocks),
+                },
+            }
         encoded = base64.b64encode(path.read_bytes()).decode("ascii")
         return {"id": metadata["id"], "filename": metadata["filename"], "preview_type": "image", "content_type": metadata["content_type"], "data_url": f"data:{metadata['content_type']};base64,{encoded}"}
     except (ValueError, FileNotFoundError, OSError, KeyError) as exc:
@@ -406,9 +483,7 @@ async def delete_artifact(artifact_id: str):
     if not store:
         raise HTTPException(status_code=500, detail="Artifact storage not initialized.")
     try:
-        metadata = store.get(artifact_id)
-        Path(metadata["path"]).unlink(missing_ok=True)
-        (store.root / f"{artifact_id}.json").unlink(missing_ok=True)
+        store.delete(artifact_id)
     except (ValueError, FileNotFoundError) as exc:
         raise HTTPException(status_code=404, detail="Artifact not found.") from exc
     return {"status": "deleted"}
@@ -1182,6 +1257,10 @@ async def update_settings(req: SettingsRequest):
             req.max_upload_bytes,
             req.max_attachment_text_chars,
         )
+    if app_state.execution_engine.artifact_store:
+        _synchronize_document_capability(
+            app_state.execution_engine.artifact_store
+        )
     app_state.execution_engine.autonomous_specialization = req.autonomous_specialization
     if workspace_changed or not app_state.execution_engine.agent_profile_registry:
         app_state.execution_engine.agent_profile_registry = AgentProfileRegistry(req.workspace_path)
@@ -1233,4 +1312,7 @@ def init_app(kernel: RuntimeKernel, exec_engine: ExecutionEngine, state_engine: 
     else:
         filesystem = exec_engine.get_capability("filesystem")
         app_state.config_path = Path(filesystem.workspace_root).resolve() / "config.json" if filesystem else None
+    store = _artifact_store()
+    if store:
+        _synchronize_document_capability(store)
     return app

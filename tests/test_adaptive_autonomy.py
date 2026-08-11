@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import json
 from unittest.mock import AsyncMock, Mock
 from pathlib import Path
@@ -10,6 +11,7 @@ from gptmoss.capabilities.shell import ShellCapability
 from gptmoss.core.context import ContextEngine
 from gptmoss.core.adaptive import tool_call_fingerprint
 from gptmoss.core.delivery import build_delivery_contract
+from gptmoss.core.artifacts import ArtifactStore
 from gptmoss.core.event_bus import EventBus
 from gptmoss.core.execution import ExecutionEngine, ProviderUnavailableError, normalize_plan
 from gptmoss.core.skills import SkillRegistry
@@ -849,6 +851,111 @@ async def test_stall_rescue_generates_missing_text_artifact_in_clean_context(tmp
 
     assert rescued == ["src/core.py"]
     assert (tmp_path / "projects" / "proj-rescue" / "src" / "core.py").read_text(encoding="utf-8") == "VALUE = 123\nREADY = True\n"
+
+
+@pytest.mark.asyncio
+async def test_stall_rescue_does_not_invent_grounded_document_from_attachments(tmp_path):
+    llm = MockLLMProvider()
+    engine, state = _engine(tmp_path, llm)
+    execution = state.get_execution("grounded-rescue")
+    execution.variables.update({
+        "project_id": "proj-grounded",
+        "parent_task": "Write a report from local sources",
+        "attachment_ids": ["attached-source"],
+    })
+    step = {
+        "role": "architect",
+        "specialist": "Evidence Analyst",
+        "description": "Create a source-grounded inventory",
+        "required_artifacts": ["analysis/corpus-inventory.md"],
+        "acceptance_criteria": ["Every statement is sourced"],
+        "verification_commands": [],
+    }
+
+    rescued = await engine._rescue_missing_artifacts(
+        "grounded-rescue", step, []
+    )
+
+    assert rescued == []
+    assert llm.call_count == 0
+
+
+def test_step_gate_rejects_invalid_intermediate_document_before_handoff(tmp_path):
+    engine, state = _engine(tmp_path, MockLLMProvider())
+    execution = state.get_execution("document-gate")
+    execution.variables["project_id"] = "proj-document-gate"
+    execution.current_plan = {
+        "artifact_validations": [{
+            "path": "analysis/corpus-inventory.md",
+            "validator": "document",
+            "required": True,
+            "constraints": {"forbid_placeholders": True},
+        }],
+    }
+    target = tmp_path / "projects" / "proj-document-gate" / "analysis" / "corpus-inventory.md"
+    target.parent.mkdir(parents=True)
+    target.write_text("# Inventaire\n\nSource : ...\n\n</think>\n", encoding="utf-8")
+    step = {
+        "role": "architect",
+        "specialist": "Evidence Analyst",
+        "description": "Inventory sources",
+        "required_artifacts": ["analysis/corpus-inventory.md"],
+        "acceptance_criteria": ["No placeholders"],
+        "verification_commands": [],
+    }
+    response = json.dumps({
+        "summary": "done", "artifacts": ["analysis/corpus-inventory.md"],
+        "evidence": [], "risks": [], "next_action": "handoff",
+    })
+
+    issues = engine._step_completion_issues("document-gate", step, response)
+
+    assert any("placeholder" in issue for issue in issues)
+    assert not engine._can_engine_finalize("document-gate", step)
+
+
+def test_exhaustive_inventory_gate_requires_every_normalized_block_read(tmp_path):
+    engine, state = _engine(tmp_path, MockLLMProvider())
+    store = ArtifactStore(str(tmp_path / "artifacts"))
+    uploaded = store.save_base64(
+        "vision.txt",
+        base64.b64encode(
+            b"# Slide 1\n\nfirst\n\n# Slide 2\n\nsecond\n\n# Slide 3\n\nthird"
+        ).decode("ascii"),
+        "text/plain",
+    )
+    engine.artifact_store = store
+    execution = state.get_execution("coverage-gate")
+    execution.variables["attachment_ids"] = [uploaded["id"]]
+    document = store.document(uploaded["id"])
+    step = {
+        "description": "Inventory every explicit attachment and record complete coverage.",
+        "acceptance_criteria": ["All normalized blocks were read."],
+    }
+
+    partial = {
+        "artifact_id": uploaded["id"],
+        "total_blocks": len(document.blocks),
+        "blocks": [block.to_dict() for block in document.blocks[:2]],
+    }
+    engine._record_tool_result(
+        "coverage-gate", "documents", "read", {}, json.dumps(partial)
+    )
+
+    issues = engine._document_coverage_issues("coverage-gate", step)
+    assert issues
+    assert "vision.txt" in issues[0]
+
+    remainder = {
+        "artifact_id": uploaded["id"],
+        "total_blocks": len(document.blocks),
+        "blocks": [block.to_dict() for block in document.blocks[2:]],
+    }
+    engine._record_tool_result(
+        "coverage-gate", "documents", "read", {}, json.dumps(remainder)
+    )
+
+    assert engine._document_coverage_issues("coverage-gate", step) == []
 
 
 def test_rescue_strips_prefixed_fence_and_rejects_mock_random_tests():

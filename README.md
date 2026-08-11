@@ -19,6 +19,7 @@ indépendant, des reprises LLM et du benchmark multi-prompts est détaillée dan
 - [Capacités des agents](#capacités-des-agents)
 - [Skills](#skills)
 - [Fichiers, images et artefacts](#fichiers-images-et-artefacts)
+- [Workflow documentaire local détaillé](docs/local-document-workflow.md)
 - [Mémoire, contexte et traces](#mémoire-contexte-et-traces)
 - [Sécurité](#sécurité)
 - [Dépannage](#dépannage)
@@ -164,7 +165,7 @@ La configuration active est `workspace/config.json`. Au démarrage, GPTMOSS la n
 | `continue_while_progress` | Supprime la limite globale de tours d'une étape tant qu'un progrès durable est détecté. | `true` pour les tâches longues. |
 | `adaptive_resource_management` | Transforme contexte, stagnation, reprises et sorties d'outils en budgets qui grandissent avec le contrat réel. | `true`. |
 | `strict_skill_capabilities` | Si activé, les skills sélectionnés réduisent aussi les outils exposés. Par défaut un skill ajoute une procédure sans retirer les capacités générales. | `false`. |
-| `allow_nested_delegation` | Autorise une sous-tâche réellement nouvelle à déléguer à son tour. Les cycles exacts sont refusés. | `true`. |
+| `allow_nested_delegation` | Autorise une étape qui déclare explicitement `allow_nested_delegation=true` à déléguer une sous-tâche réellement nouvelle. Une étape déléguée ordinaire reste bornée ; les cycles exacts sont refusés. | `true`. |
 | `max_delegation_depth` | Profondeur explicite de délégation ; `0` signifie aucune limite numérique arbitraire. | `0`. |
 | `autonomous_specialization` | Crée et conserve un profil d'agent propre à chaque spécialiste inédit du plan. | `true`. |
 | `autonomous_skill_creation` | Génère un skill procédural lorsqu'aucun skill chargé ne couvre suffisamment l'expertise. | `true`. |
@@ -357,7 +358,10 @@ Routes principales :
 | `GET /agent-profiles` | Liste les profils spécialisés persistants créés par le moteur. |
 | `GET /evolution` | Affiche les réglages du cycle autonome et les manifests des skills générés. |
 | `POST /artifacts` | Dépose un fichier. |
+| `GET /artifacts` | Inventorie les fichiers locaux et leurs métadonnées documentaires. |
+| `GET /artifacts/search` | Recherche localement dans les chunks avec filtres de source, format, titre et type. |
 | `GET /artifacts/{id}/preview` | Renvoie un aperçu texte ou image local. |
+| `DELETE /artifacts/{id}` | Supprime la source, sa normalisation et ses entrées d'index. |
 | `GET` / `POST /memory` | Filtre les mémoires ou crée une entrée. |
 | `PUT /memory/{id}` | Modifie valeur, provenance, validation et expiration. |
 | `GET /api/diagnostics` | Capacités, compatibilité vision, métriques, traces et erreurs. |
@@ -401,6 +405,8 @@ transmises explicitement à l'étape suivante. Le coordinateur final reçoit tou
 livraisons dans l'ordre du plan, les synthétise sans relancer de sous-agent et expose
 l'ensemble dans le champ `results` de l'exécution.
 
+Une étape déléguée n'expose pas `agent` ou `devteam` par défaut : le plan racine possède déjà les étapes sœurs et leurs propriétaires. Le planner peut déclarer `allow_nested_delegation=true` sur une étape seulement lorsqu'une équipe subordonnée distincte est justifiée ; l'option runtime globale doit également l'autoriser. Ce contrat évite qu'un spécialiste anticipe les artefacts d'un autre, duplique le DAG ou consomme son budget en boucles de statut.
+
 Le coordinateur final réutilise aussi les preuves machine réussies de tout l'arbre
 d'exécution : une commande QA exacte exécutée par un sous-agent n'est pas relancée
 uniquement pour apparaître dans l'historique local du coordinateur. Si le modèle
@@ -417,7 +423,7 @@ Le pipeline logiciel ne bloque plus l'agent de réparation derrière une suite d
 
 Les moteurs de jeu, Blender et autres applications propres à un projet restent des outils externes. Le plan fournit `external_tools` et `execution_routines` avec sondes de disponibilité, paramètres, étapes opérateur, commandes ou appels API non interactifs, sorties attendues, validation, dépannage et retour arrière. GPTMOSS ne prétend pas piloter une interface graphique qu’il n’a pas réellement exécutée.
 
-Les sorties déclarées dans `artifact_validations` sont contrôlées même si elles sont produites plus tard par un opérateur. Les validateurs intégrés inspectent JSON, OBJ et GLB : structure, nombres finis, indices, références glTF, buffers, hiérarchie de nœuds, géométrie dégénérée, topologie et contraintes dimensionnelles. Cela ne prouve ni le photoréalisme, ni le rendu Blender, ni la qualité artistique ; ces points restent dans la routine manuelle avec des critères explicites.
+Les sorties déclarées dans `artifact_validations` sont contrôlées dès la fin de l'étape qui les produit, avant leur transmission aux spécialistes suivants, puis de nouveau par l'assurance finale. Les validateurs intégrés inspectent JSON, OBJ et GLB. Le validateur `document` contrôle de façon déclarative les sections, exigences, tables de traçabilité, références locales bornées, sources autorisées, liens externes, placeholders, balises de raisonnement résiduelles, répétitions, terminologie, paragraphes non sourcés et métriques minimales d'un Markdown ou TXT. Même sans politique détaillée, un texte intermédiaire ne peut pas passer avec un placeholder manifeste. Une erreur critique bloque la garantie de livraison. Pour un travail fondé sur des pièces jointes, la récupération d'inactivité ne fabrique jamais le document manquant depuis un contexte privé de son corpus. Les validations structurelles ne prouvent ni le photoréalisme, ni le rendu Blender, ni la justesse métier ; ces points restent soumis aux critères explicites et à la revue appropriée.
 
 États possibles :
 
@@ -440,6 +446,7 @@ Une règle de politique peut viser une capacité entière (`shell`) ou une actio
 | `shell` | `execute` | Lance une commande dans le projet. Avec un délai à `0`, le runtime choisit un budget par catégorie ; une sortie maximale à `0` est conservée entièrement. `python` utilise l'interpréteur courant, y compris dans les pipelines Windows. |
 | `agent` | `spawn`, `status`, `execute_subtask` | Crée ou suit une sous-tâche. La délégation imbriquée accepte une tâche nouvelle ; la répétition d’une tâche ancêtre est bloquée. |
 | `devteam` | `build_project`, `approve_quality_gate` | Pipeline de développement avec les mêmes règles de délégation et d’approbation. |
+| `documents` | `inventory`, `search`, `read`, `read_chunk` | Inventorie, recherche et lit avec provenance uniquement les documents explicitement joints à l'exécution. Aucun lien distant n'est suivi. |
 
 Le shell bloque en mode sûr plusieurs motifs destructifs évidents (`rm -rf /`, `format`, `diskpart`, `shutdown`, `reg delete`, etc.). Ce filtrage est intentionnellement limité : une politique stricte et un environnement isolé restent nécessaires.
 
@@ -460,18 +467,18 @@ Format :
 ---
 name: mon-skill
 description: Objectif en une phrase.
-allowed_capabilities: [filesystem, shell]
+allowed-tools: documents filesystem
 ---
 
 Instructions détaillées données à l'agent lorsqu'il sélectionne ce skill.
 ```
 
-`name` doit contenir uniquement lettres minuscules, chiffres, `_` ou `-`. Les capabilities autorisées sont l'union de celles des skills sélectionnés : choisissez-les avec parcimonie. En plus des skills généraux (`secure-python`, `test-and-debug`, `project-architecture`, `documentation`, `code-review`), le paquet fournit des skills spécialisés : `requirements-feasibility`, `computer-vision-ml`, `geometry-3d`, `digital-garments`, `backend-api`, `frontend-3d`, `integration-delivery` et `biometric-privacy`.
+`name` doit contenir uniquement lettres minuscules, chiffres, `_` ou `-`. `allowed-tools` accepte les outils standard séparés par des espaces ; l'ancien champ GPTMOSS `allowed_capabilities` reste lu pour compatibilité. Par défaut, un skill ajoute sa procédure sans réduire les capacités générales. Si `strict_skill_capabilities` est activé, ses outils déclarés bornent aussi les schémas exposés. En plus des skills généraux (`secure-python`, `test-and-debug`, `document-analysis`, `project-architecture`, `documentation`, `code-review`), le paquet fournit des skills spécialisés : `requirements-feasibility`, `computer-vision-ml`, `geometry-3d`, `digital-garments`, `backend-api`, `frontend-3d`, `integration-delivery` et `biometric-privacy`.
 
 Deux modes de sélection existent :
 
-1. automatique : GPTMOSS classe les skills selon les mots de la tâche ;
-2. explicite : envoyez `agent_config.skills`, comme dans l'exemple API précédent.
+1. automatique : sans liste explicite, GPTMOSS classe les skills selon les mots de la tâche et ignore les correspondances trop faibles ;
+2. explicite : envoyez `agent_config.skills`, comme dans l'exemple API précédent. Cette liste devient le contrat de sélection de l'exécution : tous ses éléments valides sont conservés, sans plafond de classement et sans ajout automatique hors sujet. Les skills autonomes créés pour un spécialiste sont ensuite ajoutés explicitement à son propre contrat.
 
 ### Création autonome d'agents et de skills
 
@@ -499,9 +506,11 @@ Consultez aussi [SKILLS.md](SKILLS.md) pour les règles de compatibilité de ski
 
 ## Fichiers, images et artefacts
 
-Les artefacts sont stockés sous `<workspace>/uploads/`. Un fichier reçoit un identifiant UUID, un fichier de métadonnées et une empreinte SHA-256.
+Les artefacts sont stockés sous `<workspace>/uploads/`. Un fichier reçoit un identifiant UUID, un fichier de métadonnées et une empreinte SHA-256. Les documents reçoivent aussi une représentation normalisée mise en cache et des chunks dans un index lexical local persistant.
 
-Types acceptés : `text/plain`, `text/markdown`, `application/json`, `text/csv`, `image/png`, `image/jpeg`, `image/webp`. La taille est pilotée par `max_upload_bytes` ; `0` retire l’ancien plafond fixe de 10 Mio. Les noms sont assainis ; PNG, JPEG et WebP sont contrôlés par signature. PDF et DOCX ne sont pas pris en charge actuellement.
+Types acceptés : TXT/Markdown, JSON, CSV, HTML local, DOCX, PPTX, PNG, JPEG et WebP. La taille est pilotée par `max_upload_bytes` ; `0` n'impose pas de plafond applicatif fixe. Les noms sont assainis, les images sont contrôlées par signature et le contenu réel des documents est détecté. DOCX et PPTX sont analysés localement avec les modules ZIP/XML standard ; les archives dangereuses sont refusées. PDF et OCR restent différés.
+
+Les parseurs ne chargent aucune ressource distante d'un HTML ou d'un document Office. La recherche accent-insensible couvre tout le corpus et conserve fichier, titres, blocs et diapositives dans la provenance. Consultez le [guide complet du workflow documentaire local](docs/local-document-workflow.md) pour les quatre formats prioritaires, l'API de recherche, les références, les politiques qualité, le point d'entrée portable et le diagnostic.
 
 ### Déposer un fichier puis le joindre à une tâche
 
@@ -524,7 +533,7 @@ Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8000/executions `
   -ContentType 'application/json' -Body $task
 ```
 
-Le texte est ajouté au contexte et compacté selon le budget adaptatif global. Une image est envoyée lorsque la capacité vision est détectée ou explicitement activée. Si une pièce jointe exige une capacité absente, le plan déclare une lacune et une routine de configuration au lieu de fabriquer une analyse.
+Les documents ne sont pas concaténés puis tronqués aveuglément. GPTMOSS sélectionne les chunks liés à la tâche, diversifie les sources et peut échantillonner début, milieu et fin ; les agents disposent ensuite de lectures paginées. Une image est envoyée lorsque la capacité vision est détectée ou explicitement activée. Si une pièce jointe exige une capacité absente, le plan déclare une lacune et une routine de configuration au lieu de fabriquer une analyse.
 
 ## Mémoire, contexte et traces
 
@@ -579,9 +588,9 @@ GPTMOSS déjà démarré :
 python scripts/browser_layout_audit.py http://127.0.0.1:8000/
 ```
 
-Les tests vérifient notamment l'API, le moteur d'exécution, les politiques, la mémoire, les skills et les artefacts. La validation complète du 10 août 2026 a produit :
+Les tests vérifient notamment l'API, le moteur d'exécution, les politiques, la mémoire, les skills, les artefacts et le workflow documentaire local. La validation complète du 10 août 2026 a produit :
 
-- `148 passed` pour la suite GPTMOSS ;
+- `202 passed` pour la suite GPTMOSS sur la branche documentaire ;
 - 48/48 cas Edge réussis entre 360 × 740 et 1920 × 1080, avec des facteurs d'échelle de 100 % à 200 % ;
 - aucun débordement horizontal global et aucun élément signalé hors écran dans les scénarios vide, contenu, approbation, réglages et bibliothèque.
 
@@ -597,7 +606,7 @@ Le bouton **Bibliothèque** ouvre désormais le **Centre de contrôle GPTMOSS**.
 
 1. Pour un nouveau fichier, utilisez le sélecteur situé sous le texte de la tâche. Le fichier est téléversé au moment où vous cliquez sur **Démarrer l'exécution**.
 2. Pour réutiliser un fichier déjà stocké, ouvrez **Bibliothèque**, section **Documents et images**, puis cochez-le. Le compteur confirme son rattachement à la prochaine tâche.
-3. Cliquez sur **Aperçu** pour afficher localement le texte ou l'image. Le texte est limité à 50 000 caractères dans l'aperçu et le contexte.
+3. Cliquez sur **Aperçu** pour afficher localement le texte normalisé ou l'image. Le contexte de l'agent est sélectionné adaptativement ; l'aperçu sert à contrôler l'extraction et la provenance avant exécution.
 4. Cliquez sur **Supprimer** puis confirmez. Le contenu et ses métadonnées sont retirés ensemble.
 5. Après soumission réussie, la sélection de pièces jointes est remise à zéro pour éviter une réutilisation accidentelle.
 
@@ -631,7 +640,7 @@ La mémoire de session reste éphémère et gérée automatiquement par le moteu
 3. Cliquez sur **Créer le sous-agent**. Il apparaît dans l'arbre des exécutions et dans ce panneau.
 4. Utilisez **Pause**, **Reprendre** ou **Annuler**. Une pause provoquée par une validation humaine doit toujours être traitée avec **Autoriser/Refuser** dans le panneau d'exécution, pas avec **Reprendre**.
 
-Les sous-agents créés explicitement héritent des politiques runtime et ne peuvent pas déléguer à leur tour les capacités `agent` ou `devteam` pendant leur exécution.
+Les sous-agents créés explicitement héritent des politiques runtime et ne peuvent pas déléguer à leur tour les capacités `agent` ou `devteam`, sauf si leur étape porte explicitement `allow_nested_delegation=true` et que l'option runtime globale l'autorise.
 
 ### Diagnostics, traces, erreurs, capacités et vision
 
