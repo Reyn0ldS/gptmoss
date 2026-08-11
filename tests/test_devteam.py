@@ -1,6 +1,7 @@
 import pytest
 import os
 import tempfile
+from types import SimpleNamespace
 from gptmoss.capabilities.devteam import DeveloperTeamCapability
 
 def test_check_syntax_errors_valid_code():
@@ -96,3 +97,61 @@ def test_filesystem_rejects_path_traversal_and_prefix_escape():
             fs.write("../outside.txt", "blocked")
         with pytest.raises(PermissionError):
             fs._resolve_path(os.path.join(tmp_dir, "workspace-other", "file.txt"))
+
+
+@pytest.mark.asyncio
+async def test_build_project_runs_roles_tests_repair_and_delivery_in_chronological_order(tmp_path):
+    timeline = []
+
+    class ScriptedTeam(DeveloperTeamCapability):
+        async def _execute_role_task(self, role_name, system_prompt, task_description, parent_id=None):
+            timeline.append(("role", role_name, parent_id))
+            project = tmp_path / "demo"
+            call_number = sum(1 for item in timeline if item[0] == "role")
+            if call_number == 1:
+                (project / "specs.md").write_text("# Requirements\n", encoding="utf-8")
+            elif call_number == 2:
+                (project / "security_review.md").write_text("# Review\n", encoding="utf-8")
+            elif call_number == 3:
+                (project / "app.py").write_text("def ready():\n    return True\n", encoding="utf-8")
+            elif call_number == 4:
+                (project / "specs_compliance.md").write_text("All requirements satisfied.\n", encoding="utf-8")
+            elif call_number == 5:
+                (project / "tests").mkdir(exist_ok=True)
+                (project / "tests" / "test_app.py").write_text(
+                    "from app import ready\n\ndef test_ready():\n    assert ready()\n", encoding="utf-8",
+                )
+            elif call_number == 7:
+                (project / "README.md").write_text("# Demo\n", encoding="utf-8")
+            return "approved" if "Qualit" in role_name else "completed"
+
+    class ScriptedShell:
+        def __init__(self):
+            self.outputs = ["EXIT_CODE: 1\n1 failed", "EXIT_CODE: 0\n1 passed"]
+
+        def execute(self, command):
+            timeline.append(("shell", command, None))
+            return self.outputs.pop(0)
+
+    shell = ScriptedShell()
+    kernel = SimpleNamespace(execution_engine=SimpleNamespace(
+        get_capability=lambda name: shell if name == "shell" else None,
+    ))
+    team = ScriptedTeam(kernel=kernel, workspace_root=str(tmp_path))
+
+    report = await team.build_project(
+        "demo", "Build a verified local application", context={"execution_id": "parent-task"},
+    )
+
+    kinds = [item[0] for item in timeline]
+    assert kinds == ["role", "role", "role", "role", "role", "shell", "role", "shell", "role"]
+    roles = [item[1] for item in timeline if item[0] == "role"]
+    assert roles[0] == "Architecte"
+    assert roles[1].startswith("Analyste")
+    assert roles[2].startswith("D") and roles[3].startswith("V")
+    assert roles[4].startswith("Testeur") and "bug" in roles[5].lower()
+    assert roles[6].startswith("R")
+    assert all(item[2] == "parent-task" for item in timeline if item[0] == "role")
+    assert "pytest" in timeline[5][1] and timeline[5][1] == timeline[7][1]
+    assert (tmp_path / "demo" / "README.md").is_file()
+    assert "demo" in report and "1 passed" in report

@@ -164,6 +164,8 @@ async def wait_for_terminal_state(state_engine: StateEngine, execution_id: str, 
 @pytest.mark.asyncio
 async def test_complete_project_workflow_assigns_once_and_aggregates(tmp_path):
     event_bus = EventBus()
+    events = []
+    event_bus.subscribe_all(events.append)
     state_engine = StateEngine()
     provider = WorkflowLLMProvider()
     context = ContextEngine(state_engine, RAMMemoryProvider())
@@ -237,6 +239,51 @@ async def test_complete_project_workflow_assigns_once_and_aggregates(tmp_path):
     coordinator_prompt = provider.prompts["coordinator"][0]
     for role in ("architect", "security", "developer", "qa", "debugger", "writer"):
         assert f"{role} completed its assigned work exactly once" in coordinator_prompt
+
+    # The observable event stream is a causal audit trail, not merely a list of
+    # successful outputs. Dependencies must complete before their consumers
+    # start, and every delegated result must return before its parent step closes.
+    assert [event.timestamp for event in events] == sorted(event.timestamp for event in events)
+    root_events = [event for event in events if event.payload.get("execution_id") == execution_id]
+    root_types = [event.type for event in root_events]
+    assert root_types.index("TaskCreated") < root_types.index("ExecutionStarted")
+    assert root_types.index("ExecutionStarted") < root_types.index("ContextBuilt")
+    assert root_types.index("ContextBuilt") < root_types.index("PlanGenerated")
+
+    root_started = {
+        event.payload["step_index"]: index for index, event in enumerate(events)
+        if event.type == "StepStarted" and event.payload.get("execution_id") == execution_id
+    }
+    root_completed = {
+        event.payload["step_index"]: index for index, event in enumerate(events)
+        if event.type == "StepCompleted" and event.payload.get("execution_id") == execution_id
+    }
+    assert set(root_started) == set(root_completed) == set(range(len(PLAN["steps"])))
+    for step_index, step in enumerate(PLAN["steps"]):
+        assert root_started[step_index] < root_completed[step_index]
+        for dependency in step["dependencies"]:
+            assert root_completed[dependency] < root_started[step_index]
+
+    assurance_index = next(index for index, event in enumerate(events)
+                           if event.type == "DeliveryAssuranceCompleted"
+                           and event.payload.get("execution_id") == execution_id)
+    completed_index = next(index for index, event in enumerate(events)
+                           if event.type == "ExecutionCompleted"
+                           and event.payload.get("execution_id") == execution_id)
+    assert max(root_completed.values()) < assurance_index < completed_index
+
+    for child in children:
+        step_index = next(
+            index for index, step in enumerate(PLAN["steps"])
+            if step["id"] == child.variables["plan_step_id"]
+        )
+        child_created = next(index for index, event in enumerate(events)
+                             if event.type == "TaskCreated"
+                             and event.payload.get("execution_id") == child.execution_id)
+        child_completed = next(index for index, event in enumerate(events)
+                               if event.type == "ExecutionCompleted"
+                               and event.payload.get("execution_id") == child.execution_id)
+        assert root_started[step_index] < child_created < child_completed < root_completed[step_index]
 
 
 def test_gui_has_no_online_boot_dependency_and_initializes_attachments_early():
