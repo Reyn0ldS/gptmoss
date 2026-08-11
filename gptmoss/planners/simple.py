@@ -646,7 +646,7 @@ class SimplePlanner(PlannerProvider):
         domains = set(analysis["domains"])
         if _document_deliverable_task(task):
             return SimplePlanner._document_fallback(task, analysis)
-        if {"computer-vision", "3d-graphics", "human-avatar", "digital-garments"} <= domains:
+        if analysis["level"] in {"high", "very_high"} and len(domains) >= 3:
             return SimplePlanner._cross_domain_fallback(task, analysis)
         if "software-engineering" in domains:
             steps = [
@@ -733,23 +733,6 @@ class SimplePlanner(PlannerProvider):
             if "debugger" not in roles or roles[-1] != "coordinator":
                 raise ValueError("Complex plan lacks autonomous repair or final delivery audit.")
 
-        all_text = " ".join(
-            str(step.get(field) or "")
-            for step in steps for field in ("specialist", "description", "expertise", "acceptance_criteria")
-        ).lower()
-        domains = set(analysis.get("domains", []))
-        avatar_garment = {"computer-vision", "3d-graphics", "human-avatar", "digital-garments"} <= domains
-        if avatar_garment:
-            if not any(marker in all_text for marker in ("body", "corps", "smpl", "parametric human", "human mesh")):
-                raise ValueError("Avatar/garment plan omitted coherent full-body reconstruction.")
-            fitting_text = " ".join(
-                str(step.get("description") or "") for step in steps
-                if any(marker in str(step.get("specialist") or "").lower()
-                       for marker in ("garment", "cloth", "drap", "try-on", "rig"))
-            ).lower()
-            if fitting_text and not any(marker in fitting_text for marker in ("body", "avatar", "corps", "human")):
-                raise ValueError("Garment workflow is not fitted to a full avatar/body.")
-
         binary_model_suffixes = (".pth", ".pt", ".ckpt", ".safetensors", ".onnx")
         generated_model_assets = [artifact for step in steps for artifact in step.get("required_artifacts", [])
                                   if artifact.lower().endswith(binary_model_suffixes)]
@@ -816,7 +799,7 @@ class SimplePlanner(PlannerProvider):
             "requirement_ids trace exact requirements. owned_paths are non-overlapping relative file paths or globs that the specialist may modify. "
             "Array fields must be arrays; artifacts are concrete relative file paths.\n"
             "Implementation must be runnable and must not silently substitute random/mock behavior. If weights, hardware, datasets, or services are unavailable, build a truthful deterministic prototype and explicit adapter contract, document the limitation, and test both paths.\n"
-            "Do not list pretrained checkpoint files as artifacts an agent can create. For a human avatar plus clothing task, reconstruct a coherent canonical full body and fit garments to that body; a face/head mesh alone is not an avatar that can wear clothing.\n"
+            "Do not list pretrained checkpoint files as artifacts an agent can create. Preserve each requested end-to-end outcome: never replace a complete object, workflow, or integration with a narrower proxy merely because it is easier to generate.\n"
             "For unavailable or project-specific engines and desktop tools, do not pretend to run them. Declare top-level external_tools and execution_routines containing availability probes, installation/configuration parameters, exact commands or API calls, expected outputs, rollback guidance, and independent validation. "
             "Declare top-level artifact_validations with path, validator, required, and machine-readable constraints. Built-in validators include json, document/markdown/txt, obj, and glb; projects may register more. For professional documents, declare required_headings, required_requirement_ids, required_traceability_ids, required_source_files, source_inventory, minimums, and the local-reference/content gates appropriate to the assignment.\n"
             "End with autonomous repair after acceptance testing and a final delivery auditor that cannot claim success without evidence.\n"

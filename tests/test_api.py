@@ -410,16 +410,31 @@ def test_api_settings_preserve_secret_and_context_budget(tmp_path):
         "api_key": "secret-key",
         "base_url": "https://example.test/v1",
         "model_name": "test-model",
+        "vision_mode": "disabled",
         "ssl_verify": True,
         "ssl_cert_path": "",
-        "denied_capabilities": [],
+        "denied_capabilities": ["documents.read_chunk"],
         "approval_required_capabilities": ["shell"],
+        "workspace_full_autonomy": False,
+        "continue_while_progress": False,
+        "adaptive_resource_management": False,
+        "strict_skill_capabilities": True,
+        "allow_nested_delegation": False,
+        "max_delegation_depth": 4,
+        "autonomous_specialization": False,
+        "autonomous_skill_creation": True,
+        "autonomous_skill_improvement": False,
+        "skill_coverage_threshold": 7,
+        "max_autonomous_skills_per_execution": 3,
         "workspace_path": str(tmp_path),
         "restrict_to_workspace": True,
         "allow_subfolders": True,
         "projects": [{"id": "proj-default", "name": "Default"}],
         "max_step_iterations": 12,
+        "max_step_retries": 5,
         "max_context_chars": 24000,
+        "max_upload_bytes": 100000,
+        "max_attachment_text_chars": 5000,
         "safe_shell_mode": False,
         "shell_timeout_seconds": 45,
         "shell_max_output_chars": 20000,
@@ -434,6 +449,27 @@ def test_api_settings_preserve_secret_and_context_budget(tmp_path):
     assert public_settings["safe_shell_mode"] is False
     assert public_settings["shell_timeout_seconds"] == 45
     assert public_settings["default_skills"] == ["code-review"]
+    assert public_settings["vision_mode"] == "disabled"
+    assert public_settings["denied_capabilities"] == ["documents.read_chunk"]
+    assert public_settings["max_step_retries"] == 5
+    assert public_settings["max_upload_bytes"] == 100000
+    assert public_settings["max_attachment_text_chars"] == 5000
+    assert policy.denied == ["documents.read_chunk"]
+    assert exec_engine.continue_while_progress is False
+    assert exec_engine.adaptive_resource_management is False
+    assert exec_engine.strict_skill_capabilities is True
+    assert exec_engine.allow_nested_delegation is False
+    assert exec_engine.max_delegation_depth == 4
+    assert exec_engine.max_step_retries == 5
+    assert exec_engine.context_engine.adaptive is False
+    assert exec_engine.context_engine.max_history_chars == 24000
+    assert exec_engine.artifact_store.max_bytes == 100000
+    assert exec_engine.artifact_store.max_text_chars == 5000
+    assert exec_engine.autonomous_specialization is False
+    assert exec_engine.skill_lifecycle.creation_enabled is True
+    assert exec_engine.skill_lifecycle.improvement_enabled is False
+    assert exec_engine.skill_lifecycle.coverage_threshold == 7
+    assert exec_engine.skill_lifecycle.max_skills_per_execution == 3
 
     # This mirrors the quick-project UI flow: the GET response has no secret.
     public_settings["projects"].append({"id": "proj-ui", "name": "Created from UI"})

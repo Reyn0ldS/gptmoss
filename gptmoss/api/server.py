@@ -1305,6 +1305,7 @@ async def update_settings(req: SettingsRequest):
     app_state.execution_engine.allow_nested_delegation = req.allow_nested_delegation
     app_state.execution_engine.max_delegation_depth = req.max_delegation_depth
     app_state.execution_engine.context_engine.adaptive = req.adaptive_resource_management
+    app_state.execution_engine.context_engine.max_history_chars = req.max_context_chars
     workspace_changed = Path(workspace_root).resolve() != Path(req.workspace_path).resolve()
     if workspace_changed:
         app_state.execution_engine.artifact_store = ArtifactStore(
