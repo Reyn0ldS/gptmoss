@@ -1,7 +1,11 @@
 @echo off
 setlocal EnableExtensions EnableDelayedExpansion
 set "PYTHONDONTWRITEBYTECODE=1"
-cd /d "%~dp0"
+pushd "%~dp0" >nul 2>&1
+if !errorlevel! neq 0 (
+    echo [ERROR] Unable to access the GPTMOSS directory: %~dp0
+    exit /b 1
+)
 
 echo ===================================================
 echo   GPT-Moss Agentic Client Setup (Windows)
@@ -85,6 +89,7 @@ echo ===================================================
 echo [SUCCESS] Setup completed successfully!
 echo Run 'start.bat' to start the application.
 echo ===================================================
+popd
 pause
 exit /b 0
 
@@ -92,5 +97,6 @@ exit /b 0
 echo ===================================================
 echo [ERROR] Setup did not complete.
 echo ===================================================
+popd
 pause
 exit /b 1

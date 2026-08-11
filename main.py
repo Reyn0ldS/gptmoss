@@ -6,8 +6,10 @@ import logging
 import uvicorn
 from dotenv import load_dotenv
 
+PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+
 # Ensure local packages are resolvable even in isolated python environments
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, PROJECT_ROOT)
 
 from gptmoss.core import (EventBus, StateEngine, ContextEngine, ExecutionEngine, RuntimeKernel, Event,
                           DEFAULT_SYSTEM_PROMPT, TraceRecorder, SkillRegistry, ArtifactStore,
@@ -25,7 +27,7 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     handlers=[
         logging.StreamHandler(),
-        logging.FileHandler("app.log", encoding="utf-8")
+        logging.FileHandler(os.path.join(PROJECT_ROOT, "app.log"), encoding="utf-8")
     ]
 )
 logger = logging.getLogger("gptmoss")
@@ -299,12 +301,16 @@ async def run_cli_mode(task: str, workspace_root: str):
             break
 
 def main():
-    load_dotenv()
+    load_dotenv(os.path.join(PROJECT_ROOT, ".env"))
     
     parser = argparse.ArgumentParser(description="MOSS Agent Runtime Platform")
     parser.add_argument("--host", default="127.0.0.1", help="API server host")
     parser.add_argument("--port", type=int, default=8000, help="API server port")
-    parser.add_argument("--workspace", default="./workspace", help="Agent local workspace folder")
+    parser.add_argument(
+        "--workspace",
+        default=os.path.join(PROJECT_ROOT, "workspace"),
+        help="Agent local workspace folder",
+    )
     parser.add_argument("--task", help="Run a single task in CLI mode instead of starting the server")
     args = parser.parse_args()
 

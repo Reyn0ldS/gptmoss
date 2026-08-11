@@ -71,6 +71,7 @@ def test_runtime_detector_finds_portable_python_in_path_with_spaces(tmp_path):
 def test_windows_launchers_share_runtime_detection():
     install = (PROJECT_ROOT / "install.bat").read_text(encoding="utf-8")
     start = (PROJECT_ROOT / "start.bat").read_text(encoding="utf-8")
+    offline_builder = (PROJECT_ROOT / "prepare-offline-source.bat").read_text(encoding="utf-8")
 
     assert "scripts\\find_python.bat" in install
     assert "scripts\\find_python.bat" in start
@@ -79,3 +80,14 @@ def test_windows_launchers_share_runtime_detection():
     assert "PYTHONDONTWRITEBYTECODE=1" in install
     assert "PYTHONDONTWRITEBYTECODE=1" in start
     assert '"!GPTMOSS_PYTHON!" -B "%~dp0main.py" %*' in start
+    for launcher in (install, start, offline_builder):
+        assert 'pushd "%~dp0"' in launcher
+        assert "popd" in launcher
+
+
+def test_main_anchors_default_runtime_files_to_project_root():
+    main_source = (PROJECT_ROOT / "main.py").read_text(encoding="utf-8")
+
+    assert 'os.path.join(PROJECT_ROOT, "app.log")' in main_source
+    assert 'load_dotenv(os.path.join(PROJECT_ROOT, ".env"))' in main_source
+    assert 'default=os.path.join(PROJECT_ROOT, "workspace")' in main_source
