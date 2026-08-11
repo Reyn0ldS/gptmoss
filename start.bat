@@ -30,8 +30,10 @@ if !errorlevel! neq 0 (
     if !errorlevel! neq 0 goto :failed
 )
 
-echo [INFO] Launching server on default port (http://127.0.0.1:8000)...
-"!GPTMOSS_PYTHON!" -B "%~dp0main.py" %*
+if not defined GPTMOSS_CONTROL_PORT set "GPTMOSS_CONTROL_PORT=8765"
+echo [INFO] Launching supervised server (application default: http://127.0.0.1:8000)...
+echo [INFO] Server controls: http://127.0.0.1:!GPTMOSS_CONTROL_PORT!
+"!GPTMOSS_PYTHON!" -B "%~dp0scripts\server_supervisor.py" --python "!GPTMOSS_PYTHON!" --main "%~dp0main.py" --control-port "!GPTMOSS_CONTROL_PORT!" -- %*
 set "exit_code=!errorlevel!"
 
 popd
