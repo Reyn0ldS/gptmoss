@@ -190,8 +190,11 @@ def _validate_reference_locator(
         if unit not in details:
             return f"reference to {source!r} uses {unit} but its inventory has no {unit} count"
         if start < 1 or last < start or last > int(details[unit]):
-            singular = "block" if unit == "blocks" else "slide"
-            return f"reference to {source!r} uses an out-of-range {singular} {last}"
+            maximum = int(details[unit])
+            return (
+                f"reference to {source!r} uses invalid {unit} range {start}-{last}; "
+                f"expected 1-{maximum}"
+            )
     return None
 
 
@@ -378,7 +381,7 @@ def validate_document(path: Path, constraints: Dict[str, Any]) -> ValidationRepo
                 if len(missing_units) > 20:
                     display += f", and {len(missing_units) - 20} more"
                 coverage_failures.append(
-                    f"{source} is missing referenced {unit}: {display}"
+                    f"{source} has uncovered required {unit}: {display}"
                 )
         if coverage_failures:
             _failure(

@@ -118,6 +118,8 @@ $execution = Invoke-RestMethod -Method Post -Uri 'http://127.0.0.1:8000/executio
 
 La capability `documents` ne peut inventorier, rechercher et lire que les identifiants présents dans `attachment_ids`. Une autre exécution ne gagne donc pas implicitement accès à tout le corpus stocké. `documents.read` et le filtre de `documents.search` acceptent l'`artifact_id` recommandé, mais aussi le nom de fichier exact ou l'empreinte `document_id` renvoyés par l'inventaire. Ces alias sont résolus uniquement parmi les pièces jointes de l'exécution ; un identifiant inventé, ambigu ou appartenant à un autre corpus reste refusé et l'erreur rappelle les références autorisées.
 
+L'inventaire distingue explicitement deux systèmes de coordonnées. `normalized_block_offsets` décrit les offsets à base zéro attendus par `documents.read start_block`. `citation_bounds` décrit les bornes à base un autorisées dans les références du livrable. Pour un PPTX, ces bornes utilisent les numéros de diapositives déclarés par le document, y compris une diapositive sans bloc textuel ; elles ne doivent jamais être déduites du nombre ou de l'ordre des blocs normalisés.
+
 ## Fonctionnement interne
 
 ```text

@@ -116,7 +116,33 @@ def test_document_validator_rejects_out_of_range_local_locator(tmp_path):
     report = validate_artifact(document, validator="document", constraints=POLICY)
 
     assert not report["valid"]
-    assert any("out-of-range block 30" in failure for failure in report["failures"])
+    assert any(
+        "invalid blocks range 2-30; expected 1-12" in failure
+        for failure in report["failures"]
+    )
+
+
+def test_document_validator_reports_inverted_locator_range_unambiguously(tmp_path):
+    document = tmp_path / "inverted.md"
+    document.write_text(
+        "# Sources\n\nLecture. [vision.pptx > diapositives 14-1]\n",
+        encoding="utf-8",
+    )
+
+    report = validate_artifact(
+        document,
+        validator="document",
+        constraints={
+            "source_inventory": POLICY["source_inventory"],
+            "require_bounded_references": True,
+        },
+    )
+
+    assert not report["valid"]
+    assert any(
+        "invalid slides range 14-1; expected 1-4" in failure
+        for failure in report["failures"]
+    )
 
 
 def test_document_validator_accepts_french_bounded_locator_terms(tmp_path):

@@ -2624,6 +2624,10 @@ class ExecutionEngine:
                     "for this assignment and include source, section, block range, and chunk ID. "
                     "Use documents.inventory, documents.search, documents.read, and "
                     "documents.read_chunk to verify coverage or retrieve omitted sections. "
+                    "The documents.read start_block parameter is a zero-based normalized-block "
+                    "offset, while local citation locators are one-based. A PPTX commonly has "
+                    "multiple normalized blocks per slide: cite its provenance slide_number "
+                    "within inventory citation_bounds, never its block order or block count. "
                     "Never claim complete corpus coverage from excerpts alone."
                 )
             

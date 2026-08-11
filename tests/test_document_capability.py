@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import base64
+import io
 import json
+from dataclasses import replace
 from pathlib import Path
+from zipfile import ZIP_DEFLATED, ZipFile
 
 import pytest
 
@@ -26,6 +29,40 @@ def _context(*artifact_ids: str, budget: int = 12_000):
     }
 
 
+def _upload_pptx(store: ArtifactStore, filename: str):
+    slide_template = """<?xml version="1.0" encoding="UTF-8"?>
+<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
+ xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+ <p:cSld><p:spTree><p:sp><p:nvSpPr><p:cNvPr id="1" name="Title"/>
+ <p:cNvSpPr/><p:nvPr><p:ph type="title"/></p:nvPr></p:nvSpPr>
+ <p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>{title}</a:t></a:r></a:p></p:txBody>
+ </p:sp><p:sp><p:nvSpPr><p:cNvPr id="2" name="Body"/><p:cNvSpPr/><p:nvPr/>
+ </p:nvSpPr><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>{body}</a:t></a:r>
+ </a:p></p:txBody></p:sp></p:spTree></p:cSld></p:sld>"""
+    payload = io.BytesIO()
+    with ZipFile(payload, "w", ZIP_DEFLATED) as archive:
+        archive.writestr(
+            "ppt/presentation.xml",
+            "<?xml version='1.0'?><p:presentation xmlns:p='http://schemas.openxmlformats.org/presentationml/2006/main'/>",
+        )
+        for number in (1, 2):
+            archive.writestr(
+                f"ppt/slides/slide{number}.xml",
+                slide_template.format(title=f"Slide {number}", body=f"Body {number}"),
+            )
+        archive.writestr(
+            "ppt/slides/slide3.xml",
+            "<?xml version='1.0'?><p:sld "
+            "xmlns:p='http://schemas.openxmlformats.org/presentationml/2006/main'>"
+            "<p:cSld><p:spTree/></p:cSld></p:sld>",
+        )
+    return store.save_base64(
+        filename,
+        base64.b64encode(payload.getvalue()).decode("ascii"),
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    )
+
+
 def test_document_capability_inventory_is_scoped_to_explicit_attachments(tmp_path: Path):
     store = ArtifactStore(str(tmp_path))
     attached = _upload_text(
@@ -45,6 +82,43 @@ def test_document_capability_inventory_is_scoped_to_explicit_attachments(tmp_pat
     assert inventory["count"] == 1
     assert inventory["documents"][0]["artifact_id"] == attached["id"]
     assert inventory["scope"] == "explicitly attached local files"
+    item = inventory["documents"][0]
+    assert item["normalized_block_offsets"] == {
+        "base": 0,
+        "first": 0,
+        "last": 1,
+        "unit": "blocks",
+        "used_by": "documents.read start_block",
+    }
+    assert item["citation_bounds"] == {"first": 1, "last": 2, "unit": "blocks"}
+    assert "zero-based" in inventory["addressing_convention"]
+
+
+def test_document_capability_inventory_separates_pptx_blocks_from_slides(
+    tmp_path: Path,
+    monkeypatch,
+):
+    store = ArtifactStore(str(tmp_path))
+    attached = _upload_pptx(store, "vision.pptx")
+    parsed = store.document(attached["id"])
+    without_empty_slide_block = replace(
+        parsed,
+        blocks=tuple(
+            block for block in parsed.blocks if block.provenance.slide_number != 3
+        ),
+    )
+    monkeypatch.setattr(store, "document", lambda _artifact_id: without_empty_slide_block)
+    capability = DocumentCapability(store)
+
+    inventory = json.loads(capability.inventory(_context(attached["id"])))
+
+    item = inventory["documents"][0]
+    assert item["block_count"] == 4
+    assert item["slide_count"] == 3
+    assert item["normalized_block_offsets"]["first"] == 0
+    assert item["normalized_block_offsets"]["last"] == 3
+    assert item["citation_bounds"] == {"first": 1, "last": 3, "unit": "slides"}
+    assert "PPTX citations use slide_number" in item["read_hint"]
 
 
 def test_document_capability_search_read_and_read_chunk_keep_provenance(tmp_path: Path):

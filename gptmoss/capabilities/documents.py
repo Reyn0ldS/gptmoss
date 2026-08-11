@@ -69,6 +69,56 @@ class DocumentCapability:
             f"Use documents.inventory and retry with a filename or artifact_id. Attached: {detail}."
         )
 
+    def _inventory_item(self, item: Dict[str, Any]) -> Dict[str, Any]:
+        """Describe tool offsets and human-facing citation bounds separately."""
+        document = self.artifact_store.document(str(item["artifact_id"]))
+        block_count = len(document.blocks)
+        slide_numbers = {
+            block.provenance.slide_number
+            for block in document.blocks
+            if block.provenance.slide_number is not None
+        }
+        declared_slide_count = document.metadata.get("slide_count")
+        if isinstance(declared_slide_count, int) and not isinstance(declared_slide_count, bool):
+            slide_count = max(0, declared_slide_count)
+        elif slide_numbers:
+            slide_count = max(slide_numbers)
+        else:
+            slide_count = None
+        if slide_count is not None:
+            citation_bounds: Dict[str, Any] = {
+                "unit": "slides",
+                "first": 1 if slide_count else None,
+                "last": slide_count if slide_count else None,
+            }
+        else:
+            citation_bounds = {
+                "unit": "blocks",
+                "first": 1 if block_count else None,
+                "last": block_count if block_count else None,
+            }
+        result = {
+            **item,
+            "block_count": block_count,
+            "normalized_block_offsets": {
+                "unit": "blocks",
+                "base": 0,
+                "first": 0 if block_count else None,
+                "last": block_count - 1 if block_count else None,
+                "used_by": "documents.read start_block",
+            },
+            "citation_bounds": citation_bounds,
+            "read_reference": item["artifact_id"],
+            "read_hint": (
+                "Pass artifact_id, filename, or document_id to documents.read; "
+                "artifact_id is preferred. start_block is a zero-based normalized-block "
+                "offset; citations are one-based and PPTX citations use slide_number."
+            ),
+        }
+        if slide_count is not None:
+            result["slide_count"] = slide_count
+        return result
+
     @action(
         name="inventory",
         description=(
@@ -79,14 +129,7 @@ class DocumentCapability:
     def inventory(self, context: Optional[Dict[str, Any]] = None) -> str:
         attached = self._attached_ids(context)
         items = [
-            {
-                **item,
-                "read_reference": item["artifact_id"],
-                "read_hint": (
-                    "Pass artifact_id, filename, or document_id to documents.read; "
-                    "artifact_id is preferred."
-                ),
-            }
+            self._inventory_item(item)
             for item in self.artifact_store.document_index.inventory()
             if item["artifact_id"] in attached
         ]
@@ -95,6 +138,11 @@ class DocumentCapability:
                 "documents": items,
                 "count": len(items),
                 "scope": "explicitly attached local files",
+                "addressing_convention": (
+                    "documents.read start_block uses zero-based normalized-block offsets. "
+                    "Local citations use one-based bounds from citation_bounds. PPTX "
+                    "citations use slide_number, never normalized block count."
+                ),
             }
         )
 
