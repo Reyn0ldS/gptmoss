@@ -986,6 +986,8 @@ def test_gui_contains_complete_management_controls():
         "resumableFailure", "Authentification LLM refusée",
         'id="task-planning-mode"', "appendLlmStream", "clearLlmStream",
         "planning_mode", "task_title",
+        "applyConversationScroll", "scheduleFetchExecutionDetails",
+        "lastConversationSignature", "chatFollowLatest",
     ):
         assert marker in gui
 

@@ -257,7 +257,7 @@
     },
     {
       "id": "execution-observation",
-      "evidence": ["setupWebSocket", "/ws/events", "/unified-feed", "fetchExecutionDetails", "/document", "appendLlmStream"]
+      "evidence": ["setupWebSocket", "/ws/events", "/unified-feed", "fetchExecutionDetails", "/document", "appendLlmStream", "applyConversationScroll"]
     },
     {
       "id": "library",

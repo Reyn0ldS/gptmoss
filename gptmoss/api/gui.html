@@ -1422,6 +1422,11 @@
         let llmStreamExecId = null;
         let socket = null;
         let websocketReconnectTimer = null;
+        let detailsGeneration = 0;
+        let detailsRefreshTimer = null;
+        let executionsRefreshTimer = null;
+        let lastConversationSignature = "";
+        let chatFollowLatest = true;
         const selectedLibraryArtifacts = new Set();
         const uploadedTaskAttachments = new Map();
         let runtimeControl = null;
@@ -1430,6 +1435,8 @@
 
         function switchFeedTab(tab) {
             activeFeedTab = tab;
+            lastConversationSignature = "";
+            chatFollowLatest = true;
             
             // Toggle active styles on tab buttons
             const btnActive = document.getElementById("tab-active-agent");
@@ -1440,6 +1447,58 @@
             if (activeExecutionId) {
                 fetchExecutionDetails(activeExecutionId);
             }
+        }
+
+        function conversationSignature(executionId, tab, messages, running) {
+            const last = messages && messages.length ? messages[messages.length - 1] : {};
+            return [
+                executionId,
+                tab,
+                messages ? messages.length : 0,
+                last.timestamp || "",
+                last.role || "",
+                String(last.content || "").length,
+                running ? "1" : "0",
+            ].join("|");
+        }
+
+        function chatIsNearBottom(container) {
+            if (!container) return true;
+            return container.scrollHeight - container.scrollTop - container.clientHeight < 96;
+        }
+
+        function rememberChatFollow() {
+            const container = document.getElementById("chat-container");
+            if (!container) return;
+            chatFollowLatest = chatIsNearBottom(container);
+        }
+
+        function applyConversationScroll(container, snapshot) {
+            if (!container) return;
+            const previous = container.style.scrollBehavior;
+            container.style.scrollBehavior = "auto";
+            if (!snapshot || snapshot.follow) {
+                container.scrollTop = container.scrollHeight;
+            } else {
+                container.scrollTop = Math.max(0, container.scrollHeight - snapshot.fromBottom);
+            }
+            container.style.scrollBehavior = previous;
+        }
+
+        function scheduleFetchExecutions() {
+            if (executionsRefreshTimer) return;
+            executionsRefreshTimer = setTimeout(() => {
+                executionsRefreshTimer = null;
+                fetchExecutions({ refreshProjects: false });
+            }, 280);
+        }
+
+        function scheduleFetchExecutionDetails(id) {
+            if (detailsRefreshTimer) clearTimeout(detailsRefreshTimer);
+            detailsRefreshTimer = setTimeout(() => {
+                detailsRefreshTimer = null;
+                fetchExecutionDetails(id);
+            }, 280);
         }
 
         // The UI must remain usable without Internet access. If a local Markdown
@@ -1567,6 +1626,7 @@
             fetchExecutions();
             setupWebSocket();
             initializeRuntimeControl();
+            document.getElementById("chat-container")?.addEventListener("scroll", rememberChatFollow, {passive: true});
         });
 
         function toggleCollapse(event, execId) {
@@ -1576,15 +1636,16 @@
         }
 
         // Fetch executions list from server and render hierarchically
-        async function fetchExecutions() {
+        async function fetchExecutions(options = {}) {
             try {
-                // First get projects list to align with config on disk
-                const settingsRes = await fetch("/api/settings");
-                let projects = [{"id": "proj-default", "name": "Projet Par Défaut"}];
-                if (settingsRes.ok) {
-                    const settingsData = await settingsRes.json();
-                    projects = settingsData.projects || projects;
-                    globalProjects = projects;
+                let projects = globalProjects.length ? globalProjects : [{"id": "proj-default", "name": "Projet Par Défaut"}];
+                if (options.refreshProjects !== false || !globalProjects.length) {
+                    const settingsRes = await fetch("/api/settings");
+                    if (settingsRes.ok) {
+                        const settingsData = await settingsRes.json();
+                        projects = settingsData.projects || projects;
+                        globalProjects = projects;
+                    }
                 }
 
                 const res = await fetch("/executions");
@@ -1823,42 +1884,53 @@
                     if (data.type === "LLMResponse") {
                         clearLlmStream(data.payload?.execution_id);
                     }
-                    
-                    // Refresh sidebar list for any updates
-                    fetchExecutions();
+                    const loaderBar = document.getElementById("loader-bar");
+                    if (loaderBar && activeExecutionId) {
+                        if (data.type === "LLMRequest") loaderBar.style.display = "block";
+                        else if (data.type === "LLMResponse") loaderBar.style.display = "none";
+                    }
+
+                    const skipDetailRefresh = new Set([
+                        "LLMRequest", "ContextBuilt", "LLMRetryScheduled",
+                        "ExecutionProviderRetry", "ToolReused",
+                    ]);
+                    const sidebarEvents = new Set([
+                        "TaskCreated", "TaskDeleted", "TasksCleared", "TaskScheduled",
+                        "ExecutionStarted", "ExecutionCompleted", "ExecutionFailed",
+                        "ExecutionPaused", "ExecutionResumed", "ExecutionCancelled",
+                        "ExecutionWaitingProvider",
+                    ]);
+                    if (!data.payload?.execution_id || sidebarEvents.has(data.type)) {
+                        scheduleFetchExecutions();
+                    }
                     
                     // If the active task changed, refresh current view
                     const eventExecId = data.payload?.execution_id;
-                    if (eventExecId && activeExecutionId) {
+                    if (eventExecId && activeExecutionId && !skipDetailRefresh.has(data.type)) {
                         let shouldRefresh = (eventExecId === activeExecutionId);
-                        if (!shouldRefresh && globalExecutions.length > 0) {
-                            let currentId = eventExecId;
-                            while (currentId) {
-                                const currentExec = globalExecutions.find(e => e.execution_id === currentId);
-                                if (currentExec && currentExec.parent_execution_id) {
-                                    if (currentExec.parent_execution_id === activeExecutionId) {
-                                        shouldRefresh = true;
+                        if (!shouldRefresh) {
+                            const known = globalExecutions.find(e => e.execution_id === eventExecId);
+                            if (!known) {
+                                shouldRefresh = true;
+                            } else {
+                                let currentId = eventExecId;
+                                while (currentId) {
+                                    const currentExec = globalExecutions.find(e => e.execution_id === currentId);
+                                    if (currentExec && currentExec.parent_execution_id) {
+                                        if (currentExec.parent_execution_id === activeExecutionId) {
+                                            shouldRefresh = true;
+                                            break;
+                                        }
+                                        currentId = currentExec.parent_execution_id;
+                                    } else {
                                         break;
                                     }
-                                    currentId = currentExec.parent_execution_id;
-                                } else {
-                                    break;
                                 }
                             }
                         }
                         
                         if (shouldRefresh) {
-                            fetchExecutionDetails(activeExecutionId);
-                            
-                            // Toggle loader bar during active LLM calls
-                            const loaderBar = document.getElementById("loader-bar");
-                            if (loaderBar) {
-                                if (data.type === "LLMRequest") {
-                                    loaderBar.style.display = "block";
-                                } else if (data.type === "LLMResponse") {
-                                    loaderBar.style.display = "none";
-                                }
-                            }
+                            scheduleFetchExecutionDetails(activeExecutionId);
                             
                             // Trigger toast alerts based on event type
                             if (data.type === "StepStarted") {
@@ -1899,6 +1971,8 @@
         // Select a task execution
         function selectExecution(id) {
             activeExecutionId = id;
+            lastConversationSignature = "";
+            chatFollowLatest = true;
             document.getElementById("landing-view").style.display = "none";
             document.getElementById("detail-view").style.display = "flex";
             
@@ -1913,11 +1987,117 @@
             fetchExecutionDetails(id);
         }
 
+        function renderConversationMessages(exec, messages) {
+            const chatContainer = document.getElementById("chat-container");
+            if (!chatContainer) return;
+            const fragment = document.createDocumentFragment();
+            (messages || []).forEach(msg => {
+                const msgDiv = document.createElement("div");
+                msgDiv.className = `message ${msg.role}`;
+                let contentHtml = "";
+                if (msg.role === "tool") {
+                    const escaped = (msg.content || "").replace(/[&<>"']/g, m => {
+                        return {'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;'}[m];
+                    });
+                    contentHtml = `<div class="terminal-box">${escaped}</div>`;
+                } else {
+                    contentHtml = renderSafeMarkdown(msg.content || "");
+                }
+                let toolCallsHtml = "";
+                if (msg.tool_calls) {
+                    msg.tool_calls.forEach(tc => {
+                        toolCallsHtml += `
+                            <div class="terminal-box" style="border-left: 3px solid var(--accent-primary);">
+                                <strong>[Appel Capacité]</strong> ${escapeHTML(String(tc.function.name || ""))}<br>
+                                <strong>Arguments:</strong> ${escapeHTML(JSON.stringify(tc.function.arguments || {}, null, 2))}
+                            </div>
+                        `;
+                    });
+                }
+                let roleDisplayName = msg.role;
+                if (msg.role === "assistant") {
+                    let roleName = msg.sender_role || exec.variables?.role_name || "Coordinateur";
+                    let icon = "🤖";
+                    let color = "var(--accent-primary)";
+                    const roleLower = roleName.toLowerCase();
+                    if (roleLower.includes("architect")) {
+                        icon = "📐";
+                        color = "#fbbf24";
+                    } else if (roleLower.includes("sécurité") || roleLower.includes("security") || roleLower.includes("reviewer")) {
+                        icon = "🛡️";
+                        color = "#f87171";
+                    } else if (roleLower.includes("développeur") || roleLower.includes("developer") || roleLower.includes("coder")) {
+                        icon = "💻";
+                        color = "#34d399";
+                    } else if (roleLower.includes("test") || roleLower.includes("qa")) {
+                        icon = "🧪";
+                        color = "#60a5fa";
+                    } else if (roleLower.includes("débug") || roleLower.includes("debug") || roleLower.includes("fixer")) {
+                        icon = "🐛";
+                        color = "#fb923c";
+                    } else if (roleLower.includes("rédacteur") || roleLower.includes("writer")) {
+                        icon = "📝";
+                        color = "#9ca3af";
+                    } else if (roleName === "Coordinateur") {
+                        icon = "👑";
+                        color = "var(--accent-primary)";
+                    }
+                    roleDisplayName = `<span style="display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 9999px; background-color: ${color}20; color: ${color}; border: 1px solid ${color}40; font-size: 11px;">${icon} ${escapeHTML(String(roleName))}</span>`;
+                } else if (msg.role === "tool") {
+                    roleDisplayName = `<span style="display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 9999px; background-color: rgba(255,255,255,0.05); color: #d1d5db; border: 1px solid rgba(255,255,255,0.15); font-family: monospace; font-size: 11px;">📟 OUTIL : ${msg.name || 'exécuté'}</span>`;
+                } else if (msg.role === "user") {
+                    roleDisplayName = `<span style="display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 9999px; background-color: rgba(255,255,255,0.03); color: #e5e7eb; border: 1px solid rgba(255,255,255,0.1); font-size: 11px;">👤 UTILISATEUR</span>`;
+                }
+                let timeStr = "";
+                if (msg.timestamp) {
+                    const date = new Date(msg.timestamp * 1000);
+                    timeStr = date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+                }
+                msgDiv.innerHTML = `
+                    <div class="message-header">
+                        <span class="message-role ${msg.role}">${roleDisplayName}</span>
+                        ${timeStr ? `<span class="message-time" style="font-size: 10.5px; color: var(--text-muted); opacity: 0.7; font-weight: 400; font-family: var(--font-family);">${timeStr}</span>` : ""}
+                    </div>
+                    <div class="message-content">${contentHtml}</div>
+                    ${toolCallsHtml}
+                `;
+                fragment.appendChild(msgDiv);
+            });
+            chatContainer.replaceChildren(fragment);
+            if (llmStreamExecId === exec.execution_id && llmStreamText) {
+                renderLlmStream();
+            }
+            if (exec.status === "running" && !(llmStreamExecId === exec.execution_id && llmStreamText)) {
+                const thinkingDiv = document.createElement("div");
+                thinkingDiv.className = "message assistant thinking-indicator";
+                let thinkingText = "L'agent réfléchit et prépare l'action suivante...";
+                if (exec.variables?.role_name) {
+                    thinkingText = `L'agent (${exec.variables.role_name}) réfléchit et prépare l'action suivante...`;
+                }
+                thinkingDiv.innerHTML = `
+                    <div class="thinking-dots">
+                        <div class="thinking-dot"></div>
+                        <div class="thinking-dot"></div>
+                        <div class="thinking-dot"></div>
+                    </div>
+                    <span style="font-size: 13px; color: var(--text-muted);">${thinkingText}</span>
+                `;
+                chatContainer.appendChild(thinkingDiv);
+            }
+        }
+
         // Fetch execution details
         async function fetchExecutionDetails(id) {
+            const generation = ++detailsGeneration;
+            const chatContainer = document.getElementById("chat-container");
+            const scrollSnapshot = {
+                follow: !chatContainer || chatFollowLatest || chatIsNearBottom(chatContainer),
+                fromBottom: chatContainer ? (chatContainer.scrollHeight - chatContainer.scrollTop) : 0,
+            };
             try {
                 const res = await fetch(`/executions/${id}`);
                 if (!res.ok) throw new Error("Could not find execution details.");
+                if (generation !== detailsGeneration || activeExecutionId !== id) return;
                 
                 const exec = await res.json();
                 
@@ -2002,14 +2182,11 @@
                     approvalBanner.style.display = "none";
                 }
 
-                // 3. Conversation Logs (render with Marked.js)
-                const chatContainer = document.getElementById("chat-container");
-                chatContainer.innerHTML = "";
-                
                 let messages = [];
                 if (activeFeedTab === "unified") {
                     try {
                         const feedRes = await fetch(`/executions/${id}/unified-feed`);
+                        if (generation !== detailsGeneration || activeExecutionId !== id) return;
                         if (feedRes.ok) {
                             messages = await feedRes.json();
                         }
@@ -2019,116 +2196,14 @@
                 } else {
                     messages = exec.messages || [];
                 }
-                
-                if (messages) {
-                    messages.forEach(msg => {
-                        const msgDiv = document.createElement("div");
-                        msgDiv.className = `message ${msg.role}`;
-                        
-                        // Parse content: escape if tool output, markdown render otherwise
-                        let contentHtml = "";
-                        if (msg.role === "tool") {
-                            const escaped = (msg.content || "").replace(/[&<>"']/g, m => {
-                                return {'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;'}[m];
-                            });
-                            contentHtml = `<div class="terminal-box">${escaped}</div>`;
-                        } else {
-                            contentHtml = renderSafeMarkdown(msg.content || "");
-                        }
-                        
-                        // Show tool calls if any
-                        let toolCallsHtml = "";
-                        if (msg.tool_calls) {
-                            msg.tool_calls.forEach(tc => {
-                                toolCallsHtml += `
-                                    <div class="terminal-box" style="border-left: 3px solid var(--accent-primary);">
-                                        <strong>[Appel Capacité]</strong> ${escapeHTML(String(tc.function.name || ""))}<br>
-                                        <strong>Arguments:</strong> ${escapeHTML(JSON.stringify(tc.function.arguments || {}, null, 2))}
-                                    </div>
-                                `;
-                            });
-                        }
-                        
-                        let roleDisplayName = msg.role;
-                        if (msg.role === "assistant") {
-                            let roleName = msg.sender_role || exec.variables?.role_name || "Coordinateur";
-                            let icon = "🤖";
-                            let color = "var(--accent-primary)";
-                            
-                            const roleLower = roleName.toLowerCase();
-                            if (roleLower.includes("architect")) {
-                                icon = "📐";
-                                color = "#fbbf24"; // gold
-                            } else if (roleLower.includes("sécurité") || roleLower.includes("security") || roleLower.includes("reviewer")) {
-                                icon = "🛡️";
-                                color = "#f87171"; // crimson
-                            } else if (roleLower.includes("développeur") || roleLower.includes("developer") || roleLower.includes("coder")) {
-                                icon = "💻";
-                                color = "#34d399"; // emerald green
-                            } else if (roleLower.includes("test") || roleLower.includes("qa")) {
-                                icon = "🧪";
-                                color = "#60a5fa"; // blue
-                            } else if (roleLower.includes("débug") || roleLower.includes("debug") || roleLower.includes("fixer")) {
-                                icon = "🐛";
-                                color = "#fb923c"; // orange
-                            } else if (roleLower.includes("rédacteur") || roleLower.includes("writer")) {
-                                icon = "📝";
-                                color = "#9ca3af"; // gray
-                            } else if (roleName === "Coordinateur") {
-                                icon = "👑";
-                                color = "var(--accent-primary)";
-                            }
-                            
-                            roleDisplayName = `<span style="display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 9999px; background-color: ${color}20; color: ${color}; border: 1px solid ${color}40; font-size: 11px;">${icon} ${escapeHTML(String(roleName))}</span>`;
-                        } else if (msg.role === "tool") {
-                            roleDisplayName = `<span style="display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 9999px; background-color: rgba(255,255,255,0.05); color: #d1d5db; border: 1px solid rgba(255,255,255,0.15); font-family: monospace; font-size: 11px;">📟 OUTIL : ${msg.name || 'exécuté'}</span>`;
-                        } else if (msg.role === "user") {
-                            roleDisplayName = `<span style="display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 9999px; background-color: rgba(255,255,255,0.03); color: #e5e7eb; border: 1px solid rgba(255,255,255,0.1); font-size: 11px;">👤 UTILISATEUR</span>`;
-                        }
-                        
-                        let timeStr = "";
-                        if (msg.timestamp) {
-                            const date = new Date(msg.timestamp * 1000);
-                            timeStr = date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-                        }
-                        
-                        msgDiv.innerHTML = `
-                            <div class="message-header">
-                                <span class="message-role ${msg.role}">${roleDisplayName}</span>
-                                ${timeStr ? `<span class="message-time" style="font-size: 10.5px; color: var(--text-muted); opacity: 0.7; font-weight: 400; font-family: var(--font-family);">${timeStr}</span>` : ""}
-                            </div>
-                            <div class="message-content">${contentHtml}</div>
-                            ${toolCallsHtml}
-                        `;
-                        chatContainer.appendChild(msgDiv);
-                    });
-                    if (llmStreamExecId === id && llmStreamText) {
-                        renderLlmStream();
-                    }
-                    
-                    // Show a dynamic thinking indicator if active task is running
-                    if (exec.status === "running" && !(llmStreamExecId === id && llmStreamText)) {
-                        const thinkingDiv = document.createElement("div");
-                        thinkingDiv.className = "message assistant thinking-indicator";
-                        
-                        let thinkingText = "L'agent réfléchit et prépare l'action suivante...";
-                        if (exec.variables?.role_name) {
-                            thinkingText = `L'agent (${exec.variables.role_name}) réfléchit et prépare l'action suivante...`;
-                        }
-                        
-                        thinkingDiv.innerHTML = `
-                            <div class="thinking-dots">
-                                <div class="thinking-dot"></div>
-                                <div class="thinking-dot"></div>
-                                <div class="thinking-dot"></div>
-                            </div>
-                            <span style="font-size: 13px; color: var(--text-muted);">${thinkingText}</span>
-                        `;
-                        chatContainer.appendChild(thinkingDiv);
-                    }
-                    
-                    // Auto-scroll chat
-                    chatContainer.scrollTop = chatContainer.scrollHeight;
+
+                const signature = conversationSignature(
+                    id, activeFeedTab, messages, exec.status === "running"
+                );
+                if (signature !== lastConversationSignature) {
+                    lastConversationSignature = signature;
+                    renderConversationMessages(exec, messages);
+                    applyConversationScroll(chatContainer, scrollSnapshot);
                 }
 
                 // 4. Plan Steps Checklist
