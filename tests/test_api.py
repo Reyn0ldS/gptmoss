@@ -185,7 +185,12 @@ def test_api_submit_and_query_flow():
     assert response_list.status_code == 200
     body_list = response_list.json()
     assert len(body_list) >= 1
-    assert any(x["execution_id"] == exec_id for x in body_list)
+    listed = next(item for item in body_list if item["execution_id"] == exec_id)
+    assert listed["task_title"] == "Api test task"
+    assert listed["planning_mode"] == "auto"
+    assert listed["task"] == "Api test task"
+    assert body_get["variables"]["planning_mode"] == "auto"
+    assert body_get["variables"]["task_title"] == "Api test task"
 
 
 def test_api_can_schedule_execution_without_running_it_early():
@@ -209,6 +214,33 @@ def test_api_can_schedule_execution_without_running_it_early():
     execution_id = response.json()["execution_id"]
     assert state_engine.get_execution(execution_id).status == "pending"
     assert engine.scheduler.has(f"execution:{execution_id}")
+
+
+def test_api_accepts_explicit_planning_mode():
+    event_bus = EventBus()
+    state_engine = StateEngine()
+    llm = MockLLMProvider()
+    engine = ExecutionEngine(
+        event_bus, state_engine, ContextEngine(state_engine, RAMMemoryProvider()),
+        llm, SimplePlanner(llm), SimplePolicyProvider(),
+    )
+    kernel = RuntimeKernel(event_bus, state_engine, engine)
+    init_app(kernel, engine, state_engine, event_bus)
+    client = ASGIClient(app)
+
+    response = client.post("/executions", json={
+        "task": "Translate this sentence into French.",
+        "planning_mode": "direct",
+    })
+    assert response.status_code == 201
+    execution_id = response.json()["execution_id"]
+    stored = state_engine.get_execution(execution_id)
+    assert stored.variables["planning_mode"] == "direct"
+    listed = client.get("/executions").json()
+    assert any(
+        item["execution_id"] == execution_id and item["planning_mode"] == "direct"
+        for item in listed
+    )
 
 def test_api_settings_flow(tmp_path):
     # Setup test dependencies
@@ -420,6 +452,7 @@ def test_api_subagent_inherits_parent_project_context():
         "attachment_ids": ["doc-1"],
         "requested_skills": ["code-review"],
         "task": "Parent work",
+        "planning_mode": "short_team",
     })
     engine.execute_task = AsyncMock()
     response = client.post("/executions/inherit-parent/subagents", json={
@@ -431,6 +464,7 @@ def test_api_subagent_inherits_parent_project_context():
     assert child.variables["project_id"] == "site-demo"
     assert child.variables["attachment_ids"] == ["doc-1"]
     assert child.variables["requested_skills"] == ["code-review"]
+    assert child.variables["planning_mode"] == "short_team"
 
 
 def test_api_unified_feed_flow():

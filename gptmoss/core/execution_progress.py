@@ -166,6 +166,56 @@ class ExecutionProgressMixin:
             })
         return gaps
 
+    def _hash_workspace_file(self, full_path: str, filename: str) -> str:
+        """Hash file contents, normalizing text newlines the same way as before."""
+        digest = hashlib.sha256()
+        text_extensions = {
+            ".py", ".pyi", ".md", ".txt", ".json", ".jsonl",
+            ".yaml", ".yml", ".toml", ".ini", ".cfg", ".html",
+            ".css", ".js", ".ts", ".tsx", ".jsx", ".xml",
+            ".csv", ".sh", ".ps1", ".bat", ".cmd",
+        }
+        if os.path.splitext(filename)[1].lower() in text_extensions:
+            try:
+                with open(full_path, "r", encoding="utf-8", newline=None) as source:
+                    while True:
+                        chunk = source.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        digest.update(chunk.encode("utf-8"))
+                return digest.hexdigest()
+            except UnicodeDecodeError:
+                digest = hashlib.sha256()
+        with open(full_path, "rb") as source:
+            while True:
+                chunk = source.read(1024 * 1024)
+                if not chunk:
+                    break
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    def _cached_workspace_digest(self, full_path: str, filename: str) -> str | None:
+        """Reuse a content digest when mtime and size have not changed."""
+        try:
+            stat = os.stat(full_path)
+        except OSError:
+            return None
+        cache = getattr(self, "_progress_file_digest_cache", None)
+        if cache is None:
+            cache = {}
+            self._progress_file_digest_cache = cache
+        key = os.path.normcase(os.path.abspath(full_path))
+        cached = cache.get(key)
+        if (
+            cached
+            and cached[0] == stat.st_mtime_ns
+            and cached[1] == stat.st_size
+        ):
+            return cached[2]
+        digest = self._hash_workspace_file(full_path, filename)
+        cache[key] = (stat.st_mtime_ns, stat.st_size, digest)
+        return digest
+
     def _progress_signature(self, execution_id: str, step: Dict[str, Any]) -> tuple:
         """Fingerprint durable work without counting repeated reads or failed commands."""
         filesystem = self.get_capability("filesystem")
@@ -197,39 +247,10 @@ class ExecutionProgressMixin:
                             or basename.endswith((".tmp", ".bak", ".log"))
                         ):
                             continue
-                        digest = hashlib.sha256()
-                        text_extensions = {
-                            ".py", ".pyi", ".md", ".txt", ".json", ".jsonl",
-                            ".yaml", ".yml", ".toml", ".ini", ".cfg", ".html",
-                            ".css", ".js", ".ts", ".tsx", ".jsx", ".xml",
-                            ".csv", ".sh", ".ps1", ".bat", ".cmd",
-                        }
-                        if os.path.splitext(filename)[1].lower() in text_extensions:
-                            try:
-                                with open(
-                                    full_path, "r", encoding="utf-8", newline=None
-                                ) as source:
-                                    while True:
-                                        chunk = source.read(1024 * 1024)
-                                        if not chunk:
-                                            break
-                                        digest.update(chunk.encode("utf-8"))
-                            except UnicodeDecodeError:
-                                digest = hashlib.sha256()
-                                with open(full_path, "rb") as source:
-                                    while True:
-                                        chunk = source.read(1024 * 1024)
-                                        if not chunk:
-                                            break
-                                        digest.update(chunk)
-                        else:
-                            with open(full_path, "rb") as source:
-                                while True:
-                                    chunk = source.read(1024 * 1024)
-                                    if not chunk:
-                                        break
-                                    digest.update(chunk)
-                        files.append((relative, digest.hexdigest()))
+                        digest = self._cached_workspace_digest(full_path, filename)
+                        if digest is None:
+                            continue
+                        files.append((relative, digest))
                         if len(files) >= 2_000:
                             break
                     if len(files) >= 2_000:

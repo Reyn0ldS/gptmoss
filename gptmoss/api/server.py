@@ -32,6 +32,7 @@ from gptmoss.core.settings import (
     DEFAULT_MAX_UPLOAD_BYTES,
 )
 from gptmoss.capabilities.agent import child_agent_config
+from gptmoss.planners.complexity import normalize_planning_mode, task_title_from_text
 
 logger = logging.getLogger("gptmoss.api")
 
@@ -40,6 +41,7 @@ class SubmitTaskRequest(BaseModel):
     task: str = Field(min_length=1)
     agent_config: Optional[Dict[str, Any]] = None
     project_id: Optional[str] = None
+    planning_mode: str = "auto"
     attachment_ids: List[str] = Field(default_factory=list)
     delay_seconds: float = Field(default=0, ge=0, le=31_536_000)
     run_at: Optional[float] = Field(default=None, ge=0)
@@ -149,6 +151,8 @@ app.add_middleware(
 ACTIVE_EXECUTION_STATUSES = frozenset({"pending", "running", "paused", "waiting_provider"})
 PUBLIC_EXECUTION_VARIABLE_KEYS = (
     "task",
+    "task_title",
+    "planning_mode",
     "project_id",
     "project_path",
     "project_domains",
@@ -403,10 +407,16 @@ async def submit_task(req: SubmitTaskRequest):
     agent_config = dict(req.agent_config or {})
     agent_config.setdefault("system_prompt", DEFAULT_SYSTEM_PROMPT)
     variables = dict(agent_config.get("variables") or {})
+    planning_mode = normalize_planning_mode(
+        req.planning_mode or variables.get("planning_mode") or agent_config.get("planning_mode")
+    )
     variables.update({
         "project_id": project_id,
         "attachment_ids": list(dict.fromkeys(req.attachment_ids)),
+        "planning_mode": planning_mode,
+        "task_title": task_title_from_text(req.task.strip()),
     })
+    agent_config["planning_mode"] = planning_mode
     if project.get("path"):
         variables["project_path"] = str(Path(str(project["path"])).resolve())
     if project.get("domains"):
@@ -761,6 +771,7 @@ async def list_executions():
     
     results = []
     for exec_id, state in app_state.state_engine.executions.items():
+        task_text = str(state.variables.get("task") or "").strip()
         results.append({
             "execution_id": exec_id,
             "status": state.status,
@@ -768,7 +779,10 @@ async def list_executions():
             "steps_count": len(state.current_plan.get("steps", [])) if state.current_plan else 0,
             "parent_execution_id": state.variables.get("parent_execution_id"),
             "role_name": state.variables.get("role_name"),
-            "project_id": state.variables.get("project_id", "proj-default")
+            "project_id": state.variables.get("project_id", "proj-default"),
+            "planning_mode": normalize_planning_mode(state.variables.get("planning_mode")),
+            "task_title": state.variables.get("task_title") or task_title_from_text(task_text),
+            "task": task_text[:160],
         })
     return results
 

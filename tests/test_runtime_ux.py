@@ -1,0 +1,255 @@
+import asyncio
+import json
+import os
+import sys
+from types import SimpleNamespace
+
+import pytest
+
+from gptmoss.capabilities.filesystem import FilesystemCapability
+from gptmoss.capabilities.shell import ShellCapability
+from gptmoss.core.context import ContextEngine
+from gptmoss.core.event_bus import Event, EventBus
+from gptmoss.core.execution import ExecutionEngine
+from gptmoss.core.kernel import RuntimeKernel
+from gptmoss.core.state import STATE_SCHEMA_VERSION, StateEngine
+from gptmoss.memory.ram import RAMMemoryProvider
+from gptmoss.planners.complexity import normalize_planning_mode, task_title_from_text
+from gptmoss.planners.simple import SimplePlanner
+from gptmoss.policies.simple import SimplePolicyProvider
+from gptmoss.providers.qwen import QwenProvider
+from tests.mock_llm import MockLLMProvider
+
+
+def _engine(tmp_path, llm=None):
+    state = StateEngine()
+    engine = ExecutionEngine(
+        EventBus(),
+        state,
+        ContextEngine(state, RAMMemoryProvider()),
+        llm or MockLLMProvider(),
+        SimplePlanner(llm or MockLLMProvider()),
+        SimplePolicyProvider(approval_required_capabilities=[]),
+    )
+    engine.register_capability("filesystem", FilesystemCapability(str(tmp_path), state))
+    engine.register_capability("shell", ShellCapability(str(tmp_path), timeout_seconds=10))
+    return engine, state
+
+
+def test_planning_mode_aliases_and_task_titles():
+    assert normalize_planning_mode("equipe-courte") == "short_team"
+    assert normalize_planning_mode("unknown") == "auto"
+    assert task_title_from_text("  Hello   world  ") == "Hello world"
+    assert task_title_from_text("x" * 80).endswith("…")
+    assert len(task_title_from_text("x" * 80)) == 72
+
+
+def test_progress_signature_reuses_digest_when_mtime_and_size_match(tmp_path, monkeypatch):
+    engine, state = _engine(tmp_path)
+    execution = state.get_execution("cache")
+    step = {"required_artifacts": []}
+    root = tmp_path / "projects" / "proj-default"
+    root.mkdir(parents=True)
+    target = root / "work.md"
+    target.write_text("same\n", encoding="utf-8")
+
+    hashes = {"count": 0}
+    original = engine._hash_workspace_file
+
+    def counted(full_path, filename):
+        hashes["count"] += 1
+        return original(full_path, filename)
+
+    monkeypatch.setattr(engine, "_hash_workspace_file", counted)
+    first = engine._progress_signature("cache", step)
+    second = engine._progress_signature("cache", step)
+    assert first == second
+    assert hashes["count"] == 1
+    execution.variables["tool_call_history"] = []
+    target.write_text("changed\n", encoding="utf-8")
+    third = engine._progress_signature("cache", step)
+    assert third != first
+    assert hashes["count"] == 2
+
+
+def test_leading_subdirectory_cd_rewrites_python_to_portable_interpreter(tmp_path):
+    project = tmp_path / "project"
+    child = project / "child"
+    child.mkdir(parents=True)
+    shell = ShellCapability(str(project), timeout_seconds=10)
+    command = (
+        f'cd /d "{child}" && python -c "import os,sys;print(os.path.basename(os.getcwd()));print(sys.executable)"'
+        if sys.platform == "win32"
+        else f'cd "{child}" && python -c "import os,sys;print(os.path.basename(os.getcwd()));print(sys.executable)"'
+    )
+    result = shell.execute(command)
+    assert "EXIT_CODE: 0" in result
+    assert "child" in result
+    assert sys.executable in result
+
+
+@pytest.mark.asyncio
+async def test_mock_llm_and_execution_publish_llm_delta(tmp_path):
+    llm = MockLLMProvider()
+    llm.add_response(content="Hello streamed world")
+    engine, state = _engine(tmp_path, llm)
+    deltas = []
+
+    async def capture(event: Event):
+        if event.type == "LLMDelta":
+            deltas.append(event.payload["delta"])
+
+    engine.event_bus.subscribe("LLMDelta", capture)
+    execution = state.get_execution("stream")
+    execution.status = "pending"
+    execution.current_plan = {
+        "steps": [{
+            "id": 0,
+            "role": "coordinator",
+            "specialist": "Task Specialist",
+            "description": "Reply briefly",
+            "dependencies": [],
+            "status": "pending",
+            "acceptance_criteria": ["A short answer is returned."],
+        }],
+        "rationale": "direct",
+    }
+    execution.current_step = 0
+    await engine.execute_task("stream", "Reply briefly")
+    assert deltas
+    assert "Hello streamed world" in "".join(deltas)
+
+
+@pytest.mark.asyncio
+async def test_qwen_stream_assembles_content_and_forwards_deltas():
+    provider = QwenProvider(api_key="mock", base_url="http://127.0.0.1:9/v1")
+
+    class _Delta:
+        def __init__(self, content=None):
+            self.content = content
+            self.tool_calls = None
+
+    class _Choice:
+        def __init__(self, content):
+            self.delta = _Delta(content)
+
+    class _Chunk:
+        def __init__(self, content):
+            self.choices = [_Choice(content)]
+
+    class _Stream:
+        def __init__(self):
+            self._items = [_Chunk("Hel"), _Chunk("lo")]
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            if not self._items:
+                raise StopAsyncIteration
+            return self._items.pop(0)
+
+    async def fake_create(**kwargs):
+        assert kwargs.get("stream") is True
+        return _Stream()
+
+    provider.client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=fake_create)))
+    seen = []
+    result = await provider.completion(
+        messages=[{"role": "user", "content": "hi"}],
+        on_text_delta=seen.append,
+    )
+    assert seen == ["Hel", "lo"]
+    assert result["content"] == "Hello"
+
+
+def test_state_schema_v2_writes_sidecars_and_reloads(tmp_path):
+    path = tmp_path / "state_store.json"
+    state = StateEngine(str(path))
+    execution = state.get_execution("exec-a")
+    execution.results["marker"] = "kept"
+    state.get_conversation("exec-a").messages.append({"role": "user", "content": "hello"})
+    assert state.save_to_disk()
+
+    index = json.loads(path.read_text(encoding="utf-8"))
+    assert index["schema_version"] == STATE_SCHEMA_VERSION
+    assert "exec-a" in index["execution_ids"]
+    assert "executions" not in index
+    sidecar = tmp_path / "state_executions" / "exec-a.json"
+    conversation = tmp_path / "state_conversations" / "exec-a.json"
+    assert sidecar.is_file()
+    assert conversation.is_file()
+    assert json.loads(sidecar.read_text(encoding="utf-8"))["results"]["marker"] == "kept"
+
+    restored = StateEngine(str(path))
+    assert restored.get_execution("exec-a").results["marker"] == "kept"
+    assert restored.get_conversation("exec-a").messages[0]["content"] == "hello"
+
+    del restored.executions["exec-a"]
+    del restored.conversations["exec-a"]
+    assert restored.save_to_disk()
+    assert not sidecar.exists()
+    assert not conversation.exists()
+
+
+@pytest.mark.asyncio
+async def test_flush_loop_ignores_llm_delta_events(tmp_path):
+    path = tmp_path / "state.json"
+    state = StateEngine(str(path))
+    bus = EventBus()
+    state.start_db_flush_loop(bus)
+    state.get_execution("delta").results["before"] = True
+    await bus.publish(Event(type="LLMDelta", payload={"delta": "x"}))
+    await asyncio.sleep(0.05)
+    assert "before" not in json.loads(
+        (tmp_path / "state_executions" / "delta.json").read_text(encoding="utf-8")
+    ).get("results", {})
+    await bus.publish(Event(type="ExecutionChanged"))
+    await state.stop_db_flush_loop()
+    assert StateEngine(str(path)).get_execution("delta").results["before"] is True
+
+
+@pytest.mark.asyncio
+async def test_shell_and_filesystem_mutations_share_sorted_path_locks(tmp_path):
+    engine, state = _engine(tmp_path)
+    state.get_execution("locks")
+    overlapping = []
+    active = 0
+
+    async def slow_impl(execution_id, capability, action, arguments):
+        nonlocal active
+        active += 1
+        overlapping.append(active)
+        await asyncio.sleep(0.05)
+        active -= 1
+        return "ok"
+
+    engine._call_tool_impl = slow_impl
+    await asyncio.gather(
+        engine._call_tool("locks", "filesystem", "write", {"path": "shared.txt", "content": "a"}),
+        engine._call_tool("locks", "shell", "execute", {"command": "echo hi > shared.txt"}),
+    )
+    assert max(overlapping) == 1
+
+
+@pytest.mark.asyncio
+async def test_kernel_stores_planning_mode_and_title():
+    state = StateEngine()
+    llm = MockLLMProvider()
+    engine = ExecutionEngine(
+        EventBus(),
+        state,
+        ContextEngine(state, RAMMemoryProvider()),
+        llm,
+        SimplePlanner(llm),
+        SimplePolicyProvider(),
+    )
+    kernel = RuntimeKernel(EventBus(), state, engine)
+    engine.schedule_execution = lambda *args, **kwargs: None
+    exec_id = await kernel.submit_task(
+        "Write a concise summary of the attached notes.",
+        {"planning_mode": "direct"},
+    )
+    stored = state.get_execution(exec_id)
+    assert stored.variables["planning_mode"] == "direct"
+    assert stored.variables["task_title"].startswith("Write a concise summary")

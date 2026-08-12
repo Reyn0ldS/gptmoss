@@ -1316,11 +1316,18 @@
             <p class="landing-subtitle">Pilotez votre agent autonome en temps réel. Soumettez des tâches système ou de gestion de fichiers complexes.</p>
             
             <div class="task-form-container">
-                <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px;">
+                <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; gap: 12px; flex-wrap: wrap;">
                     <label class="form-label" for="task-project-select" style="margin: 0;">Projet d'association</label>
-                    <div style="display: flex; gap: 8px; align-items: center;">
+                    <div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap;">
                         <select id="task-project-select" class="approval-reason-input" style="margin: 0; padding: 4px 8px; font-size: 12px; width: 180px; height: 28px; line-height: 20px; border-radius: 4px; background: var(--bg-card); color: var(--text-normal);">
                             <option value="proj-default">Projet Par Défaut</option>
+                        </select>
+                        <label class="form-label" for="task-planning-mode" style="margin: 0; font-size: 11px;">Planification</label>
+                        <select id="task-planning-mode" class="approval-reason-input" style="margin: 0; padding: 4px 8px; font-size: 12px; width: 180px; height: 28px; line-height: 20px; border-radius: 4px; background: var(--bg-card); color: var(--text-normal);">
+                            <option value="auto">Auto</option>
+                            <option value="direct">Direct (1 agent)</option>
+                            <option value="short_team">Équipe courte</option>
+                            <option value="full_team">Équipe complète</option>
                         </select>
                         <button onclick="createNewProjectQuick()" class="btn-control resume" style="padding: 2px 8px; font-size: 11px; height: 28px; background: var(--accent-primary); border-color: var(--accent-primary); color: white; border-radius: 4px;">+ Nouveau</button>
                     </div>
@@ -1411,6 +1418,8 @@
         let activeExecutionId = null;
         let activeFeedTab = "active"; // "active" or "unified"
         let globalExecutions = [];
+        let llmStreamText = "";
+        let llmStreamExecId = null;
         let socket = null;
         let websocketReconnectTimer = null;
         const selectedLibraryArtifacts = new Set();
@@ -1631,10 +1640,11 @@
                         selectExecution(exec.execution_id);
                     };
                     
-                    let titleText = `Tâche : ${exec.execution_id.substring(0, 8)}`;
+                    const preview = exec.task_title || exec.task || "";
+                    let titleText = preview || `Tâche : ${exec.execution_id.substring(0, 8)}`;
                     if (exec.role_name) {
-                        titleText = `🤖 [${exec.role_name}]`;
-                    } else if (depth > 0) {
+                        titleText = preview ? `🤖 [${exec.role_name}] ${preview}` : `🤖 [${exec.role_name}]`;
+                    } else if (depth > 0 && !preview) {
                         titleText = `📋 Sous-tâche`;
                     }
                     
@@ -1655,7 +1665,7 @@
                             <span class="card-id">${toggleHtml}${exec.execution_id.substring(0, 8)}...</span>
                             <span class="badge ${exec.status}">${exec.status}</span>
                         </div>
-                        <div class="card-title" title="${exec.execution_id}" style="${depth > 0 ? 'padding-left: 4px;' : ''}">${titleText}</div>
+                        <div class="card-title" title="${escapeHTML(preview || exec.execution_id)}" style="${depth > 0 ? 'padding-left: 4px;' : ''}">${escapeHTML(titleText)}</div>
                     `;
                     container.appendChild(card);
                     
@@ -1734,6 +1744,48 @@
             }
         }
 
+        function clearLlmStream(executionId = null) {
+            if (executionId && llmStreamExecId && executionId !== llmStreamExecId) {
+                return;
+            }
+            llmStreamText = "";
+            llmStreamExecId = null;
+            const box = document.getElementById("llm-stream-live");
+            if (box) box.remove();
+        }
+
+        function renderLlmStream() {
+            const container = document.getElementById("chat-container");
+            if (!container || !llmStreamText || llmStreamExecId !== activeExecutionId) return;
+            let box = document.getElementById("llm-stream-live");
+            if (!box) {
+                box = document.createElement("div");
+                box.id = "llm-stream-live";
+                box.className = "message assistant";
+                box.innerHTML = `
+                    <div class="msg-role"><span style="display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 9999px; background-color: var(--accent-primary)20; color: var(--accent-primary); border: 1px solid var(--accent-primary)40; font-size: 11px;">✨ Génération</span></div>
+                    <pre id="llm-stream-text" class="terminal-box" style="white-space: pre-wrap; word-break: break-word;"></pre>
+                `;
+                container.appendChild(box);
+            }
+            const text = document.getElementById("llm-stream-text");
+            if (text) text.textContent = llmStreamText;
+            container.scrollTop = container.scrollHeight;
+        }
+
+        function appendLlmStream(payload) {
+            const executionId = payload.execution_id;
+            if (!executionId || executionId !== activeExecutionId) return;
+            if (llmStreamExecId !== executionId) {
+                llmStreamText = "";
+                llmStreamExecId = executionId;
+            }
+            llmStreamText += payload.delta || "";
+            const loaderBar = document.getElementById("loader-bar");
+            if (loaderBar) loaderBar.style.display = "block";
+            renderLlmStream();
+        }
+
         // Connect WebSockets for live status updates
         function setupWebSocket() {
             if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) return;
@@ -1763,6 +1815,14 @@
             socket.onmessage = (event) => {
                 try {
                     const data = JSON.parse(event.data);
+
+                    if (data.type === "LLMDelta") {
+                        appendLlmStream(data.payload || {});
+                        return;
+                    }
+                    if (data.type === "LLMResponse") {
+                        clearLlmStream(data.payload?.execution_id);
+                    }
                     
                     // Refresh sidebar list for any updates
                     fetchExecutions();
@@ -1862,10 +1922,10 @@
                 const exec = await res.json();
                 
                 // 1. Header details
-                let taskText = "Tâche MOSS";
-                if (exec.messages && exec.messages.length > 0) {
+                let taskText = exec.variables?.task_title || exec.variables?.task || "Tâche MOSS";
+                if ((!exec.variables?.task && exec.messages && exec.messages.length > 0)) {
                     const firstMsg = exec.messages[0];
-                    if (firstMsg.content.startsWith("Task: ")) {
+                    if (String(firstMsg.content || "").startsWith("Task: ")) {
                         taskText = firstMsg.content.substring(6);
                     } else {
                         taskText = firstMsg.content;
@@ -2042,9 +2102,12 @@
                         `;
                         chatContainer.appendChild(msgDiv);
                     });
+                    if (llmStreamExecId === id && llmStreamText) {
+                        renderLlmStream();
+                    }
                     
                     // Show a dynamic thinking indicator if active task is running
-                    if (exec.status === "running") {
+                    if (exec.status === "running" && !(llmStreamExecId === id && llmStreamText)) {
                         const thinkingDiv = document.createElement("div");
                         thinkingDiv.className = "message assistant thinking-indicator";
                         
@@ -2170,10 +2233,12 @@
                     submitButton.textContent = "Création en cours…";
                 }
                 const attachment_ids = await uploadSelectedAttachments();
+                const planningSelect = document.getElementById("task-planning-mode");
+                const planning_mode = planningSelect ? planningSelect.value : "auto";
                 const res = await requestApi("/executions", {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ task, project_id, attachment_ids })
+                    body: JSON.stringify({ task, project_id, attachment_ids, planning_mode })
                 });
                 const data = await res.json();
                 const newId = data.execution_id;

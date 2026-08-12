@@ -49,7 +49,7 @@ pas un ordonnanceur distribué ni une implémentation de cron.
 | Qualité et livraison | `core/delivery.py`, `document_quality.py`, `professional_delivery.py`, `delivery_package.py` | Contrat gelé, preuves indépendantes, réparations et paquet professionnel DOCX/ZIP signé par empreintes. |
 | Évolution | `core/skills.py`, `core/evolution.py` | Découverte de procédures, profils de spécialistes et évolution locale traçable. |
 | Configuration | `core/settings.py` | Contrat Pydantic unique partagé par bootstrap, API, GUI et tests ; valeurs sûres et limites strictes. |
-| Persistance | `core/state.py`, `core/durable_io.py`, `core/observability.py` | Écritures durables, migration/quarantaine des snapshots, historique borné et télémétrie locale. |
+| Persistance | `core/state.py`, `core/durable_io.py`, `core/observability.py` | Index `state_store.json` plus sidecars par exécution/conversation, migration/quarantaine, historique borné et télémétrie locale. |
 | Fournisseur | `providers/qwen.py` | Adaptateur OpenAI-compatible, TLS sûr, vision, classification/reprise d'erreurs et fermeture des clients remplacés. |
 
 Les interfaces abstraites de `gptmoss/interfaces/` séparent capacités, LLM, mémoire,

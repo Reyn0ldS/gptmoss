@@ -363,6 +363,7 @@ class ShellCapability:
         """Runs command in subprocess and returns output."""
         execution_id = context.get("execution_id") if context else None
         cwd_dir = self._get_workspace_for_execution(execution_id)
+        assigned_workspace = cwd_dir
         
         try:
             # Resolve generic python command to current active python binary
@@ -374,7 +375,12 @@ class ShellCapability:
             escape_reason = self._workspace_escape_reason(cleaned_cmd, cwd_dir)
             if escape_reason:
                 return f"Error: {escape_reason}"
-            mutation_reason = self._external_mutation_reason(cleaned_cmd, cwd_dir)
+            parsed_cd = self._leading_workspace_cd(cleaned_cmd)
+            if parsed_cd:
+                requested, remainder = parsed_cd
+                cwd_dir = os.path.abspath(os.path.join(assigned_workspace, requested))
+                cleaned_cmd = remainder
+            mutation_reason = self._external_mutation_reason(cleaned_cmd, assigned_workspace)
             if mutation_reason:
                 return f"Error: {mutation_reason}"
             if sys.platform == "win32":

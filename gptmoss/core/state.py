@@ -2,21 +2,25 @@ import asyncio
 import json
 import logging
 import os
+import re
 import threading
 import time
 import warnings
 from contextlib import suppress
 from enum import Enum
+from pathlib import Path
 from typing import Dict, Any, Optional, List
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from gptmoss.core.durable_io import write_text_atomic
+from gptmoss.core.durable_io import unlink_resilient, write_text_atomic
 
 
 logger = logging.getLogger("gptmoss.state")
-STATE_SCHEMA_VERSION = 1
+STATE_SCHEMA_VERSION = 2
 DEFAULT_MAX_TRANSITIONS_PER_EXECUTION = 2_000
+TRANSIENT_FLUSH_EVENT_TYPES = frozenset({"LLMDelta"})
+_SAFE_STATE_ID = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
 
 
 class ExecutionStatus(str, Enum):
@@ -125,6 +129,8 @@ class StateEngine:
         self._flush_callback = None
         self.max_transitions_per_execution = max(100, int(max_transitions_per_execution))
         self.corrupt_backup_path: Optional[str] = None
+        self._persisted_execution_ids: set[str] = set()
+        self._persisted_conversation_ids: set[str] = set()
         self._load_from_disk()
 
     @staticmethod
@@ -147,8 +153,57 @@ class StateEngine:
                 version = 1
                 migrated["schema_version"] = version
                 continue
+            if version == 1:
+                version = 2
+                migrated["schema_version"] = version
+                continue
             raise ValueError(f"No state migration is available from schema {version}.")
         return migrated
+
+    def _state_root(self) -> Optional[Path]:
+        if not self.persist_path:
+            return None
+        return Path(self.persist_path).resolve().parent
+
+    def _partition_dir(self, name: str) -> Optional[Path]:
+        root = self._state_root()
+        return None if root is None else root / name
+
+    @staticmethod
+    def _sidecar_filename(key: str) -> str:
+        text = str(key or "").strip()
+        if _SAFE_STATE_ID.fullmatch(text):
+            return f"{text}.json"
+        safe = re.sub(r"[^A-Za-z0-9._-]", "_", text)[:128]
+        return f"{safe or 'unnamed'}.json"
+
+    @staticmethod
+    def _has_embedded_records(records: Any) -> bool:
+        if not isinstance(records, dict) or not records:
+            return False
+        sample = next(iter(records.values()))
+        return isinstance(sample, dict) and (
+            "status" in sample or "variables" in sample or "messages" in sample
+            or "execution_id" in sample
+        )
+
+    def _load_sidecar_records(self, directory: Optional[Path], keys: List[str]) -> Dict[str, Dict[str, Any]]:
+        loaded: Dict[str, Dict[str, Any]] = {}
+        if directory is None:
+            return loaded
+        for key in keys:
+            path = directory / self._sidecar_filename(key)
+            if not path.is_file():
+                logger.warning("Missing state sidecar for %s at %s", key, path)
+                continue
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except Exception as error:
+                logger.error("Failed to load state sidecar %s: %s", path, error)
+                continue
+            if isinstance(payload, dict):
+                loaded[key] = payload
+        return loaded
 
     def _quarantine_invalid_snapshot(self) -> None:
         if not self.persist_path or not os.path.exists(self.persist_path):
@@ -167,13 +222,31 @@ class StateEngine:
         try:
             with open(self.persist_path, "r", encoding="utf-8") as f:
                 data = self._migrate_snapshot(json.load(f))
-                
+
+            conversations = data.get("conversations") or {}
+            executions = data.get("executions") or {}
+            if int(data.get("schema_version", 0)) >= 2 and not (
+                self._has_embedded_records(executions) or self._has_embedded_records(conversations)
+            ):
+                execution_ids = [
+                    str(item) for item in (data.get("execution_ids") or list(executions))
+                ]
+                conversation_ids = [
+                    str(item) for item in (data.get("conversation_ids") or list(conversations))
+                ]
+                executions = self._load_sidecar_records(
+                    self._partition_dir("state_executions"), execution_ids
+                )
+                conversations = self._load_sidecar_records(
+                    self._partition_dir("state_conversations"), conversation_ids
+                )
+
             # Load conversations
-            for k, v in data.get("conversations", {}).items():
+            for k, v in conversations.items():
                 self.conversations[k] = ConversationState(**v)
                 
             # Load executions
-            for k, v in data.get("executions", {}).items():
+            for k, v in executions.items():
                 self.executions[k] = ExecutionState(**v)
                 
             # Load agents
@@ -191,30 +264,64 @@ class StateEngine:
             # Load users
             for k, v in data.get("users", {}).items():
                 self.users[k] = UserState(**v)
+            self._persisted_execution_ids = set(self.executions)
+            self._persisted_conversation_ids = set(self.conversations)
         except Exception as e:
             logger.error(f"Failed to load state from disk: {e}")
             self._quarantine_invalid_snapshot()
 
-    def _snapshot(self) -> Dict[str, Any]:
+    def _index_snapshot(self) -> Dict[str, Any]:
         return {
             "schema_version": STATE_SCHEMA_VERSION,
-            "conversations": {k: v.model_dump() for k, v in self.conversations.items()},
-            "executions": {k: v.model_dump() for k, v in self.executions.items()},
+            "execution_ids": sorted(self.executions),
+            "conversation_ids": sorted(self.conversations),
             "agents": {k: v.model_dump() for k, v in self.agents.items()},
             "workspaces": {k: v.model_dump() for k, v in self.workspaces.items()},
             "knowledges": {k: v.model_dump() for k, v in self.knowledges.items()},
             "users": {k: v.model_dump() for k, v in self.users.items()},
         }
 
+    def _snapshot(self) -> Dict[str, Any]:
+        """Compatibility snapshot used by tests that inspect in-memory persistence shape."""
+        snapshot = self._index_snapshot()
+        snapshot["conversations"] = {k: v.model_dump() for k, v in self.conversations.items()}
+        snapshot["executions"] = {k: v.model_dump() for k, v in self.executions.items()}
+        return snapshot
+
+    def _write_sidecars(
+        self, directory: Path, records: Dict[str, Any], previous_ids: set[str]
+    ) -> None:
+        directory.mkdir(parents=True, exist_ok=True)
+        current_names = set()
+        for key, value in records.items():
+            filename = self._sidecar_filename(key)
+            current_names.add(filename)
+            payload = value.model_dump() if hasattr(value, "model_dump") else dict(value)
+            write_text_atomic(directory / filename, json.dumps(payload, indent=2, ensure_ascii=False))
+        for stale in previous_ids - set(records):
+            unlink_resilient(directory / self._sidecar_filename(stale))
+
     def save_to_disk(self) -> bool:
-        """Atomically persist a complete snapshot, preserving the previous file on failure."""
+        """Atomically persist sidecars first, then the compact index."""
         if not self.persist_path:
             return True
 
         with self._save_lock:
             try:
-                content = json.dumps(self._snapshot(), indent=2, ensure_ascii=False)
+                executions_dir = self._partition_dir("state_executions")
+                conversations_dir = self._partition_dir("state_conversations")
+                if executions_dir is not None:
+                    self._write_sidecars(
+                        executions_dir, self.executions, self._persisted_execution_ids
+                    )
+                if conversations_dir is not None:
+                    self._write_sidecars(
+                        conversations_dir, self.conversations, self._persisted_conversation_ids
+                    )
+                content = json.dumps(self._index_snapshot(), indent=2, ensure_ascii=False)
                 write_text_atomic(self.persist_path, content)
+                self._persisted_execution_ids = set(self.executions)
+                self._persisted_conversation_ids = set(self.conversations)
                 return True
             except Exception as e:
                 logger.error(f"Failed to save state to disk: {e}")
@@ -313,6 +420,8 @@ class StateEngine:
         state_changed = asyncio.Event()
 
         async def save_state_on_event(event: Event):
+            if event.type in TRANSIENT_FLUSH_EVENT_TYPES:
+                return
             state_changed.set()
 
         event_bus.subscribe_all(save_state_on_event)

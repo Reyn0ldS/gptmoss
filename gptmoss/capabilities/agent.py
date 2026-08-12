@@ -10,6 +10,7 @@ INHERITED_VARIABLE_KEYS = (
     "project_path",
     "project_domains",
     "attachment_ids",
+    "planning_mode",
 )
 TERMINAL_EXECUTION_STATUSES = frozenset({"completed", "failed", "cancelled"})
 SUBTASK_WAIT_POLLS = 3_600

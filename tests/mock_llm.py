@@ -1,3 +1,4 @@
+import inspect
 from typing import List, Dict, Any, Optional
 from gptmoss.interfaces.llm import LLMProvider
 
@@ -36,11 +37,18 @@ class MockLLMProvider(LLMProvider):
             res = {"content": "Default mock response", "tool_calls": None}
             
         self.call_count += 1
-        return {
+        payload = {
             "content": res.get("content"),
             "tool_calls": res.get("tool_calls"),
             "usage": {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20}
         }
+        on_text_delta = kwargs.get("on_text_delta")
+        content = payload.get("content")
+        if on_text_delta and content:
+            result = on_text_delta(content)
+            if inspect.isawaitable(result):
+                await result
+        return payload
 
     async def embeddings(self, texts: List[str], **kwargs) -> List[List[float]]:
         return [[0.1] * 1536 for _ in texts]

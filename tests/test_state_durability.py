@@ -37,7 +37,9 @@ def test_state_snapshot_is_versioned_and_legacy_state_still_loads(tmp_path):
     state = StateEngine(str(path))
     assert state.get_execution("legacy").status == "completed"
     assert state.save_to_disk()
-    assert json.loads(path.read_text(encoding="utf-8"))["schema_version"] == 1
+    assert json.loads(path.read_text(encoding="utf-8"))["schema_version"] == 2
+    restored = StateEngine(str(path))
+    assert restored.get_execution("legacy").status == "completed"
 
 
 def test_corrupt_state_fails_closed_and_can_be_replaced(tmp_path, caplog):

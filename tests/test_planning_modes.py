@@ -55,3 +55,21 @@ def test_planner_modes_produce_valid_causal_dependency_graphs(mode, task):
         assert plan["artifact_validations"]
         assert any(item["validator"] == "document" for item in plan["artifact_validations"])
         assert plan["scope_changes"] == []
+
+
+def test_explicit_planning_modes_override_complexity_sizing():
+    software = "Build a software application with a REST API, persistence and tests."
+    analysis = analyze_task_complexity(software)
+
+    direct = SimplePlanner._fallback_plan(software, analysis, "direct")
+    SimplePlanner._validate_generated_plan(direct, analysis, "direct")
+    assert len(direct["steps"]) == 1
+    assert direct["steps"][0]["role"] == "coordinator"
+
+    short = SimplePlanner._fallback_plan(software, {**analysis, "level": "high"}, "short_team")
+    SimplePlanner._validate_generated_plan(short, {**analysis, "level": "high"}, "short_team")
+    assert 3 <= len(short["steps"]) <= 5
+
+    full = SimplePlanner._fallback_plan(software, {**analysis, "level": "low"}, "full_team")
+    assert len(full["steps"]) >= 9
+    assert any(step["role"] == "debugger" for step in full["steps"])

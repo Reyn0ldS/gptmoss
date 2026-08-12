@@ -152,8 +152,17 @@ class ExecutionRescueMixin:
                     type="ArtifactRescueRequested",
                     payload={"execution_id": execution_id, "path": path, "attempt": attempt + 1},
                 ))
+                async def on_text_delta(delta: str) -> None:
+                    await self.event_bus.publish(Event(
+                        type="LLMDelta",
+                        payload={"execution_id": execution_id, "delta": delta, "path": path},
+                    ))
+
                 response = await self._completion_with_recovery(
-                    execution_id, messages=rescue_messages, temperature=0.1,
+                    execution_id,
+                    messages=rescue_messages,
+                    temperature=0.1,
+                    on_text_delta=on_text_delta,
                 )
                 content = self._strip_code_fence(response.get("content", ""), path)
                 content_issues = self._rescue_content_issues(path, content)

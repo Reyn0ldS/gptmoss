@@ -10,7 +10,7 @@ modules et tests est dans `application-map.json` ; le présent document apporte 
 | Supervision serveur | `server_supervisor.py` | centre Serveur, `/api/runtime-control`, API :8765 | ports CLI/environnement | `test_server_supervisor`, `test_functional_coverage_contract` |
 | Soumission/projets | kernel, API, filesystem, domains | compositeur, `/executions`, `/projects` | `projects`, domaines projet, `workspace_path` | `test_api`, `test_end_to_end_workflow`, `test_adaptive_autonomy` |
 | Planification temporelle | scheduler, kernel, reprise fournisseur | `delay_seconds`, `run_at`, statuts | échéance persistée | `test_scheduler_and_legacy_state`, `test_api`, `test_lifecycle_chronology` |
-| Planification fonctionnelle | `planners/simple.py`, `planners/complexity.py`, `planners/fallbacks.py`, domains, execution | plan et statuts | contexte, autonomie, délégation | `test_planning_modes`, `test_lifecycle_chronology` |
+| Planification fonctionnelle | `planners/simple.py`, `planners/complexity.py`, `planners/fallbacks.py`, domains, execution | mode auto/direct/équipe, plan et titres | contexte, autonomie, délégation | `test_planning_modes`, `test_lifecycle_chronology`, `test_runtime_ux` |
 | Exécution/outils | `core/execution.py`, `core/execution_plan.py`, `core/execution_progress.py`, `core/execution_rescue.py`, capacités | timeline, feed, WebSocket | budgets, skills, permissions | `test_execution`, `test_adaptive_autonomy` |
 | Politique/shell | policy, shell/filesystem | approbation, pause/reprise | denied/approval, safe shell, autonomie | `test_policy`, `test_runtime_improvements` |
 | Sous-agents | agent, devteam, kernel | bibliothèque et endpoints subagents | profondeur/délégation | `test_agent_and_memory`, `test_devteam` |
@@ -21,7 +21,7 @@ modules et tests est dans `application-map.json` ; le présent document apporte 
 | Qualité documentaire | corpus, document_quality | résultats d'exécution | profil professionnel | `test_document_quality`, `test_quality_benchmarks`, `test_corpus` |
 | Assurance logiciel | delivery, artifact_validation | plan, métriques, feed | contrat produit par plan | `test_delivery_assurance`, `test_delivery_benchmarks` |
 | Paquet professionnel | professional_delivery, delivery_package | bouton Télécharger | profil professionnel | `test_professional_delivery` |
-| État/événements | state, event_bus, observability | WebSockets, diagnostics, audit | fichiers du workspace | `test_event_bus`, `test_lifecycle_chronology` |
+| État/événements | state, event_bus, observability | WebSockets, flux LLM, diagnostics, audit | index + sidecars du workspace | `test_event_bus`, `test_lifecycle_chronology`, `test_state_durability`, `test_runtime_ux` |
 | Offline/release | scripts préparation, manifests source/runtime | scripts BAT/install/start | versions épinglées | `test_offline_source_package`, `test_source_release`, `test_windows_portable_python`, CI archive propre |
 | Documentation vivante | docs, graphe de symboles + validateurs | dépôt et CLI d'impact | manifestes cartographiques | `test_application_map`, `test_symbol_map`, `test_documentation_contract` |
 

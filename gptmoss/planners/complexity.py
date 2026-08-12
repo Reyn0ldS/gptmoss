@@ -7,6 +7,34 @@ from typing import Any, Dict
 
 from gptmoss.core.domains import DEFAULT_DOMAIN_REGISTRY, ProjectDomainRegistry
 
+PLANNING_MODES = ("auto", "direct", "short_team", "full_team")
+_PLANNING_MODE_ALIASES = {
+    "short": "short_team",
+    "compact": "short_team",
+    "equipe_courte": "short_team",
+    "full": "full_team",
+    "complete": "full_team",
+    "equipe_complete": "full_team",
+}
+
+
+def normalize_planning_mode(value: Any) -> str:
+    """Return a stable planning-mode token; unknown values become auto."""
+    text = str(value or "auto").strip().lower().replace("-", "_").replace(" ", "_")
+    text = _PLANNING_MODE_ALIASES.get(text, text)
+    return text if text in PLANNING_MODES else "auto"
+
+
+def task_title_from_text(task: str, limit: int = 72) -> str:
+    """Build a short sidebar title from the first line of a user task."""
+    text = " ".join(str(task or "").split())
+    if not text:
+        return "Tâche"
+    if len(text) <= limit:
+        return text
+    return text[: max(1, limit - 1)].rstrip() + "…"
+
+
 def analyze_task_complexity(
     task: str, domain_registry: ProjectDomainRegistry | None = None
 ) -> Dict[str, Any]:

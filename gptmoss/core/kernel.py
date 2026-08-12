@@ -6,6 +6,7 @@ from typing import Dict, Any
 from gptmoss.core.event_bus import EventBus, Event
 from gptmoss.core.state import StateEngine
 from gptmoss.core.execution import ExecutionEngine
+from gptmoss.planners.complexity import normalize_planning_mode, task_title_from_text
 
 logger = logging.getLogger("gptmoss.kernel")
 
@@ -79,6 +80,7 @@ class RuntimeKernel:
             exec_state, "pending", reason="task submitted", actor="kernel"
         )
         exec_state.variables["task"] = task
+        exec_state.variables["task_title"] = task_title_from_text(task)
         scheduled_for = float(run_at) if run_at is not None else time.time() + max(0.0, float(delay_seconds))
         exec_state.variables["scheduled_for"] = scheduled_for
         exec_state.variables["delegation_depth"] = delegation_depth
@@ -95,6 +97,10 @@ class RuntimeKernel:
             exec_state.variables["parent_execution_id"] = agent_config["parent_execution_id"]
         if "skills" in agent_config:
             exec_state.variables["requested_skills"] = agent_config["skills"]
+        exec_state.variables["planning_mode"] = normalize_planning_mode(
+            exec_state.variables.get("planning_mode")
+            or agent_config.get("planning_mode")
+        )
         
         # Emit TaskCreated
         await self.event_bus.publish(Event(

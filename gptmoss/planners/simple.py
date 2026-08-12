@@ -10,7 +10,7 @@ from gptmoss.interfaces.llm import LLMProvider
 from gptmoss.interfaces.planner import PlannerProvider
 from gptmoss.core.document_planning import adapt_document_steps
 from gptmoss.core.domains import ProjectDomainRegistry
-from gptmoss.planners.complexity import analyze_task_complexity
+from gptmoss.planners.complexity import analyze_task_complexity, normalize_planning_mode
 from gptmoss.planners.fallbacks import (
     _assign_document_requirements,
     _document_deliverable_task,
@@ -275,15 +275,26 @@ class SimplePlanner(PlannerProvider):
         }
 
     @staticmethod
-    def _fallback_plan(task: str, analysis: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    def _fallback_plan(
+        task: str,
+        analysis: Dict[str, Any] | None = None,
+        planning_mode: str | None = None,
+    ) -> Dict[str, Any]:
         analysis = analysis or analyze_task_complexity(task)
+        mode = normalize_planning_mode(planning_mode)
         domains = set(analysis["domains"])
+        if mode == "direct":
+            return {"analysis": analysis,
+                    "steps": [_step(0, "coordinator", "Task Specialist", f"Perform the user task: {task}", [], list(domains) or ["general"], [], ["The requested outcome is delivered."])],
+                    "rationale": "Explicit direct planning mode."}
         if _document_deliverable_task(task):
             return SimplePlanner._document_fallback(task, analysis)
-        if analysis["level"] in {"high", "very_high"} and len(domains) >= 3:
+        if mode == "full_team" and "software-engineering" in domains:
+            analysis = {**analysis, "level": "high" if analysis["level"] in {"low", "moderate"} else analysis["level"]}
+        if mode != "short_team" and analysis["level"] in {"high", "very_high"} and len(domains) >= 3:
             return SimplePlanner._cross_domain_fallback(task, analysis)
         if "software-engineering" in domains:
-            if analysis["level"] in {"high", "very_high"}:
+            if mode != "short_team" and analysis["level"] in {"high", "very_high"}:
                 steps = [
                     _step(0, "architect", "Requirements & Feasibility Analyst", "Analyze requirements, constraints, assumptions, risks, and acceptance criteria.", [], ["requirements engineering"], ["specs/requirements.md"], ["Requested outcomes are testable."]),
                     _step(1, "architect", "Solution Architect", "Design modules, interfaces, data flow, dependencies, and delivery strategy.", [0], ["software architecture", *sorted(domains)], ["specs/architecture.md"], ["Architecture covers every requirement."]),
@@ -332,7 +343,11 @@ class SimplePlanner(PlannerProvider):
         return None
 
     @staticmethod
-    def _validate_generated_plan(plan: Dict[str, Any], analysis: Dict[str, Any]) -> None:
+    def _validate_generated_plan(
+        plan: Dict[str, Any],
+        analysis: Dict[str, Any],
+        planning_mode: str = "auto",
+    ) -> None:
         steps = plan.get("steps")
         if not isinstance(steps, list) or not steps:
             raise ValueError("Planner response has no valid steps array.")
@@ -366,10 +381,17 @@ class SimplePlanner(PlannerProvider):
             if any(str(dependency) not in identifiers for dependency in step.get("dependencies", [])):
                 raise ValueError(f"Planner step {index} references an unknown dependency.")
 
-        if analysis["level"] in {"high", "very_high"}:
-            if len(steps) < analysis["suggested_min_steps"]:
+        mode = normalize_planning_mode(planning_mode)
+        apply_complex_gates = mode not in {"direct", "short_team"} and (
+            analysis["level"] in {"high", "very_high"} or mode == "full_team"
+        )
+        if apply_complex_gates:
+            minimum = int(analysis.get("suggested_min_steps") or 1)
+            if mode == "full_team":
+                minimum = max(minimum, 9)
+            if len(steps) < minimum:
                 raise ValueError(
-                    f"Planner undersized a {analysis['level']} task: {len(steps)} < {analysis['suggested_min_steps']} steps."
+                    f"Planner undersized a {analysis['level']} task: {len(steps)} < {minimum} steps."
                 )
             if len(specialists) < max(6, len(steps) * 3 // 4):
                 raise ValueError("Planner reused too many generic specialist profiles.")
@@ -431,10 +453,40 @@ class SimplePlanner(PlannerProvider):
                     raise ValueError(f"Project domain markers must be an array: {name}")
                 domain_registry.register(str(name), markers)
         analysis = analyze_task_complexity(task, domain_registry)
+        planning_mode = normalize_planning_mode(
+            kwargs.get("planning_mode")
+            or (context or {}).get("variables", {}).get("planning_mode")
+        )
+        if planning_mode == "full_team" and analysis["level"] in {"low", "moderate"}:
+            analysis = {
+                **analysis,
+                "level": "high",
+                "suggested_min_steps": max(int(analysis.get("suggested_min_steps") or 1), 9),
+            }
+        mode_instructions = {
+            "direct": (
+                "Planning mode is direct: return exactly one coordinator step that performs "
+                "the whole user task. Do not expand into a specialist team."
+            ),
+            "short_team": (
+                "Planning mode is short_team: produce a compact specialist DAG, typically "
+                "3-6 steps, with implementation, independent verification, and a final "
+                "coordinator. Do not inflate into a full cross-domain programme."
+            ),
+            "full_team": (
+                "Planning mode is full_team: produce a complete specialist programme with "
+                "distinct architects, implementation, independent tests, autonomous repair, "
+                "and a final coordinator even if the wording looks small."
+            ),
+            "auto": (
+                "Planning mode is auto: size the DAG to the deterministic complexity hints."
+            ),
+        }[planning_mode]
         capabilities_list = [schema["function"]["name"] for schema in capabilities_schemas]
         prompt = (
             "You are GPTMOSS's adaptive planning engine. Produce a realistic specialist DAG, not a generic seven-role checklist.\n"
             "First assess the final deliverable's true size, domains, workstreams, dependencies, unavailable assets, risks, and MVP boundary.\n"
+            f"{mode_instructions}\n"
             f"Deterministic complexity hints (minimum safeguards, not a ceiling): {json.dumps(analysis, ensure_ascii=False)}\n"
             f"User task: {task}\nAvailable capabilities: {json.dumps(capabilities_list)}\n"
             f"Detected capability gaps: {json.dumps((context or {}).get('variables', {}).get('capability_gaps', []), ensure_ascii=False)}\n\n"
@@ -492,10 +544,11 @@ class SimplePlanner(PlannerProvider):
                     role_title = str(step.get("role") or "Task").replace("_", " ").title()
                     step["specialist"] = f"{role_title} Specialist"
                 step["status"] = "pending"
-            self._validate_generated_plan(plan_data, analysis)
+            self._validate_generated_plan(plan_data, analysis, planning_mode)
             if _document_deliverable_task(task):
                 plan_data["delivery_profile"] = "professional-local"
+            plan_data["planning_mode"] = planning_mode
             return plan_data
         except Exception as exc:
             logger.warning("Error or undersized LLM plan; using adaptive fallback: %s", exc)
-            return self._fallback_plan(task, analysis)
+            return self._fallback_plan(task, analysis, planning_mode)

@@ -9,6 +9,7 @@ import os
 import re
 import shlex
 import sys
+from contextlib import AsyncExitStack
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 from gptmoss.core.event_bus import Event, EventBus
@@ -148,6 +149,7 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
         self._capabilities: Dict[str, Any] = {}  # capability_name -> instance
         self._execution_locks: Dict[str, asyncio.Lock] = {}
         self._path_locks: Dict[str, asyncio.Lock] = {}
+        self._progress_file_digest_cache: Dict[str, tuple] = {}
         self.scheduler = scheduler or Scheduler()
         self.provider_recovery = ProviderRecoveryCoordinator(
             event_bus, state_engine, llm_provider,
@@ -987,6 +989,7 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
                     parent_execution_id=state.variables.get("parent_execution_id"),
                     delegated_step=state.variables.get("delegated_step"),
                     project_domains=state.variables.get("project_domains"),
+                    planning_mode=state.variables.get("planning_mode"),
                 )
             except ProviderUnavailableError:
                 raise
@@ -2358,11 +2361,22 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
                 payload={"execution_id": execution_id, "messages": llm_messages}
             ))
 
+            async def on_text_delta(delta: str) -> None:
+                await self.event_bus.publish(Event(
+                    type="LLMDelta",
+                    payload={
+                        "execution_id": execution_id,
+                        "delta": delta,
+                        "step_index": state.current_step,
+                    },
+                ))
+
             llm_started = time.perf_counter()
             llm_response = await self._completion_with_recovery(
                 execution_id,
                 messages=llm_messages,
-                tools=schemas if schemas else None
+                tools=schemas if schemas else None,
+                on_text_delta=on_text_delta,
             )
             self.telemetry.record("llm_completed", execution_id, duration_ms=round((time.perf_counter() - llm_started) * 1000, 2), message_count=len(llm_messages), tool_calls=len(llm_response.get("tool_calls") or []))
 
@@ -2574,11 +2588,20 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
             raise asyncio.CancelledError()
         is_mutation = capability.lower() == "filesystem" and action.lower() in {"write", "delete"}
         path = str(arguments.get("path") or "")
+        command = str(arguments.get("command") or "")
         shell_paths = (
-            self._shell_mutation_paths(str(arguments.get("command") or ""))
+            self._shell_mutation_paths(command)
             if capability.lower() == "shell" and action.lower() == "execute"
             else []
         )
+        lock_paths = list(shell_paths)
+        if capability.lower() == "shell" and action.lower() == "execute":
+            from gptmoss.capabilities.shell import ShellCapability
+            for target in ShellCapability._shell_mutation_targets(command):
+                if target and target not in lock_paths:
+                    lock_paths.append(target)
+        if is_mutation and path:
+            lock_paths.append(path)
         if shell_paths:
             state = self.state_engine.get_execution(execution_id)
             parent_id = state.variables.get("parent_execution_id")
@@ -2630,10 +2653,16 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
                     f"Error: File ownership denied for '{path}'. This specialist must only "
                     "modify its declared owned_paths; request a debugger repair handoff for shared files."
                 )
+        if lock_paths:
             workspace = self._delivery_workspace(execution_id) or ""
-            lock_key = os.path.normcase(os.path.abspath(os.path.join(workspace, path)))
-            lock = self._path_locks.setdefault(lock_key, asyncio.Lock())
-            async with lock:
+            lock_keys = sorted({
+                os.path.normcase(os.path.abspath(os.path.join(workspace, target)))
+                for target in lock_paths if str(target).strip()
+            })
+            locks = [self._path_locks.setdefault(key, asyncio.Lock()) for key in lock_keys]
+            async with AsyncExitStack() as stack:
+                for lock in locks:
+                    await stack.enter_async_context(lock)
                 return await self._call_tool_impl(
                     execution_id, capability, action, arguments
                 )

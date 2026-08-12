@@ -1,4 +1,5 @@
 import hashlib
+import inspect
 import json
 import os
 import logging
@@ -148,15 +149,74 @@ class QwenProvider(LLMProvider):
         """Drop oldest complete context items while preserving instructions and recent tool ordering."""
         return ContextWindowPolicy.compact(messages, target_chars)
 
-    async def _create_with_context_recovery(self, arguments: Dict[str, Any]):
+    @staticmethod
+    async def _notify_text_delta(callback, text: str) -> None:
+        if not callback or not text:
+            return
+        result = callback(text)
+        if inspect.isawaitable(result):
+            await result
+
+    async def _consume_chat_stream(self, stream, on_text_delta=None) -> Dict[str, Any]:
+        """Assemble an OpenAI-compatible stream into the provider response dict."""
+        content_parts: List[str] = []
+        tool_acc: Dict[int, Dict[str, str]] = {}
+        async for chunk in stream:
+            choices = getattr(chunk, "choices", None) or []
+            if not choices:
+                continue
+            delta = choices[0].delta
+            piece = getattr(delta, "content", None)
+            if piece:
+                content_parts.append(piece)
+                await self._notify_text_delta(on_text_delta, piece)
+            for call in getattr(delta, "tool_calls", None) or []:
+                index = int(getattr(call, "index", 0) or 0)
+                entry = tool_acc.setdefault(index, {"id": "", "name": "", "arguments": ""})
+                if getattr(call, "id", None):
+                    entry["id"] = call.id
+                function = getattr(call, "function", None)
+                if function is not None:
+                    if getattr(function, "name", None):
+                        entry["name"] += function.name
+                    if getattr(function, "arguments", None):
+                        entry["arguments"] += function.arguments
+        content = "".join(content_parts) or None
+        calls = None
+        if tool_acc:
+            calls = []
+            for index in sorted(tool_acc):
+                entry = tool_acc[index]
+                raw_args = entry["arguments"] or "{}"
+                try:
+                    arguments = json.loads(raw_args)
+                except Exception:
+                    arguments = raw_args
+                calls.append({
+                    "id": entry["id"] or f"stream-{index}",
+                    "type": "function",
+                    "function": {"name": entry["name"], "arguments": arguments},
+                })
+        elif content:
+            parsed = ToolCallParser.parse_text(content) or None
+            if parsed:
+                calls = parsed
+                content = None
+        return {"content": content, "tool_calls": calls, "usage": {}}
+
+    async def _create_with_context_recovery(self, arguments: Dict[str, Any], on_text_delta=None):
         """Learn a provider's effective context size and recover without losing task state."""
         request = dict(arguments)
+        request.pop("stream", None)
         messages = [dict(item) for item in request.get("messages") or []]
         if self._learned_context_chars:
             messages = self._compact_messages(messages, self._learned_context_chars)
         for attempt in range(5):
             request["messages"] = messages
             try:
+                if on_text_delta is not None:
+                    stream = await self.client.chat.completions.create(**request, stream=True)
+                    return await self._consume_chat_stream(stream, on_text_delta)
                 return await self.client.chat.completions.create(**request)
             except Exception as error:
                 if not self._is_context_limit_error(error) or attempt >= 4:
@@ -185,6 +245,8 @@ class QwenProvider(LLMProvider):
     ) -> Dict[str, Any]:
         """Send completion request to Qwen/OpenAI compatible API."""
         model = kwargs.pop("model", self.default_model)
+        on_text_delta = kwargs.pop("on_text_delta", None)
+        kwargs.pop("stream", None)
         
         if not tools:
             # Standard chat completion without tool schema
@@ -194,14 +256,18 @@ class QwenProvider(LLMProvider):
                     "model": model,
                     "messages": messages,
                     **kwargs,
-                })
+                }, on_text_delta=on_text_delta)
+                if isinstance(response, dict) and "content" in response:
+                    return response
                 return self._parse_openai_response(response)
             except Exception as e:
                 self._log_completion_error(e)
                 raise e
 
         if self._native_tools_supported is False:
-            return await self._prompt_based_tool_calling(messages, tools, model, **kwargs)
+            return await self._prompt_based_tool_calling(
+                messages, tools, model, on_text_delta=on_text_delta, **kwargs
+            )
 
         # Build arguments for openai client to try native tool calling
         client_kwargs = {
@@ -216,8 +282,14 @@ class QwenProvider(LLMProvider):
         logger.debug(f"Calling LLM: {model} with {len(messages)} messages and {len(tools)} tools (trying native first)")
 
         try:
-            response = await self._create_with_context_recovery(client_kwargs)
-            parsed = self._parse_openai_response(response)
+            response = await self._create_with_context_recovery(
+                client_kwargs, on_text_delta=on_text_delta
+            )
+            parsed = (
+                response
+                if isinstance(response, dict) and "content" in response
+                else self._parse_openai_response(response)
+            )
             self._native_tools_supported = True
             return parsed
         except Exception as e:
@@ -230,7 +302,9 @@ class QwenProvider(LLMProvider):
             ):
                 logger.warning("Native tool calling failed/not supported by remote endpoint, falling back to prompt-based tool calling.")
                 self._native_tools_supported = False
-                return await self._prompt_based_tool_calling(messages, tools, model, **kwargs)
+                return await self._prompt_based_tool_calling(
+                    messages, tools, model, on_text_delta=on_text_delta, **kwargs
+                )
             else:
                 self._log_completion_error(e)
                 raise e
@@ -334,15 +408,19 @@ class QwenProvider(LLMProvider):
         if not system_msg_found:
             fallback_messages.insert(0, {"role": "system", "content": system_instruction})
         
+        on_text_delta = kwargs.pop("on_text_delta", None)
+        kwargs.pop("stream", None)
         # Make a standard chat completion call
         response = await self._create_with_context_recovery({
             "model": model,
             "messages": fallback_messages,
             **kwargs,
-        })
-        
-        choice = response.choices[0]
-        content = choice.message.content or ""
+        }, on_text_delta=on_text_delta)
+        if isinstance(response, dict) and "content" in response:
+            content = response.get("content") or ""
+        else:
+            choice = response.choices[0]
+            content = choice.message.content or ""
         
         # Robustly extract JSON block from conversational text response
         def _extract_json_block(text: str) -> Optional[Dict[str, Any]]:
