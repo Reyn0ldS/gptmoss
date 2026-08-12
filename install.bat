@@ -90,7 +90,7 @@ echo [SUCCESS] Setup completed successfully!
 echo Run 'start.bat' to start the application.
 echo ===================================================
 popd
-pause
+if not defined GPTMOSS_NO_PAUSE pause
 exit /b 0
 
 :failed
@@ -98,5 +98,5 @@ echo ===================================================
 echo [ERROR] Setup did not complete.
 echo ===================================================
 popd
-pause
+if not defined GPTMOSS_NO_PAUSE pause
 exit /b 1

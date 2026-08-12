@@ -28,9 +28,10 @@ start.bat / start.sh / main.py --task
 
 Le serveur HTTP reste l'unique façade applicative. Le noyau crée les exécutions et le
 moteur en assure la planification, l'ordonnancement par dépendances, les appels LLM et
-outils, les validations et la finalisation. `Scheduler` est aujourd'hui une réserve
-d'architecture : il n'est pas branché au runtime et ne faut donc pas lui attribuer une
-fonction de cron ou de file persistante.
+outils, les validations et la finalisation. `Scheduler` est le service temporel unique du
+processus : démarrage planifié, délais de reprise, attente fournisseur et reprise après
+redémarrage y convergent. Sa file est reconstruite depuis l'état persistant ; ce n'est
+pas un ordonnanceur distribué ni une implémentation de cron.
 
 ## Responsabilités par couche
 
@@ -40,14 +41,16 @@ fonction de cron ou de file persistante.
 | Contrôle du processus | `scripts/server_supervisor.py` | Conserve un point de contrôle local lorsque l'application est arrêtée ; vérifie port, santé et jeton éphémère. |
 | Interface | `gptmoss/api/gui.html` | Composition des tâches, suivi temps réel, bibliothèque, mémoire, skills, réglages, livraisons et contrôle serveur. |
 | API | `gptmoss/api/server.py` | Contrats HTTP/WebSocket, validation Pydantic, cycle de vie, réglages, diagnostics et téléchargements bornés. |
-| Orchestration | `core/kernel.py`, `core/execution.py`, `planners/simple.py` | Création d'exécution, plan adaptatif, dépendances, spécialistes, reprises, approbations et convergence. |
+| Orchestration | `core/kernel.py`, `core/execution.py`, `core/scheduler.py`, `planners/simple.py` | Création/exécution planifiée, plan adaptatif, dépendances, spécialistes, reprises, approbations et convergence. |
+| Domaines projet | `core/domains.py` | Catégories génériques et extensions de marqueurs propres à chaque projet, sans hypothèse métier globale. |
 | Contexte et mémoire | `core/context.py`, `memory/json_store.py`, `capabilities/memory.py` | Contexte borné et mémoire gouvernée par projet, validation, provenance, TTL, déduplication et supersession. |
 | Capacités | `capabilities/*` | Actions outillées exposées au modèle et contrôlées par la politique. |
 | Documents | `core/documents.py`, `core/artifacts.py`, `capabilities/documents.py` | Détection sûre, normalisation, indexation, inventaire, recherche et lecture locale des pièces jointes. |
 | Qualité et livraison | `core/delivery.py`, `document_quality.py`, `professional_delivery.py`, `delivery_package.py` | Contrat gelé, preuves indépendantes, réparations et paquet professionnel DOCX/ZIP signé par empreintes. |
 | Évolution | `core/skills.py`, `core/evolution.py` | Découverte de procédures, profils de spécialistes et évolution locale traçable. |
-| Persistance | `core/state.py`, `core/durable_io.py`, `core/observability.py` | Écritures durables, reprise d'état et télémétrie locale. |
-| Fournisseur | `providers/qwen.py` | Adaptateur OpenAI-compatible, TLS, vision et classification/reprise d'erreurs. |
+| Configuration | `core/settings.py` | Contrat Pydantic unique partagé par bootstrap, API, GUI et tests ; valeurs sûres et limites strictes. |
+| Persistance | `core/state.py`, `core/durable_io.py`, `core/observability.py` | Écritures durables, migration/quarantaine des snapshots, historique borné et télémétrie locale. |
+| Fournisseur | `providers/qwen.py` | Adaptateur OpenAI-compatible, TLS sûr, vision, classification/reprise d'erreurs et fermeture des clients remplacés. |
 
 Les interfaces abstraites de `gptmoss/interfaces/` séparent capacités, LLM, mémoire,
 planification et politique de leurs implémentations actuelles.
@@ -116,11 +119,13 @@ surfaces publiques et tests. Le graphe doit ensuite être régénéré avec
 
 ## Services de fiabilité
 
-Les responsabilités transversales ont des propriétaires explicites :
-`ProviderRecoveryCoordinator` pour la reprise LLM, `DeliveryCoordinator` pour
-l'assurance, `ContextWindowPolicy` et `ToolCallParser` pour Qwen, puis
-`ShellSafetyPolicy` et `ProcessRegistry` pour le shell. `ExecutionEngine` reste la façade
-compatible et délègue à ces services.
+Les responsabilités transversales ont des propriétaires explicites : `Scheduler` pour
+toute échéance, `ProviderRecoveryCoordinator` pour la décision de reprise LLM,
+`DeliveryCoordinator` pour l'assurance, `ApprovalCoordinator` pour les décisions
+humaines, `ContextWindowPolicy` et `ToolCallParser` pour Qwen, puis `ShellSafetyPolicy`,
+`ProcessRegistry` et `ProcessRunner` pour le shell. `ExecutionEngine` reste la façade
+compatible ; la coordination du plan, l'exécution d'une étape et le traitement d'un lot
+d'outils sont désormais des méthodes séparées et testées.
 
 `ExecutionState.status` est validé par `ExecutionStatus`. Les mutations du runtime passent
 par `StateEngine.transition_execution`, qui contrôle la transition et conserve son motif,
@@ -129,8 +134,9 @@ snapshots ; l'arrêt FastAPI effectue un flush final puis retire son abonnement 
 
 ## Dette et limites explicites
 
-- `core/scheduler.py` est un stub non connecté ; la chronologie courante repose sur les
-  dépendances du plan et les tâches `asyncio`, pas sur un ordonnanceur persistant.
+- La file du `Scheduler` vit en mémoire ; les échéances importantes sont persistées dans
+  l'exécution puis réinscrites au bootstrap, mais plusieurs processus ne partagent pas
+  encore une file distribuée.
 - Le PDF extrait le texte local avec `pypdf` ; l'OCR des pages image n'est pas implémenté.
 - La GUI est volontairement un fichier HTML/JS autonome, ce qui simplifie le paquet
   offline mais concentre une grande surface dans un seul fichier.

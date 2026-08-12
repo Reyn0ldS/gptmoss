@@ -20,11 +20,16 @@ from pydantic import BaseModel, Field
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 GUI_FILE_PATH = os.path.join(CURRENT_DIR, "gui.html")
 
-from gptmoss.core import EventBus, Event, StateEngine, RuntimeKernel, ExecutionEngine, DEFAULT_SYSTEM_PROMPT
+from gptmoss.core import EventBus, Event, StateEngine, RuntimeKernel, ExecutionEngine, DEFAULT_SYSTEM_PROMPT, RuntimeSettings, ProjectDomainRegistry
 from gptmoss.core.artifacts import ArtifactStore
 from gptmoss.capabilities.documents import DocumentCapability
 from gptmoss.core.evolution import AgentProfileRegistry, AutonomousSkillLifecycle
 from gptmoss.core.skills import SkillRegistry
+from gptmoss.core.settings import (
+    DEFAULT_MAX_ATTACHMENT_TEXT_CHARS,
+    DEFAULT_MAX_TRANSITIONS_PER_EXECUTION,
+    DEFAULT_MAX_UPLOAD_BYTES,
+)
 
 logger = logging.getLogger("gptmoss.api")
 
@@ -34,11 +39,14 @@ class SubmitTaskRequest(BaseModel):
     agent_config: Optional[Dict[str, Any]] = None
     project_id: Optional[str] = None
     attachment_ids: List[str] = Field(default_factory=list)
+    delay_seconds: float = Field(default=0, ge=0, le=31_536_000)
+    run_at: Optional[float] = Field(default=None, ge=0)
 
 class ProjectRequest(BaseModel):
     id: str = Field(pattern=r"^[a-z0-9][a-z0-9_-]{0,63}$")
     name: str = Field(min_length=1, max_length=200)
     path: Optional[str] = Field(default=None, max_length=2_000)
+    domains: Dict[str, List[str]] = Field(default_factory=dict)
 
 class UploadArtifactRequest(BaseModel):
     filename: str
@@ -79,39 +87,8 @@ class SubAgentRequest(BaseModel):
 class ConfirmationRequest(BaseModel):
     confirm: bool = False
 
-class SettingsRequest(BaseModel):
+class SettingsRequest(RuntimeSettings):
     api_key: str = ""
-    base_url: str
-    model_name: str
-    vision_mode: str = Field(default="auto", pattern=r"^(auto|enabled|disabled)$")
-    ssl_verify: bool
-    ssl_cert_path: str
-    denied_capabilities: List[str]
-    approval_required_capabilities: List[str]
-    workspace_full_autonomy: bool = False
-    continue_while_progress: bool = True
-    adaptive_resource_management: bool = True
-    strict_skill_capabilities: bool = False
-    allow_nested_delegation: bool = True
-    max_delegation_depth: int = Field(default=0, ge=0)
-    autonomous_specialization: bool = True
-    autonomous_skill_creation: bool = True
-    autonomous_skill_improvement: bool = True
-    skill_coverage_threshold: int = Field(default=4, ge=1)
-    max_autonomous_skills_per_execution: int = Field(default=0, ge=0)
-    workspace_path: str
-    restrict_to_workspace: bool
-    allow_subfolders: bool
-    projects: List[Dict[str, Any]]
-    max_step_iterations: int = Field(default=30, ge=1)
-    max_step_retries: int = Field(default=2, ge=0)
-    max_context_chars: int = Field(default=12_000, ge=1)
-    max_upload_bytes: int = Field(default=0, ge=0)
-    max_attachment_text_chars: int = Field(default=0, ge=0)
-    safe_shell_mode: bool = True
-    shell_timeout_seconds: int = Field(default=0, ge=0)
-    shell_max_output_chars: int = Field(default=12_000, ge=0)
-    default_skills: List[str] = Field(default_factory=list)
     confirm_sensitive: bool = False
 
 class AppState:
@@ -137,6 +114,7 @@ async def lifespan(_: FastAPI):
         app_state.flush_task = app_state.state_engine.start_db_flush_loop(app_state.event_bus)
         logger.info("Started debounced state persistence loop")
     if app_state.execution_engine:
+        app_state.execution_engine.scheduler.start()
         app_state.execution_engine.resume_waiting_provider_executions()
         app_state.execution_engine.resume_interrupted_executions()
 
@@ -144,7 +122,7 @@ async def lifespan(_: FastAPI):
         yield
     finally:
         if app_state.execution_engine:
-            await app_state.execution_engine.stop_provider_resume_tasks()
+            await app_state.execution_engine.stop_runtime_services()
         if app_state.flush_task:
             if app_state.state_engine:
                 await app_state.state_engine.stop_db_flush_loop(flush=True)
@@ -360,9 +338,19 @@ async def submit_task(req: SubmitTaskRequest):
     })
     if project.get("path"):
         variables["project_path"] = str(Path(str(project["path"])).resolve())
+    if project.get("domains"):
+        variables["project_domains"] = project["domains"]
     agent_config["variables"] = variables
-    exec_id = await app_state.kernel.submit_task(req.task.strip(), agent_config)
-    return {"execution_id": exec_id, "status": "running"}
+    exec_id = await app_state.kernel.submit_task(
+        req.task.strip(), agent_config,
+        delay_seconds=req.delay_seconds, run_at=req.run_at,
+    )
+    state = app_state.state_engine.get_execution(exec_id)
+    return {
+        "execution_id": exec_id,
+        "status": "scheduled" if float(state.variables.get("scheduled_for", 0)) > time.time() else "running",
+        "scheduled_for": state.variables.get("scheduled_for"),
+    }
 
 @app.get("/projects")
 async def list_projects():
@@ -377,6 +365,14 @@ async def create_project(req: ProjectRequest):
     if any(isinstance(project, dict) and project.get("id") == req.id for project in projects):
         raise HTTPException(status_code=409, detail=f"Project '{req.id}' already exists.")
     project = {"id": req.id, "name": req.name.strip()}
+    if req.domains:
+        registry = ProjectDomainRegistry()
+        try:
+            for name, markers in req.domains.items():
+                registry.register(name, markers)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        project["domains"] = req.domains
     if req.path and req.path.strip():
         path = Path(req.path.strip()).expanduser()
         if not path.is_absolute():
@@ -1152,8 +1148,9 @@ async def get_settings():
         config.setdefault("vision_mode", "auto")
         config.setdefault("max_step_retries", 2)
         config.setdefault("max_context_chars", 12_000)
-        config.setdefault("max_upload_bytes", 0)
-        config.setdefault("max_attachment_text_chars", 0)
+        config.setdefault("max_upload_bytes", DEFAULT_MAX_UPLOAD_BYTES)
+        config.setdefault("max_attachment_text_chars", DEFAULT_MAX_ATTACHMENT_TEXT_CHARS)
+        config.setdefault("max_transitions_per_execution", DEFAULT_MAX_TRANSITIONS_PER_EXECUTION)
         config.setdefault("safe_shell_mode", True)
         config.setdefault("shell_timeout_seconds", 0)
         config.setdefault("shell_max_output_chars", 12_000)
@@ -1203,6 +1200,10 @@ async def get_settings():
         "max_context_chars": getattr(app_state.execution_engine.context_engine, "max_history_chars", 12_000),
         "max_upload_bytes": getattr(_artifact_store(), "max_bytes", 0),
         "max_attachment_text_chars": getattr(_artifact_store(), "max_text_chars", 0),
+        "max_transitions_per_execution": getattr(
+            app_state.state_engine, "max_transitions_per_execution",
+            DEFAULT_MAX_TRANSITIONS_PER_EXECUTION,
+        ),
         "safe_shell_mode": True,
         "shell_timeout_seconds": getattr(app_state.execution_engine.get_capability("shell"), "timeout_seconds", 0),
         "shell_max_output_chars": getattr(app_state.execution_engine.get_capability("shell"), "max_output_chars", 12_000),
@@ -1325,6 +1326,7 @@ async def update_settings(req: SettingsRequest):
         "max_context_chars": req.max_context_chars,
         "max_upload_bytes": req.max_upload_bytes,
         "max_attachment_text_chars": req.max_attachment_text_chars,
+        "max_transitions_per_execution": req.max_transitions_per_execution,
         "safe_shell_mode": req.safe_shell_mode,
         "shell_timeout_seconds": req.shell_timeout_seconds,
         "shell_max_output_chars": req.shell_max_output_chars,
@@ -1366,6 +1368,8 @@ async def update_settings(req: SettingsRequest):
     app_state.execution_engine.max_delegation_depth = req.max_delegation_depth
     app_state.execution_engine.context_engine.adaptive = req.adaptive_resource_management
     app_state.execution_engine.context_engine.max_history_chars = req.max_context_chars
+    if app_state.state_engine:
+        app_state.state_engine.max_transitions_per_execution = req.max_transitions_per_execution
     workspace_changed = Path(workspace_root).resolve() != Path(req.workspace_path).resolve()
     if workspace_changed:
         app_state.execution_engine.artifact_store = ArtifactStore(

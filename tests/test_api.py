@@ -187,6 +187,29 @@ def test_api_submit_and_query_flow():
     assert len(body_list) >= 1
     assert any(x["execution_id"] == exec_id for x in body_list)
 
+
+def test_api_can_schedule_execution_without_running_it_early():
+    event_bus = EventBus()
+    state_engine = StateEngine()
+    llm = MockLLMProvider()
+    engine = ExecutionEngine(
+        event_bus, state_engine, ContextEngine(state_engine, RAMMemoryProvider()),
+        llm, SimplePlanner(llm), SimplePolicyProvider(),
+    )
+    kernel = RuntimeKernel(event_bus, state_engine, engine)
+    init_app(kernel, engine, state_engine, event_bus)
+    client = ASGIClient(app)
+
+    response = client.post("/executions", json={
+        "task": "Scheduled task", "delay_seconds": 3600,
+    })
+
+    assert response.status_code == 201
+    assert response.json()["status"] == "scheduled"
+    execution_id = response.json()["execution_id"]
+    assert state_engine.get_execution(execution_id).status == "pending"
+    assert engine.scheduler.has(f"execution:{execution_id}")
+
 def test_api_settings_flow(tmp_path):
     # Setup test dependencies
     event_bus = EventBus()
@@ -466,6 +489,7 @@ def test_api_settings_preserve_secret_and_context_budget(tmp_path):
     assert exec_engine.context_engine.max_history_chars == 24000
     assert exec_engine.artifact_store.max_bytes == 100000
     assert exec_engine.artifact_store.max_text_chars == 5000
+    assert state_engine.max_transitions_per_execution == 2000
     assert exec_engine.autonomous_specialization is False
     assert exec_engine.skill_lifecycle.creation_enabled is True
     assert exec_engine.skill_lifecycle.improvement_enabled is False
@@ -486,13 +510,25 @@ def test_api_settings_preserve_secret_and_context_budget(tmp_path):
     invalid["max_context_chars"] = 0
     assert client.post("/api/settings", json=invalid).status_code == 422
 
-    created_project = client.post("/projects", json={"id": "proj-atomic", "name": "Atomic Project"})
+    created_project = client.post("/projects", json={
+        "id": "proj-atomic", "name": "Atomic Project",
+        "domains": {"legal-operations": ["dossier contentieux"]},
+    })
     assert created_project.status_code == 201
     assert (tmp_path / "projects" / "proj-atomic").is_dir()
     assert client.post("/projects", json={"id": "proj-atomic", "name": "Duplicate"}).status_code == 409
     private_config = json.loads((tmp_path / "config.json").read_text(encoding="utf-8"))
     assert private_config["api_key"] == "secret-key"
-    assert any(project["id"] == "proj-atomic" for project in private_config["projects"])
+    atomic_project = next(
+        project for project in private_config["projects"]
+        if project["id"] == "proj-atomic"
+    )
+    assert atomic_project["domains"] == {"legal-operations": ["dossier contentieux"]}
+    invalid_domains = client.post("/projects", json={
+        "id": "proj-invalid-domain", "name": "Invalid",
+        "domains": {"x": []},
+    })
+    assert invalid_domains.status_code == 422
 
     # The bootstrap config remains authoritative when agent files move elsewhere.
     moved_workspace = tmp_path / "agent-files"

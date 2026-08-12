@@ -155,8 +155,9 @@ La configuration active est `workspace/config.json`. Au démarrage, GPTMOSS la n
   "restrict_to_workspace": true,
   "allow_subfolders": true,
   "max_context_chars": 12000,
-  "max_upload_bytes": 0,
-  "max_attachment_text_chars": 0,
+  "max_upload_bytes": 104857600,
+  "max_attachment_text_chars": 5000000,
+  "max_transitions_per_execution": 2000,
   "max_step_iterations": 30,
   "max_step_retries": 2,
   "safe_shell_mode": true,
@@ -193,14 +194,15 @@ La configuration active est `workspace/config.json`. Au démarrage, GPTMOSS la n
 | `restrict_to_workspace` | Empêche les accès de fichiers hors de la racine. | `true`. |
 | `allow_subfolders` | Autorise les opérations dans les sous-dossiers. | `true`. |
 | `max_context_chars` | Plancher du contexte. En mode adaptatif, il grandit avec la tâche et le plan puis s'ajuste à la limite réelle du fournisseur. | `12000`, sans plafond applicatif fixe. |
-| `max_upload_bytes` | Plafond applicatif d’un dépôt ; `0` laisse seulement les capacités mémoire/disque et l’infrastructure HTTP s’appliquer. | `0` en environnement local contrôlé. |
-| `max_attachment_text_chars` | Budget explicite par texte joint ; `0` utilise le budget contextuel adaptatif de la tâche. | `0`. |
+| `max_upload_bytes` | Plafond applicatif strict d’un dépôt, validé par le contrat commun `RuntimeSettings`. | `104857600` (100 Mio). |
+| `max_attachment_text_chars` | Maximum de texte normalisé conservé par pièce jointe avant sélection contextuelle. | `5000000`. |
+| `max_transitions_per_execution` | Historique chronologique conservé par exécution ; les plus anciennes transitions sont élaguées. | `2000`. |
 | `max_step_iterations` | Budget de base de stagnation. En mode adaptatif il grandit avec le contrat ; tout progrès réel permet de continuer. | `30`, sans plafond fixe. |
 | `max_step_retries` | Base de reprises autonomes, augmentée selon la taille du contrat en mode adaptatif. | `2`, sans plafond fixe. |
 | `projects` | Projets proposés dans l'interface. | Voir ci-dessous. |
 | `safe_shell_mode` | Active le blocage des commandes destructrices connues. | `true`. |
 | `shell_timeout_seconds` | Délai explicite ; `0` sélectionne automatiquement un budget selon test, build, installation ou commande générale. | `0`. |
-| `shell_max_output_chars` | Taille conservée ; `0` garde la sortie complète. | `12000` ou `0`, sans plafond fixe. |
+| `shell_max_output_chars` | Taille cumulée stdout/stderr renvoyée au modèle ; le processus écrit d’abord dans des fichiers temporaires afin de borner la RAM. | `12000`. |
 | `default_skills` | Skills appliqués par défaut. | `[]` pour la sélection automatique. |
 
 Les variables d'environnement `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `OPENAI_MODEL_NAME` et `DASHSCOPE_API_KEY` servent de valeurs de secours quand le champ équivalent n'est pas renseigné. `main.py` charge `.env` au démarrage.
@@ -219,11 +221,14 @@ Vous pouvez ajouter un projet à la configuration :
 {
   "id": "site-demo",
   "name": "Site de démonstration",
-  "path": "D:/Projets/site-demo"
+  "path": "D:/Projets/site-demo",
+  "domains": {
+    "catalogue-industriel": ["nomenclature produit", "référence usine"]
+  }
 }
 ```
 
-Un `path` personnalisé sort potentiellement du workspace : n'utilisez cette option qu'avec un répertoire explicitement choisi et de confiance. L'identifiant doit être simple (pas de `..`).
+Un `path` personnalisé sort potentiellement du workspace : n'utilisez cette option qu'avec un répertoire explicitement choisi et de confiance. L'identifiant doit être simple (pas de `..`). Le dictionnaire optionnel `domains` ajoute des catégories et marqueurs propres à ce projet sans modifier le cœur de GPTMOSS.
 
 ### Modifier les réglages à chaud
 
@@ -414,7 +419,7 @@ Le client doit garder la connexion ouverte et peut envoyer un message périodiqu
 
 ## Exécutions, plan et validations
 
-Une tâche est d'abord classée selon sa taille, ses domaines et ses résultats attendus. Le plan adaptatif fournit un rôle canonique (`architect`, `security`, `developer`, `qa`, `debugger`, `writer` ou `coordinator`) et un profil métier distinct (`specialist`, `expertise`, artefacts, critères d'acceptation et commandes de vérification). Une demande mêlant vision, ML, géométrie 3D, vêtements, interface et confidentialité crée donc plusieurs ingénieurs spécialisés plutôt qu'un seul développeur générique. Le moteur rejette un plan complexe sous-dimensionné, les poids de modèles prétendument générés et les workflows vêtement qui omettent le corps complet.
+Une tâche est d'abord classée selon sa taille, ses domaines et ses résultats attendus. Le socle ne contient que des domaines génériques (logiciel, données/automatisation, traitement intelligent, média/espace, expérience utilisateur, sécurité, opérations offline et documents). Chaque projet peut ajouter ses propres domaines par configuration. Le plan adaptatif fournit ensuite un rôle canonique (`architect`, `security`, `developer`, `qa`, `debugger`, `writer` ou `coordinator`) et un profil métier distinct (`specialist`, `expertise`, artefacts, critères d'acceptation et commandes de vérification). Les règles spécialisées livrées dans certains skills sont optionnelles et ne sont activées que sur demande explicite.
 
 Le moteur valide les identifiants, les références et l'absence de cycle avant de démarrer. Les étapes indépendantes s'exécutent en parallèle. Un spécialiste ne peut annoncer sa réussite qu'après création des artefacts non vides, exécution exacte des vérifications déclarées et remise d'un résultat JSON structuré. Les agents QA importent le code réel : les dépendances locales factices, mocks de remplacement et géométries aléatoires sont refusés.
 
@@ -495,7 +500,7 @@ allowed-tools: documents filesystem
 Instructions détaillées données à l'agent lorsqu'il sélectionne ce skill.
 ```
 
-`name` doit contenir uniquement lettres minuscules, chiffres, `_` ou `-`. `allowed-tools` accepte les outils standard séparés par des espaces ; l'ancien champ GPTMOSS `allowed_capabilities` reste lu pour compatibilité. Par défaut, un skill ajoute sa procédure sans réduire les capacités générales. Si `strict_skill_capabilities` est activé, ses outils déclarés bornent aussi les schémas exposés. En plus des skills généraux (`secure-python`, `test-and-debug`, `document-analysis`, `project-architecture`, `documentation`, `code-review`), le paquet fournit des skills spécialisés : `requirements-feasibility`, `computer-vision-ml`, `geometry-3d`, `digital-garments`, `backend-api`, `frontend-3d`, `integration-delivery` et `biometric-privacy`.
+`name` doit contenir uniquement lettres minuscules, chiffres, `_` ou `-`. `allowed-tools` accepte les outils standard séparés par des espaces ; l'ancien champ GPTMOSS `allowed_capabilities` reste lu pour compatibilité. Le frontmatter `auto-select: false` réserve un skill à une demande explicite. Par défaut, un skill ajoute sa procédure sans réduire les capacités générales. Si `strict_skill_capabilities` est activé, ses outils déclarés bornent aussi les schémas exposés. Les skills généraux peuvent être classés automatiquement ; les packs étroitement spécialisés (vision, 3D, vêtements numériques ou biométrie) restent disponibles mais ne définissent jamais le comportement global de GPTMOSS.
 
 Deux modes de sélection existent :
 
@@ -530,7 +535,7 @@ Consultez aussi [SKILLS.md](SKILLS.md) pour les règles de compatibilité de ski
 
 Les artefacts sont stockés sous `<workspace>/uploads/`. Un fichier reçoit un identifiant UUID, un fichier de métadonnées et une empreinte SHA-256. Les documents reçoivent aussi une représentation normalisée mise en cache et des chunks dans un index lexical local persistant.
 
-Types acceptés : TXT/Markdown, JSON, CSV, HTML local, DOCX, PPTX, PDF texte, PNG, JPEG et WebP. La taille est pilotée par `max_upload_bytes` ; `0` n'impose pas de plafond applicatif fixe. Les noms sont assainis, les images sont contrôlées par signature et le contenu réel des documents est détecté. DOCX et PPTX sont analysés localement avec les modules ZIP/XML standard ; PDF est extrait localement par page avec `pypdf`, inclus dans le runtime offline. Les archives dangereuses sont refusées. L'OCR des PDF numérisés reste différé et les pages sans texte sont signalées explicitement.
+Types acceptés : TXT/Markdown, JSON, CSV, HTML local, DOCX, PPTX, PDF texte, PNG, JPEG et WebP. La taille est strictement bornée par `max_upload_bytes` (100 Mio par défaut) et le texte normalisé par `max_attachment_text_chars`. Les noms sont assainis, les images sont contrôlées par signature et le contenu réel des documents est détecté. DOCX et PPTX sont analysés localement avec les modules ZIP/XML standard ; PDF est extrait localement par page avec `pypdf`, inclus dans le runtime offline. Les archives dangereuses sont refusées. L'OCR des PDF numérisés reste différé et les pages sans texte sont signalées explicitement.
 
 Les parseurs ne chargent aucune ressource distante d'un HTML ou d'un document Office. La recherche accent-insensible couvre tout le corpus et conserve fichier, titres, blocs et diapositives dans la provenance. Consultez le [guide complet du workflow documentaire local](docs/local-document-workflow.md) pour les quatre formats prioritaires, l'API de recherche, les références, les politiques qualité, le point d'entrée portable et le diagnostic.
 
@@ -606,6 +611,9 @@ Après installation des dépendances :
 
 ```powershell
 python -m pytest -q
+python scripts/run_delivery_benchmarks.py
+python scripts/run_quality_benchmarks.py
+python scripts/verify_source_release.py
 ```
 
 L'audit de mise en page utilise le vrai moteur Microsoft Edge contre un serveur
@@ -615,14 +623,13 @@ GPTMOSS déjà démarré :
 python scripts/browser_layout_audit.py http://127.0.0.1:8000/
 ```
 
-Les tests vérifient notamment l'API, le moteur d'exécution, la persistance atomique, les
-transitions chronologiques, les politiques Qwen/shell, le scheduler, la mémoire, les
-skills, les artefacts, le workflow documentaire et les relations GUI/API/scripts. La
-validation complète du 12 août 2026 a produit :
-
-- `266 passed` pour la suite GPTMOSS ;
-- 48/48 cas Edge réussis entre 360 × 740 et 1920 × 1080, avec des facteurs d'échelle de 100 % à 200 % ;
-- aucun débordement horizontal global et aucun élément signalé hors écran dans les scénarios vide, contenu, approbation, réglages et bibliothèque.
+Les tests vérifient notamment l'API, le moteur d'exécution, la persistance atomique et ses
+migrations, les transitions chronologiques bornées, le cycle de vie Qwen, les sorties
+shell bornées, l’ordonnanceur unique, la mémoire, les skills, les artefacts, le workflow
+documentaire et les relations GUI/API/scripts. La CI rejoue la suite sous Linux et
+Windows, impose un seuil de couverture, vérifie les deux benchmarks, les cartographies et
+le manifeste source, puis installe et démarre une archive Git propre sans accès réseau
+avant l’audit Edge.
 
 Le script Edge renvoie un code différent de zéro si le navigateur échoue, si
 l'instrumentation de page est absente, si la page déborde horizontalement ou si un

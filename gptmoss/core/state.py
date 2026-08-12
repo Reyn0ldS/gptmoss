@@ -16,6 +16,7 @@ from gptmoss.core.durable_io import write_text_atomic
 
 logger = logging.getLogger("gptmoss.state")
 STATE_SCHEMA_VERSION = 1
+DEFAULT_MAX_TRANSITIONS_PER_EXECUTION = 2_000
 
 
 class ExecutionStatus(str, Enum):
@@ -109,7 +110,8 @@ class StateEngine:
     """
     State Engine to manage partitioned states across various boundaries.
     """
-    def __init__(self, persist_path: Optional[str] = None):
+    def __init__(self, persist_path: Optional[str] = None,
+                 max_transitions_per_execution: int = DEFAULT_MAX_TRANSITIONS_PER_EXECUTION):
         self.persist_path = persist_path
         self.conversations: Dict[str, ConversationState] = {}
         self.executions: Dict[str, ExecutionState] = {}
@@ -121,14 +123,50 @@ class StateEngine:
         self._flush_task: Optional[asyncio.Task] = None
         self._flush_event_bus = None
         self._flush_callback = None
+        self.max_transitions_per_execution = max(100, int(max_transitions_per_execution))
+        self.corrupt_backup_path: Optional[str] = None
         self._load_from_disk()
+
+    @staticmethod
+    def _migrate_snapshot(data: Dict[str, Any]) -> Dict[str, Any]:
+        """Upgrade known legacy snapshots and refuse unknown future schemas."""
+        version = int(data.get("schema_version", 0))
+        if version > STATE_SCHEMA_VERSION:
+            raise ValueError(
+                f"State schema {version} is newer than supported schema {STATE_SCHEMA_VERSION}."
+            )
+        migrated = dict(data)
+        while version < STATE_SCHEMA_VERSION:
+            if version == 0:
+                migrated.setdefault("conversations", {})
+                migrated.setdefault("executions", {})
+                migrated.setdefault("agents", {})
+                migrated.setdefault("workspaces", {})
+                migrated.setdefault("knowledges", {})
+                migrated.setdefault("users", {})
+                version = 1
+                migrated["schema_version"] = version
+                continue
+            raise ValueError(f"No state migration is available from schema {version}.")
+        return migrated
+
+    def _quarantine_invalid_snapshot(self) -> None:
+        if not self.persist_path or not os.path.exists(self.persist_path):
+            return
+        backup = f"{self.persist_path}.corrupt-{int(time.time() * 1000)}"
+        try:
+            os.replace(self.persist_path, backup)
+            self.corrupt_backup_path = backup
+            logger.error("Invalid state snapshot quarantined at %s", backup)
+        except OSError as error:
+            logger.error("Unable to quarantine invalid state snapshot: %s", error)
 
     def _load_from_disk(self):
         if not self.persist_path or not os.path.exists(self.persist_path):
             return
         try:
             with open(self.persist_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
+                data = self._migrate_snapshot(json.load(f))
                 
             # Load conversations
             for k, v in data.get("conversations", {}).items():
@@ -155,6 +193,7 @@ class StateEngine:
                 self.users[k] = UserState(**v)
         except Exception as e:
             logger.error(f"Failed to load state from disk: {e}")
+            self._quarantine_invalid_snapshot()
 
     def _snapshot(self) -> Dict[str, Any]:
         return {
@@ -221,6 +260,9 @@ class StateEngine:
             actor=actor,
             correlation_id=correlation_id,
         ))
+        overflow = len(state.transitions) - self.max_transitions_per_execution
+        if overflow > 0:
+            del state.transitions[:overflow]
         return state
 
     def get_agent(self, agent_id: str) -> AgentState:

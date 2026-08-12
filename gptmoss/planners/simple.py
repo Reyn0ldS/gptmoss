@@ -9,51 +9,16 @@ from typing import Any, Dict, List
 from gptmoss.interfaces.llm import LLMProvider
 from gptmoss.interfaces.planner import PlannerProvider
 from gptmoss.core.delivery import extract_requirements
+from gptmoss.core.domains import DEFAULT_DOMAIN_REGISTRY, ProjectDomainRegistry
 
 logger = logging.getLogger("gptmoss.planners.simple")
 
-DOMAIN_MARKERS = {
-    "software-engineering": ("application", "logiciel", "programme", "software", "code", "api", "site web", "project", "projet"),
-    "computer-vision": ("image", "photo", "visage", "face", "segmentation", "vision par ordinateur", "computer vision"),
-    "machine-learning": ("ia", "ai", "modèle", "model", "apprentissage", "inférence", "inference"),
-    "3d-graphics": ("3d", "maillage", "mesh", "texture", "rendu", "render"),
-    "human-avatar": ("avatar", "corps", "body", "humain", "human", "visage", "face"),
-    "digital-garments": ("vêtement", "vetement", "garment", "cloth", "habiller", "essayage virtuel"),
-    "user-interface": ("interface utilisateur", "user interface", "ui", "web", "desktop", "utilisateur"),
-    "data-privacy": ("visage", "face", "biométr", "biometr", "personnel", "privacy", "rgpd", "gdpr"),
-    "offline-delivery": ("hors-ligne", "hors ligne", "offline", "portable", "autonome"),
-    "document-workflow": (
-        "docx", "pptx", "corpus documentaire", "analyse documentaire",
-        "document analysis", "rédaction professionnelle", "long-form document",
-        "matrice de traçabilité", "evidence matrix",
-    ),
-}
-
-# Correct Unicode spellings coexist with historical mojibake strings so old
-# persisted prompts remain classifiable while new UTF-8 requests stay exact.
-DOMAIN_MARKERS["machine-learning"] += ("modèle", "inférence")
-DOMAIN_MARKERS["digital-garments"] += ("vêtement", "vêtements")
-
-
-def _contains_domain_marker_legacy(text: str, marker: str) -> bool:
-    return bool(re.search(
-        rf"(?<![\wÀ-ÿ]){re.escape(marker)}(?![\wÀ-ÿ])",
-        text,
-        flags=re.IGNORECASE,
-    ))
-
-
-def _contains_domain_marker(text: str, marker: str) -> bool:
-    return bool(re.search(rf"(?<!\w){re.escape(marker)}(?!\w)", text, flags=re.IGNORECASE))
-
-
-def analyze_task_complexity(task: str) -> Dict[str, Any]:
+def analyze_task_complexity(
+    task: str, domain_registry: ProjectDomainRegistry | None = None
+) -> Dict[str, Any]:
     """Return deterministic hints so the LLM cannot silently trivialize a task."""
     text = str(task or "").lower()
-    domains = [
-        domain for domain, markers in DOMAIN_MARKERS.items()
-        if any(_contains_domain_marker(text, marker) for marker in markers)
-    ]
+    domains = (domain_registry or DEFAULT_DOMAIN_REGISTRY).classify(text)
     requested_outcomes = len(re.findall(
         r"\b(?:doit|devra|pouvoir|créer|creer|faire|importer|extrapoler|intégrer|integrer|"
         r"must|should|create|build|implement|support|import)\b", text,
@@ -401,8 +366,10 @@ def _step(step_id: int, role: str, specialist: str, description: str,
 class SimplePlanner(PlannerProvider):
     """Generate an adaptive specialist DAG and reject undersized plans."""
 
-    def __init__(self, llm_provider: LLMProvider):
+    def __init__(self, llm_provider: LLMProvider,
+                 domain_registry: ProjectDomainRegistry | None = None):
         self.llm_provider = llm_provider
+        self.domain_registry = domain_registry or ProjectDomainRegistry()
 
     @staticmethod
     def _cross_domain_fallback(task: str, analysis: Dict[str, Any]) -> Dict[str, Any]:
@@ -781,7 +748,15 @@ class SimplePlanner(PlannerProvider):
                 direct_step = {"id": 0, "description": task, "dependencies": [], "status": "pending"}
             return {"steps": [direct_step], "rationale": "Direct execution of a delegated specialist step."}
 
-        analysis = analyze_task_complexity(task)
+        domain_registry = self.domain_registry
+        project_domains = kwargs.get("project_domains")
+        if isinstance(project_domains, dict) and project_domains:
+            domain_registry = ProjectDomainRegistry(self.domain_registry.definitions)
+            for name, markers in project_domains.items():
+                if not isinstance(markers, list):
+                    raise ValueError(f"Project domain markers must be an array: {name}")
+                domain_registry.register(str(name), markers)
+        analysis = analyze_task_complexity(task, domain_registry)
         capabilities_list = [schema["function"]["name"] for schema in capabilities_schemas]
         prompt = (
             "You are GPTMOSS's adaptive planning engine. Produce a realistic specialist DAG, not a generic seven-role checklist.\n"

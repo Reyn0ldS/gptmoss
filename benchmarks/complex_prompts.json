@@ -2,8 +2,8 @@
   "schema_version": 1,
   "prompts": [
     {
-      "id": "avatar-garment-3d",
-      "prompt": "Créer un logiciel local qui reconstruit un avatar 3D corps entier à partir d'une image de visage, reconstruit des vêtements 3D depuis leurs images, puis ajuste les mêmes vêtements sur plusieurs avatars avec export et interface utilisateur."
+      "id": "multimodal-operations-platform",
+      "prompt": "Créer une plateforme locale et extensible qui ingère plusieurs formats de médias et de données, exécute des adaptateurs optionnels, valide leurs sorties, conserve la provenance, expose une API et une interface, puis produit des exports auditables hors ligne."
     },
     {
       "id": "offline-warehouse",

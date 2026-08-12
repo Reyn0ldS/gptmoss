@@ -4,6 +4,7 @@ import sys
 import time
 
 import pytest
+from pydantic import ValidationError
 
 from gptmoss.capabilities.shell import ShellCapability
 from gptmoss.core.context import ContextEngine
@@ -11,7 +12,22 @@ from gptmoss.core.execution import ExecutionEngine
 from gptmoss.core.event_bus import EventBus
 from gptmoss.core.observability import TraceRecorder
 from gptmoss.core.state import StateEngine
+from gptmoss.core.settings import RuntimeSettings
 from gptmoss.memory.ram import RAMMemoryProvider
+
+
+def test_runtime_settings_enforce_secure_bounded_defaults():
+    settings = RuntimeSettings()
+
+    assert settings.ssl_verify is True
+    assert settings.max_upload_bytes == 100 * 1024 * 1024
+    assert settings.max_attachment_text_chars == 5_000_000
+    assert settings.max_transitions_per_execution == 2_000
+    assert settings.shell_max_output_chars == 12_000
+    with pytest.raises(ValidationError):
+        RuntimeSettings(max_upload_bytes=0)
+    with pytest.raises(ValidationError):
+        RuntimeSettings(shell_max_output_chars=0)
 
 
 @pytest.mark.asyncio

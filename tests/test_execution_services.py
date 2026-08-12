@@ -5,6 +5,7 @@ import pytest
 from gptmoss.core.delivery_coordinator import DeliveryCoordinator
 from gptmoss.core.event_bus import EventBus
 from gptmoss.core.provider_recovery import ProviderRecoveryCoordinator
+from gptmoss.core.scheduler import Scheduler
 from gptmoss.core.state import StateEngine
 from tests.mock_llm import MockLLMProvider
 
@@ -43,14 +44,18 @@ async def test_provider_resume_schedule_is_idempotent_and_stoppable():
     async def execute(execution_id, task):
         executed.append((execution_id, task))
 
+    scheduler = Scheduler()
     coordinator = ProviderRecoveryCoordinator(
-        EventBus(), state, MockLLMProvider(), execute, max_attempts=2
+        EventBus(), state, MockLLMProvider(), execute, max_attempts=2,
+        scheduler=scheduler,
     )
     coordinator.schedule("waiting", delay_seconds=30)
-    first = coordinator.tasks["waiting"]
+    first = coordinator.jobs["waiting"]
     coordinator.schedule("waiting", delay_seconds=30)
-    assert coordinator.tasks["waiting"] is first
+    assert coordinator.jobs["waiting"] == first
+    assert scheduler.has(first)
     await coordinator.stop()
-    assert first.done()
-    assert coordinator.tasks == {}
+    assert not scheduler.has(first)
+    assert coordinator.jobs == {}
     assert executed == []
+    await scheduler.stop(cancel_pending=True)

@@ -38,6 +38,7 @@ from gptmoss.core.provider_recovery import (
     ProviderRecoveryCoordinator,
     ProviderUnavailableError as RecoveryProviderUnavailableError,
 )
+from gptmoss.core.scheduler import Scheduler
 
 ROLE_DISPLAY_NAMES = {
     "architect": "Architecte",
@@ -307,6 +308,7 @@ class ExecutionEngine:
         strict_skill_capabilities: bool = False,
         allow_nested_delegation: bool = True,
         max_delegation_depth: int = 0,
+        scheduler: Optional[Scheduler] = None,
     ):
         self.event_bus = event_bus
         self.state_engine = state_engine
@@ -335,14 +337,13 @@ class ExecutionEngine:
         self.autonomous_specialization = bool(autonomous_specialization)
         self._capabilities: Dict[str, Any] = {}  # capability_name -> instance
         self._execution_locks: Dict[str, asyncio.Lock] = {}
-        self._provider_resume_tasks: Dict[str, asyncio.Task] = {}
         self._path_locks: Dict[str, asyncio.Lock] = {}
+        self.scheduler = scheduler or Scheduler()
         self.provider_recovery = ProviderRecoveryCoordinator(
             event_bus, state_engine, llm_provider,
             lambda execution_id, task: self.execute_task(execution_id, task),
-            self.max_step_iterations,
+            self.max_step_iterations, self.scheduler,
         )
-        self._provider_resume_tasks = self.provider_recovery.tasks
         self.delivery_coordinator = DeliveryCoordinator(state_engine, self.get_capability)
         self.approval_coordinator = ApprovalCoordinator(
             state_engine, event_bus,
@@ -411,10 +412,37 @@ class ExecutionEngine:
                 continue
             task = str(state.variables.get("task") or "").strip()
             if task:
-                asyncio.create_task(self.execute_task(execution_id, task))
+                scheduled_for = float(state.variables.get("scheduled_for") or 0)
+                delay = max(0.0, scheduled_for - time.time())
+                self.schedule_execution(execution_id, task, delay=delay)
+
+    def schedule_execution(self, execution_id: str, task: str, *, delay: float = 0,
+                           run_at: Optional[float] = None) -> str:
+        """Schedule one execution through the shared runtime timing service."""
+        job_id = f"execution:{execution_id}"
+        if self.scheduler.has(job_id):
+            return job_id
+        self.scheduler.schedule(
+            lambda: self.execute_task(execution_id, task),
+            delay=delay,
+            run_at=run_at,
+            job_id=job_id,
+            metadata={"kind": "execution", "execution_id": execution_id},
+        )
+        self.scheduler.start()
+        return job_id
 
     async def stop_provider_resume_tasks(self) -> None:
         await self.provider_recovery.stop()
+
+    async def stop_runtime_services(self) -> None:
+        await self.provider_recovery.stop()
+        await self.scheduler.stop(cancel_pending=True)
+        close_provider = getattr(self.llm_provider, "close", None)
+        if close_provider:
+            result = close_provider()
+            if inspect.isawaitable(result):
+                await result
 
     def get_capabilities_schemas(
         self,
@@ -1538,6 +1566,7 @@ class ExecutionEngine:
                     task, context, schemas,
                     parent_execution_id=state.variables.get("parent_execution_id"),
                     delegated_step=state.variables.get("delegated_step"),
+                    project_domains=state.variables.get("project_domains"),
                 )
             except ProviderUnavailableError:
                 raise
@@ -1666,440 +1695,18 @@ class ExecutionEngine:
         running_tasks = {}
         
         async def run_step(step):
-            sub_id = None
-            step["status"] = "running"
-            step_index = steps.index(step)
-            await self.event_bus.publish(Event(
-                type="StepStarted",
-                payload={"execution_id": execution_id, "step_index": step_index, "description": step.get("description")}
-            ))
-            
-            try:
-                specialization = await self._prepare_autonomous_specialization(execution_id, state, step)
-                role_key = canonical_step_role(step.get("role")) or infer_step_role(step.get("description", ""))
-                generic_role_name = ROLE_DISPLAY_NAMES.get(role_key) if role_key else None
-                role_name = step.get("specialist") or generic_role_name
-                is_sub_agent = state.variables.get("parent_execution_id") is not None
-                
-                if role_name and role_key != "coordinator" and not is_sub_agent:
-                    # Persist the assignment before scheduling it. A resumed parent
-                    # reuses the same child instead of performing the step twice.
-                    import uuid
-                    sub_id = step.get("assigned_execution_id") or str(uuid.uuid4())
-                    is_new_assignment = "assigned_execution_id" not in step
-                    step["assigned_execution_id"] = sub_id
+            return await self._run_plan_step(
+                execution_id, state, steps, task, step
+            )
 
-                    dependency_results = []
-                    for dependency_id in step.get("dependencies", []):
-                        dependency_step = next(item for item in steps if item.get("id") == dependency_id)
-                        dependency_results.append({
-                            "step_id": dependency_id,
-                            "role": dependency_step.get("role"),
-                            "description": dependency_step.get("description"),
-                            "delivery": dependency_step.get("delivery") or dependency_step.get("result"),
-                        })
-                    handoff = json.dumps(dependency_results, ensure_ascii=False)
-                    if len(handoff) > 8_000:
-                        handoff = handoff[:8_000] + "\n… [dependency handoff truncated]"
-                    sub_task = step["description"]
-                    if step.get("retry_context"):
-                        sub_task += (
-                            "\n\nAUTONOMOUS RETRY: A previous specialist attempt did not satisfy its delivery gates. "
-                            "Inspect and reuse any valid partial artifacts, correct the root cause, and complete the assignment. "
-                            + str(step["retry_context"])
-                        )
-                    if dependency_results:
-                        sub_task += (
-                            "\n\nValidated outputs from prerequisite steps are provided below. "
-                            "Reuse them; do not redo their work.\n" + handoff
-                        )
+        await self._coordinate_plan_execution(
+            execution_id, state, steps, task, run_step, running_tasks
+        )
 
-                    sub_exec = self.state_engine.get_execution(sub_id)
-                    if is_new_assignment:
-                        self.state_engine.transition_execution(
-                            sub_exec, "pending", reason="delegated task assigned", actor="runtime"
-                        )
-                    sub_exec.variables["role_name"] = role_name
-                    sub_exec.variables["role_key"] = role_key
-                    sub_exec.variables["generic_role_name"] = generic_role_name
-                    sub_exec.variables["parent_execution_id"] = execution_id
-                    sub_exec.variables["delegation_depth"] = (
-                        int(state.variables.get("delegation_depth", 0)) + 1
-                    )
-                    lineage = list(state.variables.get("delegation_lineage") or [])
-                    normalized_subtask = " ".join(sub_task.lower().split())
-                    if normalized_subtask not in lineage:
-                        lineage.append(normalized_subtask)
-                    sub_exec.variables["delegation_lineage"] = lineage
-                    sub_exec.variables["project_id"] = state.variables.get("project_id", "proj-default")
-                    sub_exec.variables["parent_task"] = state.variables.get("parent_task") or task
-                    sub_exec.variables["task"] = sub_exec.variables.get("task") or sub_task
-                    sub_exec.variables["plan_step_id"] = step.get("id")
-                    sub_exec.variables["dependency_results"] = dependency_results
-                    sub_exec.variables["specialist"] = step.get("specialist") or role_name
-                    sub_exec.variables["expertise"] = list(step.get("expertise", []))
-                    sub_exec.variables["agent_profile_id"] = step.get("agent_profile_id")
-                    sub_exec.variables["agent_profile_prompt"] = specialization.get("profile", {}).get("system_prompt", "")
-                    sub_exec.variables["requested_skills"] = sorted({
-                        str(item).lower() for item in [
-                            *state.variables.get("requested_skills", []),
-                            *step.get("autonomous_skill_names", []),
-                        ] if isinstance(item, str)
-                    })
-                    sub_exec.variables["delegated_step"] = {
-                        key: value for key, value in step.items()
-                        if key not in {"id", "dependencies", "status", "assigned_execution_id", "delivery", "result", "error"}
-                    }
-                    sub_exec.variables["attachment_ids"] = state.variables.get("attachment_ids", [])
-                    owned_artifacts = {
-                        str(path).replace("\\", "/")
-                        for path in step.get("required_artifacts", [])
-                    }
-                    sub_exec.variables["inherited_artifact_validations"] = [
-                        dict(item)
-                        for item in (state.current_plan or {}).get("artifact_validations", [])
-                        if isinstance(item, dict)
-                        and str(item.get("path") or "").replace("\\", "/") in owned_artifacts
-                    ]
-                    parent_requirements = (
-                        state.variables.get("delivery_contract", {}).get("requirements", [])
-                    )
-                    sub_exec.variables["inherited_requirements"] = requirements_for_delegation(
-                        parent_requirements, step.get("requirement_ids", [])
-                    )
-                    sub_exec.variables["agent_config"] = {
-                        "system_prompt": f"You are the {role_name}, a domain specialist accountable for verified delivery.",
-                        "role_name": role_name,
-                        "role_key": role_key,
-                        "expertise": list(step.get("expertise", [])),
-                    }
-                    if state.variables.get("project_path"):
-                        sub_exec.variables["project_path"] = state.variables["project_path"]
-
-                    if is_new_assignment:
-                        await self.event_bus.publish(Event(
-                            type="TaskCreated",
-                            payload={
-                                "execution_id": sub_id,
-                                "parent_execution_id": execution_id,
-                                "plan_step_id": step.get("id"),
-                                "role": role_key,
-                                "specialist": role_name,
-                                "task": sub_exec.variables["task"],
-                                "agent_id": "default_agent"
-                            }
-                        ))
-
-                    if sub_exec.status in ("pending", "running"):
-                        asyncio.create_task(self.execute_task(sub_id, sub_exec.variables["task"]))
-                    
-                    # Wait for sub-agent completion
-                    while True:
-                        await asyncio.sleep(0.1)
-                        
-                        parent_state = self.state_engine.get_execution(execution_id)
-                        sub_state = self.state_engine.get_execution(sub_id)
-                        
-                        if parent_state.status == "cancelled":
-                            if sub_state.status in ("running", "paused", "pending"):
-                                self.state_engine.transition_execution(
-                                    sub_state, "cancelled", reason="parent cancelled", actor="runtime"
-                                )
-                                await self.event_bus.publish(Event(
-                                    type="ExecutionCancelled",
-                                    payload={"execution_id": sub_id}
-                                ))
-                            break
-                        elif parent_state.status == "paused":
-                            if sub_state.status == "running":
-                                self.state_engine.transition_execution(
-                                    sub_state, "paused", reason="parent paused", actor="runtime"
-                                )
-                                await self.event_bus.publish(Event(
-                                    type="ExecutionPaused",
-                                    payload={"execution_id": sub_id}
-                                ))
-                            continue
-                        
-                        # Resume child if parent is resumed
-                        if parent_state.status == "running" and sub_state.status == "paused" and not sub_state.variables.get("pending_approval"):
-                            self.state_engine.transition_execution(
-                                sub_state, "running", reason="parent resumed", actor="runtime"
-                            )
-                            asyncio.create_task(self.execute_task(sub_id, sub_exec.variables["task"]))
-
-                        if sub_state.status == "paused" and sub_state.variables.get("pending_approval"):
-                            pending_child = dict(sub_state.variables["pending_approval"])
-                            pending_child["child_execution_id"] = sub_id
-                            pending_child["child_role_name"] = sub_state.variables.get("role_name")
-                            self.state_engine.transition_execution(
-                                parent_state, "paused", reason="child approval required", actor="runtime"
-                            )
-                            parent_state.variables["pending_approval"] = pending_child
-                            step["status"] = "pending"
-                            self.state_engine.save_to_disk()
-                            await self.event_bus.publish(Event(
-                                type="ApprovalRequested",
-                                payload={
-                                    "execution_id": execution_id,
-                                    "child_execution_id": sub_id,
-                                    "tool_call_id": pending_child.get("tool_call_id"),
-                                    "capability": pending_child.get("capability"),
-                                    "action": pending_child.get("action"),
-                                    "arguments": pending_child.get("arguments", {}),
-                                    "reason": "A delegated specialist is waiting for this authorization.",
-                                },
-                            ))
-                            await self.event_bus.publish(Event(
-                                type="ExecutionPaused",
-                                payload={
-                                    "execution_id": execution_id,
-                                    "reason": "child_approval",
-                                    "child_execution_id": sub_id,
-                                },
-                            ))
-                            return "suspended"
-
-                        if sub_state.status == "waiting_provider":
-                            self.state_engine.transition_execution(
-                                parent_state, "waiting_provider", reason="child waiting for provider", actor="runtime"
-                            )
-                            parent_state.variables["provider_wait"] = {
-                                "child_execution_id": sub_id,
-                                "suspended_at": time.time(),
-                            }
-                            step["status"] = "pending"
-                            self.state_engine.save_to_disk()
-                            self._schedule_provider_resume(execution_id)
-                            return "suspended_provider"
-                        
-                        if sub_state.status in ("completed", "failed", "cancelled"):
-                            break
-                            
-                    if sub_state.status == "completed":
-                        delivery = sub_exec.variables.get("delivery")
-                        if not isinstance(delivery, dict):
-                            sub_conversation = self.state_engine.get_conversation(sub_id)
-                            last_response = "Sub-agent execution completed."
-                            for msg in reversed(sub_conversation.messages):
-                                if msg.get("role") == "assistant" and msg.get("content"):
-                                    last_response = msg["content"]
-                                    break
-                            delivery = self._structured_delivery(last_response)
-                        sub_exec.variables["delivery"] = delivery
-                        step["delivery"] = delivery
-                        result = json.dumps(delivery, ensure_ascii=False)
-                    else:
-                        child_error = str(
-                            sub_state.results.get("error")
-                            or f"status: {sub_state.status}"
-                        )
-                        raise RuntimeError(
-                            f"Sub-agent {role_name} stopped: {child_error}"
-                        )
-                else:
-                    # Execute step loop locally
-                    if specialization.get("profile"):
-                        state.variables["agent_profile_id"] = specialization["profile"]["id"]
-                        state.variables["agent_profile_prompt"] = specialization["profile"].get("system_prompt", "")
-                        state.variables["requested_skills"] = sorted(
-                            {str(item).lower() for item in state.variables.get("requested_skills", [])
-                             if isinstance(item, str)} |
-                            {str(item).lower() for item in specialization.get("skill_names", [])
-                             if isinstance(item, str)}
-                        )
-                    result = await self._execute_step_loop(execution_id, step)
-                    if state.variables.get("parent_execution_id") and role_key != "coordinator":
-                        delivery = self._structured_delivery(result)
-                        state.variables["delivery"] = delivery
-                        step["delivery"] = delivery
-                
-                # If the step execution suspended (e.g. paused for approval), reset to pending
-                parent_state = self.state_engine.get_execution(execution_id)
-                if parent_state.status in ("paused", "waiting_provider"):
-                    step["status"] = "pending"
-                    return (
-                        "suspended_provider" if parent_state.status == "waiting_provider"
-                        else "suspended"
-                    )
-                
-                step["status"] = "completed"
-                step["result"] = result
-                if not sub_id:
-                    self._record_specialization_outcome(execution_id, step, True, str(result))
-                step_record = {
-                    "step_id": step.get("id"),
-                    "description": step.get("description"),
-                    "role": step.get("role") or "coordinator",
-                    "execution_id": step.get("assigned_execution_id") or execution_id,
-                    "result": step.get("delivery") or result,
-                }
-                state.results.setdefault("steps", {})[str(step.get("id"))] = step_record
-                await self.event_bus.publish(Event(
-                    type="StepCompleted",
-                    payload={"execution_id": execution_id, "step_index": step_index, "result": result}
-                ))
-                return "completed"
-                
-            except asyncio.CancelledError:
-                if sub_id:
-                    child = self.state_engine.get_execution(sub_id)
-                    if child.status in ("pending", "running", "paused"):
-                        self.state_engine.transition_execution(
-                            child, "cancelled", reason="step cancelled", actor="runtime"
-                        )
-                step["status"] = "pending" if state.status == "paused" else "cancelled"
-                raise
-            except ProviderUnavailableError:
-                step["status"] = "pending"
-                raise
-            except Exception as e:
-                if not sub_id:
-                    self._record_specialization_outcome(execution_id, step, False, str(e))
-                if self._is_permanent_llm_error(e):
-                    step["status"] = "failed"
-                    step["error"] = str(e)
-                    await self.event_bus.publish(Event(
-                        type="StepFailed",
-                        payload={
-                            "execution_id": execution_id,
-                            "step_index": step_index,
-                            "error": str(e),
-                        },
-                    ))
-                    raise
-                repair_step = next((
-                    candidate for candidate in steps
-                    if candidate.get("status") == "pending"
-                    and canonical_step_role(candidate.get("role")) == "debugger"
-                    and step.get("id") in candidate.get("dependencies", [])
-                ), None)
-                if sub_id and role_key == "qa" and repair_step is not None:
-                    failed_child = self.state_engine.get_execution(sub_id)
-                    machine_evidence = []
-                    for item in failed_child.variables.get("tool_call_history", [])[-20:]:
-                        result_text = str(item.get("result") or "")
-                        if "EXIT_CODE: 0" not in result_text or "Error" in result_text:
-                            machine_evidence.append({
-                                "capability": item.get("capability"),
-                                "action": item.get("action"),
-                                "arguments": item.get("arguments"),
-                                "result": result_text[-4_000:],
-                            })
-                    failed_commands = list(step.get("verification_commands", []))
-                    repair_step["verification_commands"] = list(dict.fromkeys([
-                        *repair_step.get("verification_commands", []),
-                        *failed_commands,
-                    ]))
-                    repair_step["retry_context"] = (
-                        "Independent validation completed and found defects. Repair the source or tests from the "
-                        "user requirements, never weaken valid assertions, then rerun every inherited validation "
-                        "command as well as your own.\n"
-                        + json.dumps({
-                            "validation_step_id": step.get("id"),
-                            "failed_execution_id": sub_id,
-                            "error": str(e),
-                            "machine_evidence": machine_evidence,
-                        }, ensure_ascii=False)[:12_000]
-                    )
-                    validation_result = {
-                        "summary": "Independent validation completed with defects requiring debugger repair.",
-                        "passed": False,
-                        "failed_execution_id": sub_id,
-                        "error": str(e),
-                        "verification_commands": failed_commands,
-                    }
-                    step["status"] = "completed"
-                    step["validation_passed"] = False
-                    step["result"] = json.dumps(validation_result, ensure_ascii=False)
-                    state.results.setdefault("steps", {})[str(step.get("id"))] = {
-                        "step_id": step.get("id"),
-                        "description": step.get("description"),
-                        "role": step.get("role"),
-                        "execution_id": sub_id,
-                        "result": validation_result,
-                    }
-                    await self.event_bus.publish(Event(
-                        type="ValidationRepairHandoff",
-                        payload={
-                            "execution_id": execution_id,
-                            "validation_step_id": step.get("id"),
-                            "repair_step_id": repair_step.get("id"),
-                            "failed_execution_id": sub_id,
-                        },
-                    ))
-                    return "completed"
-                retry_count = int(step.get("retry_count", 0))
-                retry_budget = self._step_retry_budget(task, step)
-                if sub_id and retry_count < retry_budget and state.status not in ("cancelled", "paused"):
-                    step["retry_count"] = retry_count + 1
-                    step.setdefault("failed_attempts", []).append({
-                        "execution_id": sub_id, "attempt": retry_count + 1, "error": str(e),
-                    })
-                    failed_child = self.state_engine.get_execution(sub_id)
-                    recent_failures = []
-                    for item in failed_child.variables.get("tool_call_history", [])[-8:]:
-                        result_text = str(item.get("result") or "")
-                        if ("EXIT_CODE: 0" not in result_text or "Error" in result_text
-                                or item.get("capability") == "shell"):
-                            recent_failures.append({
-                                "capability": item.get("capability"),
-                                "action": item.get("action"),
-                                "arguments": item.get("arguments"),
-                                "result": result_text[-3_000:],
-                            })
-                    failed_history = failed_child.variables.get("tool_call_history", [])
-                    durable_mutations = sum(
-                        1 for item in failed_history
-                        if (
-                            item.get("capability") == "filesystem"
-                            and item.get("action") in {"write", "delete"}
-                            and "Error" not in str(item.get("result") or "")
-                        )
-                    )
-                    gate_failures = self._step_completion_issues(
-                        sub_id,
-                        step,
-                        json.dumps({
-                            "summary": "retry audit",
-                            "artifacts": [],
-                            "evidence": [],
-                            "risks": [],
-                            "next_action": "",
-                        }),
-                    )
-                    step["retry_context"] = (
-                        f"Previous attempt {retry_count + 1} failed: {e}\n"
-                        f"Durable filesystem mutations completed: {durable_mutations}. "
-                        + (
-                            "The attempt made no durable edit; stop inspecting and apply the smallest concrete "
-                            "requirement-preserving correction before rerunning validation.\n"
-                            if durable_mutations == 0 else
-                            "Reuse the valid edits already present; do not overwrite them with the old state.\n"
-                        )
-                        + "Current machine gate failures: "
-                        + "; ".join(gate_failures)
-                        + "\n"
-                        "Recent machine evidence from that attempt (do not repeat the same failed action):\n"
-                        + json.dumps(recent_failures, ensure_ascii=False)[:8_000]
-                    )
-                    step.pop("assigned_execution_id", None)
-                    step["status"] = "pending"
-                    await self.event_bus.publish(Event(
-                        type="StepRetryScheduled",
-                        payload={"execution_id": execution_id, "step_index": step_index,
-                                 "attempt": retry_count + 2, "error": str(e)},
-                    ))
-                    return "retry"
-                step["status"] = "failed"
-                step["error"] = str(e)
-                await self.event_bus.publish(Event(
-                    type="StepFailed",
-                    payload={"execution_id": execution_id, "step_index": step_index, "error": str(e)}
-                ))
-                raise e
-
-        # Loop until all steps are completed or execution finishes/pauses/cancels
+    async def _coordinate_plan_execution(
+        self, execution_id: str, state, steps, task: str, run_step, running_tasks
+    ) -> None:
+        """Schedule ready plan steps and own terminal delivery transitions."""
         while state.status in ("running", "pending"):
             if state.status == "pending":
                 self.state_engine.transition_execution(
@@ -2315,6 +1922,579 @@ class ExecutionEngine:
                     payload={"execution_id": execution_id, "error": "Cyclical step dependencies detected in plan."}
                 ))
                 break
+
+
+    async def _run_plan_step(self, execution_id: str, state, steps, task: str, step):
+        """Execute one plan step while the outer coordinator owns scheduling."""
+        sub_id = None
+        step["status"] = "running"
+        step_index = steps.index(step)
+        await self.event_bus.publish(Event(
+            type="StepStarted",
+            payload={"execution_id": execution_id, "step_index": step_index, "description": step.get("description")}
+        ))
+
+        try:
+            specialization = await self._prepare_autonomous_specialization(execution_id, state, step)
+            role_key = canonical_step_role(step.get("role")) or infer_step_role(step.get("description", ""))
+            generic_role_name = ROLE_DISPLAY_NAMES.get(role_key) if role_key else None
+            role_name = step.get("specialist") or generic_role_name
+            is_sub_agent = state.variables.get("parent_execution_id") is not None
+
+            if role_name and role_key != "coordinator" and not is_sub_agent:
+                # Persist the assignment before scheduling it. A resumed parent
+                # reuses the same child instead of performing the step twice.
+                import uuid
+                sub_id = step.get("assigned_execution_id") or str(uuid.uuid4())
+                is_new_assignment = "assigned_execution_id" not in step
+                step["assigned_execution_id"] = sub_id
+
+                dependency_results = []
+                for dependency_id in step.get("dependencies", []):
+                    dependency_step = next(item for item in steps if item.get("id") == dependency_id)
+                    dependency_results.append({
+                        "step_id": dependency_id,
+                        "role": dependency_step.get("role"),
+                        "description": dependency_step.get("description"),
+                        "delivery": dependency_step.get("delivery") or dependency_step.get("result"),
+                    })
+                handoff = json.dumps(dependency_results, ensure_ascii=False)
+                if len(handoff) > 8_000:
+                    handoff = handoff[:8_000] + "\n… [dependency handoff truncated]"
+                sub_task = step["description"]
+                if step.get("retry_context"):
+                    sub_task += (
+                        "\n\nAUTONOMOUS RETRY: A previous specialist attempt did not satisfy its delivery gates. "
+                        "Inspect and reuse any valid partial artifacts, correct the root cause, and complete the assignment. "
+                        + str(step["retry_context"])
+                    )
+                if dependency_results:
+                    sub_task += (
+                        "\n\nValidated outputs from prerequisite steps are provided below. "
+                        "Reuse them; do not redo their work.\n" + handoff
+                    )
+
+                sub_exec = self.state_engine.get_execution(sub_id)
+                if is_new_assignment:
+                    self.state_engine.transition_execution(
+                        sub_exec, "pending", reason="delegated task assigned", actor="runtime"
+                    )
+                sub_exec.variables["role_name"] = role_name
+                sub_exec.variables["role_key"] = role_key
+                sub_exec.variables["generic_role_name"] = generic_role_name
+                sub_exec.variables["parent_execution_id"] = execution_id
+                sub_exec.variables["delegation_depth"] = (
+                    int(state.variables.get("delegation_depth", 0)) + 1
+                )
+                lineage = list(state.variables.get("delegation_lineage") or [])
+                normalized_subtask = " ".join(sub_task.lower().split())
+                if normalized_subtask not in lineage:
+                    lineage.append(normalized_subtask)
+                sub_exec.variables["delegation_lineage"] = lineage
+                sub_exec.variables["project_id"] = state.variables.get("project_id", "proj-default")
+                sub_exec.variables["parent_task"] = state.variables.get("parent_task") or task
+                sub_exec.variables["task"] = sub_exec.variables.get("task") or sub_task
+                sub_exec.variables["plan_step_id"] = step.get("id")
+                sub_exec.variables["dependency_results"] = dependency_results
+                sub_exec.variables["specialist"] = step.get("specialist") or role_name
+                sub_exec.variables["expertise"] = list(step.get("expertise", []))
+                sub_exec.variables["agent_profile_id"] = step.get("agent_profile_id")
+                sub_exec.variables["agent_profile_prompt"] = specialization.get("profile", {}).get("system_prompt", "")
+                sub_exec.variables["requested_skills"] = sorted({
+                    str(item).lower() for item in [
+                        *state.variables.get("requested_skills", []),
+                        *step.get("autonomous_skill_names", []),
+                    ] if isinstance(item, str)
+                })
+                sub_exec.variables["delegated_step"] = {
+                    key: value for key, value in step.items()
+                    if key not in {"id", "dependencies", "status", "assigned_execution_id", "delivery", "result", "error"}
+                }
+                sub_exec.variables["attachment_ids"] = state.variables.get("attachment_ids", [])
+                owned_artifacts = {
+                    str(path).replace("\\", "/")
+                    for path in step.get("required_artifacts", [])
+                }
+                sub_exec.variables["inherited_artifact_validations"] = [
+                    dict(item)
+                    for item in (state.current_plan or {}).get("artifact_validations", [])
+                    if isinstance(item, dict)
+                    and str(item.get("path") or "").replace("\\", "/") in owned_artifacts
+                ]
+                parent_requirements = (
+                    state.variables.get("delivery_contract", {}).get("requirements", [])
+                )
+                sub_exec.variables["inherited_requirements"] = requirements_for_delegation(
+                    parent_requirements, step.get("requirement_ids", [])
+                )
+                sub_exec.variables["agent_config"] = {
+                    "system_prompt": f"You are the {role_name}, a domain specialist accountable for verified delivery.",
+                    "role_name": role_name,
+                    "role_key": role_key,
+                    "expertise": list(step.get("expertise", [])),
+                }
+                if state.variables.get("project_path"):
+                    sub_exec.variables["project_path"] = state.variables["project_path"]
+
+                if is_new_assignment:
+                    await self.event_bus.publish(Event(
+                        type="TaskCreated",
+                        payload={
+                            "execution_id": sub_id,
+                            "parent_execution_id": execution_id,
+                            "plan_step_id": step.get("id"),
+                            "role": role_key,
+                            "specialist": role_name,
+                            "task": sub_exec.variables["task"],
+                            "agent_id": "default_agent"
+                        }
+                    ))
+
+                if sub_exec.status in ("pending", "running"):
+                    asyncio.create_task(self.execute_task(sub_id, sub_exec.variables["task"]))
+
+                # Wait for sub-agent completion
+                while True:
+                    await asyncio.sleep(0.1)
+
+                    parent_state = self.state_engine.get_execution(execution_id)
+                    sub_state = self.state_engine.get_execution(sub_id)
+
+                    if parent_state.status == "cancelled":
+                        if sub_state.status in ("running", "paused", "pending"):
+                            self.state_engine.transition_execution(
+                                sub_state, "cancelled", reason="parent cancelled", actor="runtime"
+                            )
+                            await self.event_bus.publish(Event(
+                                type="ExecutionCancelled",
+                                payload={"execution_id": sub_id}
+                            ))
+                        break
+                    elif parent_state.status == "paused":
+                        if sub_state.status == "running":
+                            self.state_engine.transition_execution(
+                                sub_state, "paused", reason="parent paused", actor="runtime"
+                            )
+                            await self.event_bus.publish(Event(
+                                type="ExecutionPaused",
+                                payload={"execution_id": sub_id}
+                            ))
+                        continue
+
+                    # Resume child if parent is resumed
+                    if parent_state.status == "running" and sub_state.status == "paused" and not sub_state.variables.get("pending_approval"):
+                        self.state_engine.transition_execution(
+                            sub_state, "running", reason="parent resumed", actor="runtime"
+                        )
+                        asyncio.create_task(self.execute_task(sub_id, sub_exec.variables["task"]))
+
+                    if sub_state.status == "paused" and sub_state.variables.get("pending_approval"):
+                        pending_child = dict(sub_state.variables["pending_approval"])
+                        pending_child["child_execution_id"] = sub_id
+                        pending_child["child_role_name"] = sub_state.variables.get("role_name")
+                        self.state_engine.transition_execution(
+                            parent_state, "paused", reason="child approval required", actor="runtime"
+                        )
+                        parent_state.variables["pending_approval"] = pending_child
+                        step["status"] = "pending"
+                        self.state_engine.save_to_disk()
+                        await self.event_bus.publish(Event(
+                            type="ApprovalRequested",
+                            payload={
+                                "execution_id": execution_id,
+                                "child_execution_id": sub_id,
+                                "tool_call_id": pending_child.get("tool_call_id"),
+                                "capability": pending_child.get("capability"),
+                                "action": pending_child.get("action"),
+                                "arguments": pending_child.get("arguments", {}),
+                                "reason": "A delegated specialist is waiting for this authorization.",
+                            },
+                        ))
+                        await self.event_bus.publish(Event(
+                            type="ExecutionPaused",
+                            payload={
+                                "execution_id": execution_id,
+                                "reason": "child_approval",
+                                "child_execution_id": sub_id,
+                            },
+                        ))
+                        return "suspended"
+
+                    if sub_state.status == "waiting_provider":
+                        self.state_engine.transition_execution(
+                            parent_state, "waiting_provider", reason="child waiting for provider", actor="runtime"
+                        )
+                        parent_state.variables["provider_wait"] = {
+                            "child_execution_id": sub_id,
+                            "suspended_at": time.time(),
+                        }
+                        step["status"] = "pending"
+                        self.state_engine.save_to_disk()
+                        self._schedule_provider_resume(execution_id)
+                        return "suspended_provider"
+
+                    if sub_state.status in ("completed", "failed", "cancelled"):
+                        break
+
+                if sub_state.status == "completed":
+                    delivery = sub_exec.variables.get("delivery")
+                    if not isinstance(delivery, dict):
+                        sub_conversation = self.state_engine.get_conversation(sub_id)
+                        last_response = "Sub-agent execution completed."
+                        for msg in reversed(sub_conversation.messages):
+                            if msg.get("role") == "assistant" and msg.get("content"):
+                                last_response = msg["content"]
+                                break
+                        delivery = self._structured_delivery(last_response)
+                    sub_exec.variables["delivery"] = delivery
+                    step["delivery"] = delivery
+                    result = json.dumps(delivery, ensure_ascii=False)
+                else:
+                    child_error = str(
+                        sub_state.results.get("error")
+                        or f"status: {sub_state.status}"
+                    )
+                    raise RuntimeError(
+                        f"Sub-agent {role_name} stopped: {child_error}"
+                    )
+            else:
+                # Execute step loop locally
+                if specialization.get("profile"):
+                    state.variables["agent_profile_id"] = specialization["profile"]["id"]
+                    state.variables["agent_profile_prompt"] = specialization["profile"].get("system_prompt", "")
+                    state.variables["requested_skills"] = sorted(
+                        {str(item).lower() for item in state.variables.get("requested_skills", [])
+                         if isinstance(item, str)} |
+                        {str(item).lower() for item in specialization.get("skill_names", [])
+                         if isinstance(item, str)}
+                    )
+                result = await self._execute_step_loop(execution_id, step)
+                if state.variables.get("parent_execution_id") and role_key != "coordinator":
+                    delivery = self._structured_delivery(result)
+                    state.variables["delivery"] = delivery
+                    step["delivery"] = delivery
+
+            # If the step execution suspended (e.g. paused for approval), reset to pending
+            parent_state = self.state_engine.get_execution(execution_id)
+            if parent_state.status in ("paused", "waiting_provider"):
+                step["status"] = "pending"
+                return (
+                    "suspended_provider" if parent_state.status == "waiting_provider"
+                    else "suspended"
+                )
+
+            step["status"] = "completed"
+            step["result"] = result
+            if not sub_id:
+                self._record_specialization_outcome(execution_id, step, True, str(result))
+            step_record = {
+                "step_id": step.get("id"),
+                "description": step.get("description"),
+                "role": step.get("role") or "coordinator",
+                "execution_id": step.get("assigned_execution_id") or execution_id,
+                "result": step.get("delivery") or result,
+            }
+            state.results.setdefault("steps", {})[str(step.get("id"))] = step_record
+            await self.event_bus.publish(Event(
+                type="StepCompleted",
+                payload={"execution_id": execution_id, "step_index": step_index, "result": result}
+            ))
+            return "completed"
+
+        except asyncio.CancelledError:
+            if sub_id:
+                child = self.state_engine.get_execution(sub_id)
+                if child.status in ("pending", "running", "paused"):
+                    self.state_engine.transition_execution(
+                        child, "cancelled", reason="step cancelled", actor="runtime"
+                    )
+            step["status"] = "pending" if state.status == "paused" else "cancelled"
+            raise
+        except ProviderUnavailableError:
+            step["status"] = "pending"
+            raise
+        except Exception as e:
+            if not sub_id:
+                self._record_specialization_outcome(execution_id, step, False, str(e))
+            if self._is_permanent_llm_error(e):
+                step["status"] = "failed"
+                step["error"] = str(e)
+                await self.event_bus.publish(Event(
+                    type="StepFailed",
+                    payload={
+                        "execution_id": execution_id,
+                        "step_index": step_index,
+                        "error": str(e),
+                    },
+                ))
+                raise
+            repair_step = next((
+                candidate for candidate in steps
+                if candidate.get("status") == "pending"
+                and canonical_step_role(candidate.get("role")) == "debugger"
+                and step.get("id") in candidate.get("dependencies", [])
+            ), None)
+            if sub_id and role_key == "qa" and repair_step is not None:
+                failed_child = self.state_engine.get_execution(sub_id)
+                machine_evidence = []
+                for item in failed_child.variables.get("tool_call_history", [])[-20:]:
+                    result_text = str(item.get("result") or "")
+                    if "EXIT_CODE: 0" not in result_text or "Error" in result_text:
+                        machine_evidence.append({
+                            "capability": item.get("capability"),
+                            "action": item.get("action"),
+                            "arguments": item.get("arguments"),
+                            "result": result_text[-4_000:],
+                        })
+                failed_commands = list(step.get("verification_commands", []))
+                repair_step["verification_commands"] = list(dict.fromkeys([
+                    *repair_step.get("verification_commands", []),
+                    *failed_commands,
+                ]))
+                repair_step["retry_context"] = (
+                    "Independent validation completed and found defects. Repair the source or tests from the "
+                    "user requirements, never weaken valid assertions, then rerun every inherited validation "
+                    "command as well as your own.\n"
+                    + json.dumps({
+                        "validation_step_id": step.get("id"),
+                        "failed_execution_id": sub_id,
+                        "error": str(e),
+                        "machine_evidence": machine_evidence,
+                    }, ensure_ascii=False)[:12_000]
+                )
+                validation_result = {
+                    "summary": "Independent validation completed with defects requiring debugger repair.",
+                    "passed": False,
+                    "failed_execution_id": sub_id,
+                    "error": str(e),
+                    "verification_commands": failed_commands,
+                }
+                step["status"] = "completed"
+                step["validation_passed"] = False
+                step["result"] = json.dumps(validation_result, ensure_ascii=False)
+                state.results.setdefault("steps", {})[str(step.get("id"))] = {
+                    "step_id": step.get("id"),
+                    "description": step.get("description"),
+                    "role": step.get("role"),
+                    "execution_id": sub_id,
+                    "result": validation_result,
+                }
+                await self.event_bus.publish(Event(
+                    type="ValidationRepairHandoff",
+                    payload={
+                        "execution_id": execution_id,
+                        "validation_step_id": step.get("id"),
+                        "repair_step_id": repair_step.get("id"),
+                        "failed_execution_id": sub_id,
+                    },
+                ))
+                return "completed"
+            retry_count = int(step.get("retry_count", 0))
+            retry_budget = self._step_retry_budget(task, step)
+            if sub_id and retry_count < retry_budget and state.status not in ("cancelled", "paused"):
+                step["retry_count"] = retry_count + 1
+                step.setdefault("failed_attempts", []).append({
+                    "execution_id": sub_id, "attempt": retry_count + 1, "error": str(e),
+                })
+                failed_child = self.state_engine.get_execution(sub_id)
+                recent_failures = []
+                for item in failed_child.variables.get("tool_call_history", [])[-8:]:
+                    result_text = str(item.get("result") or "")
+                    if ("EXIT_CODE: 0" not in result_text or "Error" in result_text
+                            or item.get("capability") == "shell"):
+                        recent_failures.append({
+                            "capability": item.get("capability"),
+                            "action": item.get("action"),
+                            "arguments": item.get("arguments"),
+                            "result": result_text[-3_000:],
+                        })
+                failed_history = failed_child.variables.get("tool_call_history", [])
+                durable_mutations = sum(
+                    1 for item in failed_history
+                    if (
+                        item.get("capability") == "filesystem"
+                        and item.get("action") in {"write", "delete"}
+                        and "Error" not in str(item.get("result") or "")
+                    )
+                )
+                gate_failures = self._step_completion_issues(
+                    sub_id,
+                    step,
+                    json.dumps({
+                        "summary": "retry audit",
+                        "artifacts": [],
+                        "evidence": [],
+                        "risks": [],
+                        "next_action": "",
+                    }),
+                )
+                step["retry_context"] = (
+                    f"Previous attempt {retry_count + 1} failed: {e}\n"
+                    f"Durable filesystem mutations completed: {durable_mutations}. "
+                    + (
+                        "The attempt made no durable edit; stop inspecting and apply the smallest concrete "
+                        "requirement-preserving correction before rerunning validation.\n"
+                        if durable_mutations == 0 else
+                        "Reuse the valid edits already present; do not overwrite them with the old state.\n"
+                    )
+                    + "Current machine gate failures: "
+                    + "; ".join(gate_failures)
+                    + "\n"
+                    "Recent machine evidence from that attempt (do not repeat the same failed action):\n"
+                    + json.dumps(recent_failures, ensure_ascii=False)[:8_000]
+                )
+                step.pop("assigned_execution_id", None)
+                step["status"] = "pending"
+                await self.event_bus.publish(Event(
+                    type="StepRetryScheduled",
+                    payload={"execution_id": execution_id, "step_index": step_index,
+                             "attempt": retry_count + 2, "error": str(e)},
+                ))
+                return "retry"
+            step["status"] = "failed"
+            step["error"] = str(e)
+            await self.event_bus.publish(Event(
+                type="StepFailed",
+                payload={"execution_id": execution_id, "step_index": step_index, "error": str(e)}
+            ))
+            raise e
+
+
+    async def _process_step_tool_calls(
+        self, execution_id: str, state, convo, tool_calls: List[Dict[str, Any]],
+        iteration: int, context: Dict[str, Any],
+    ) -> Optional[str]:
+        """Apply policy and execute or suspend one batch of model tool calls."""
+        # Process tool calls
+        for tool_call in tool_calls:
+            if state.status == "cancelled":
+                raise asyncio.CancelledError()
+            tool_id = str(tool_call.get("id") or "").strip()
+            func_info = tool_call.get("function", {})
+            full_name = func_info.get("name", "")
+            args = func_info.get("arguments", {})
+            if isinstance(args, str):
+                try:
+                    args = json.loads(args)
+                except json.JSONDecodeError:
+                    args = {}
+            if not isinstance(args, dict):
+                args = {}
+            while len(args) == 1 and isinstance(args.get("arguments"), dict):
+                args = args["arguments"]
+            if not tool_id:
+                tool_id = f"anonymous-{iteration}-{len(state.variables.setdefault('completed_tool_calls', {}))}"
+
+            completed_tool_calls = state.variables.setdefault("completed_tool_calls", {})
+            if tool_id in completed_tool_calls:
+                result_str = completed_tool_calls[tool_id]
+                convo.messages.append({
+                    "role": "tool", "tool_call_id": tool_id, "name": full_name,
+                    "content": result_str, "timestamp": time.time(),
+                })
+                await self.event_bus.publish(Event(
+                    type="ToolReused",
+                    payload={"execution_id": execution_id, "tool_call_id": tool_id, "result": result_str},
+                ))
+                continue
+
+            # Parse capability and action
+            if "__" in full_name:
+                cap_name, act_name = full_name.split("__", 1)
+            else:
+                cap_name = full_name
+                act_name = ""
+            args = self._normalize_tool_arguments(cap_name, act_name, args)
+
+            # Evaluate policy
+            fingerprint, policy_desc = self._cached_approval_decision(
+                state, cap_name, act_name, args
+            )
+            if policy_desc is None:
+                if state.status == "cancelled":
+                    raise asyncio.CancelledError()
+                policy_desc = await self.policy_provider.check_action(
+                    execution_id=execution_id,
+                    capability=cap_name,
+                    action=act_name,
+                    arguments=args,
+                    context=context
+                )
+
+            await self.event_bus.publish(Event(
+                type="ToolCalled",
+                payload={
+                    "execution_id": execution_id,
+                    "tool_call_id": tool_id,
+                    "capability": cap_name,
+                    "action": act_name,
+                    "arguments": args
+                }
+            ))
+
+            if policy_desc.decision == "deny":
+                result_str = f"Execution blocked: Policy Denied. Reason: {policy_desc.reason}"
+                completed_tool_calls[tool_id] = result_str
+                convo.messages.append({
+                    "role": "tool",
+                    "tool_call_id": tool_id,
+                    "name": full_name,
+                    "content": result_str,
+                    "timestamp": time.time()
+                })
+                await self.event_bus.publish(Event(
+                    type="ToolCompleted",
+                    payload={"execution_id": execution_id, "tool_call_id": tool_id, "result": result_str}
+                ))
+            elif policy_desc.decision == "approval":
+                # Human-in-the-loop: Pause execution and await approval
+                self.state_engine.transition_execution(
+                    state, "paused", reason="capability approval required", actor="runtime"
+                )
+                state.variables["pending_approval"] = {
+                    "tool_call_id": tool_id,
+                    "capability": cap_name,
+                    "action": act_name,
+                    "arguments": args,
+                    "fingerprint": fingerprint,
+                }
+                await self.event_bus.publish(Event(
+                    type="ApprovalRequested",
+                    payload={
+                        "execution_id": execution_id,
+                        "tool_call_id": tool_id,
+                        "capability": cap_name,
+                        "action": act_name,
+                        "arguments": args,
+                        "reason": policy_desc.reason
+                    }
+                ))
+                await self.event_bus.publish(Event(
+                    type="ExecutionPaused",
+                    payload={"execution_id": execution_id}
+                ))
+                # Stop the loop here, we will resume when decision arrives
+                return "Paused waiting for human approval."
+            else:
+                # 'allow' -> Execute the capability
+                if state.status == "cancelled":
+                    raise asyncio.CancelledError()
+                result_str = await self._call_tool(execution_id, cap_name, act_name, args)
+                completed_tool_calls[tool_id] = result_str
+                self._record_tool_result(execution_id, cap_name, act_name, args, result_str)
+                convo.messages.append({
+                    "role": "tool",
+                    "tool_call_id": tool_id,
+                    "name": full_name,
+                    "content": result_str,
+                    "timestamp": time.time()
+                })
+                await self.event_bus.publish(Event(
+                    type="ToolCompleted",
+                    payload={"execution_id": execution_id, "tool_call_id": tool_id, "result": result_str}
+                ))
+
+        return None
 
     async def _execute_step_loop(self, execution_id: str, step: Dict[str, Any]) -> str:
         """
@@ -2829,134 +3009,11 @@ class ExecutionEngine:
                     # No tools called. Step is completed. Return content as result
                     return response_text or "Step completed without response text."
 
-            # Process tool calls
-            for tool_call in tool_calls:
-                if state.status == "cancelled":
-                    raise asyncio.CancelledError()
-                tool_id = str(tool_call.get("id") or "").strip()
-                func_info = tool_call.get("function", {})
-                full_name = func_info.get("name", "")
-                args = func_info.get("arguments", {})
-                if isinstance(args, str):
-                    try:
-                        args = json.loads(args)
-                    except json.JSONDecodeError:
-                        args = {}
-                if not isinstance(args, dict):
-                    args = {}
-                while len(args) == 1 and isinstance(args.get("arguments"), dict):
-                    args = args["arguments"]
-                if not tool_id:
-                    tool_id = f"anonymous-{iteration}-{len(state.variables.setdefault('completed_tool_calls', {}))}"
-
-                completed_tool_calls = state.variables.setdefault("completed_tool_calls", {})
-                if tool_id in completed_tool_calls:
-                    result_str = completed_tool_calls[tool_id]
-                    convo.messages.append({
-                        "role": "tool", "tool_call_id": tool_id, "name": full_name,
-                        "content": result_str, "timestamp": time.time(),
-                    })
-                    await self.event_bus.publish(Event(
-                        type="ToolReused",
-                        payload={"execution_id": execution_id, "tool_call_id": tool_id, "result": result_str},
-                    ))
-                    continue
-
-                # Parse capability and action
-                if "__" in full_name:
-                    cap_name, act_name = full_name.split("__", 1)
-                else:
-                    cap_name = full_name
-                    act_name = ""
-                args = self._normalize_tool_arguments(cap_name, act_name, args)
-
-                # Evaluate policy
-                fingerprint, policy_desc = self._cached_approval_decision(
-                    state, cap_name, act_name, args
-                )
-                if policy_desc is None:
-                    if state.status == "cancelled":
-                        raise asyncio.CancelledError()
-                    policy_desc = await self.policy_provider.check_action(
-                        execution_id=execution_id,
-                        capability=cap_name,
-                        action=act_name,
-                        arguments=args,
-                        context=context
-                    )
-
-                await self.event_bus.publish(Event(
-                    type="ToolCalled",
-                    payload={
-                        "execution_id": execution_id,
-                        "tool_call_id": tool_id,
-                        "capability": cap_name,
-                        "action": act_name,
-                        "arguments": args
-                    }
-                ))
-
-                if policy_desc.decision == "deny":
-                    result_str = f"Execution blocked: Policy Denied. Reason: {policy_desc.reason}"
-                    completed_tool_calls[tool_id] = result_str
-                    convo.messages.append({
-                        "role": "tool",
-                        "tool_call_id": tool_id,
-                        "name": full_name,
-                        "content": result_str,
-                        "timestamp": time.time()
-                    })
-                    await self.event_bus.publish(Event(
-                        type="ToolCompleted",
-                        payload={"execution_id": execution_id, "tool_call_id": tool_id, "result": result_str}
-                    ))
-                elif policy_desc.decision == "approval":
-                    # Human-in-the-loop: Pause execution and await approval
-                    self.state_engine.transition_execution(
-                        state, "paused", reason="capability approval required", actor="runtime"
-                    )
-                    state.variables["pending_approval"] = {
-                        "tool_call_id": tool_id,
-                        "capability": cap_name,
-                        "action": act_name,
-                        "arguments": args,
-                        "fingerprint": fingerprint,
-                    }
-                    await self.event_bus.publish(Event(
-                        type="ApprovalRequested",
-                        payload={
-                            "execution_id": execution_id,
-                            "tool_call_id": tool_id,
-                            "capability": cap_name,
-                            "action": act_name,
-                            "arguments": args,
-                            "reason": policy_desc.reason
-                        }
-                    ))
-                    await self.event_bus.publish(Event(
-                        type="ExecutionPaused",
-                        payload={"execution_id": execution_id}
-                    ))
-                    # Stop the loop here, we will resume when decision arrives
-                    return "Paused waiting for human approval."
-                else:
-                    # 'allow' -> Execute the capability
-                    if state.status == "cancelled":
-                        raise asyncio.CancelledError()
-                    result_str = await self._call_tool(execution_id, cap_name, act_name, args)
-                    completed_tool_calls[tool_id] = result_str
-                    self._record_tool_result(execution_id, cap_name, act_name, args, result_str)
-                    convo.messages.append({
-                        "role": "tool",
-                        "tool_call_id": tool_id,
-                        "name": full_name,
-                        "content": result_str,
-                        "timestamp": time.time()
-                    })
-                    await self.event_bus.publish(Event(
-                        type="ToolCompleted",
-                        payload={"execution_id": execution_id, "tool_call_id": tool_id, "result": result_str}
-                    ))
+            pause_result = await self._process_step_tool_calls(
+                execution_id, state, convo, tool_calls, iteration, context,
+            )
+            if pause_result is not None:
+                return pause_result
 
             tool_history = state.variables.get("tool_call_history", [])
             if (self._missing_artifacts(execution_id, step) and len(tool_history) >= 8

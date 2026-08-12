@@ -62,7 +62,7 @@ def test_symbol_graph_links_classes_methods_calls_and_composition():
     ) in edges
     assert (
         "gptmoss.core.kernel:RuntimeKernel.submit_task",
-        "gptmoss.core.execution:ExecutionEngine.execute_task",
+        "gptmoss.core.execution:ExecutionEngine.schedule_execution",
         "calls",
     ) in edges
     assert (
@@ -109,7 +109,7 @@ def test_impact_analysis_returns_consumers_data_surfaces_and_tests():
     dependent_ids = {item["id"] for item in report["dependents"]}
     test_ids = {item["id"] for item in report["tests"]}
     data_ids = {item["id"] for item in report["structured_data"]}
-    assert "gptmoss.core.kernel:RuntimeKernel.submit_task" in dependent_ids
+    assert "gptmoss.core.execution:ExecutionEngine._run_plan_step" in dependent_ids
     assert any(identifier.startswith("tests.test_execution:") for identifier in test_ids)
     assert "data:execution-field:status" in data_ids
     assert "gptmoss/core/execution.py" in report["files"]

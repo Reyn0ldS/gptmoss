@@ -20,6 +20,7 @@ from gptmoss.core.execution import (
     normalize_plan,
 )
 from gptmoss.core.skills import SkillRegistry
+from gptmoss.core.domains import ProjectDomainRegistry
 from gptmoss.core.state import StateEngine
 from gptmoss.memory.ram import RAMMemoryProvider
 from gptmoss.planners.simple import SimplePlanner, analyze_task_complexity
@@ -27,11 +28,11 @@ from gptmoss.policies.simple import SimplePolicyProvider
 from tests.mock_llm import MockLLMProvider
 
 
-AVATAR_PROMPT = (
-    "j'aimerais un logiciel ou un programme, qui a partir d'une image de visage, peut créer un avatar en 3D. "
-    "Ce programme doit ingérer l'image, puis en extrapoler un modèle 3D cohérent nue. De la même manière avec "
-    "les vêtements, on doit pouvoir importer une image, le programme doit faire une extrapolation 3D, et on doit "
-    "ensuite pouvoir faire porter ces vêtements aux différentes modèles 3D nue."
+COMPLEX_PROJECT_PROMPT = (
+    "Construire une application locale et portable qui ingère des documents, images et données, "
+    "automatise leur validation, applique des règles de sécurité et de confidentialité, expose une API "
+    "et une interface accessible, produit des rapports auditables, fonctionne hors ligne, sauvegarde son "
+    "état et reprend les traitements interrompus avec des tests complets."
 )
 
 
@@ -48,6 +49,21 @@ def _engine(tmp_path, llm, max_iterations=8):
     )
     engine.register_capability("filesystem", FilesystemCapability(str(tmp_path), state))
     return engine, state
+
+
+def test_project_domain_registry_is_generic_and_project_extensible():
+    registry = ProjectDomainRegistry()
+    registry.register("legal-case-management", ["dossier contentieux", "jurisprudence"])
+
+    generic = analyze_task_complexity("Construire une application offline avec API", registry)
+    specialized = analyze_task_complexity(
+        "Organiser un dossier contentieux et sa jurisprudence", registry
+    )
+
+    assert "software-engineering" in generic["domains"]
+    assert "offline-and-operations" in generic["domains"]
+    assert "legal-case-management" in specialized["domains"]
+    assert not any("avatar" in domain or "garment" in domain for domain in generic["domains"])
 
 
 @pytest.mark.asyncio
@@ -74,9 +90,9 @@ async def test_provider_outage_is_persisted_as_resumable_wait(tmp_path):
     assert execution.variables["task"] == "Build a complex local application"
     restored = StateEngine(str(persist_path)).get_execution("durable-wait")
     assert restored.status == "waiting_provider"
-    resume_task = engine._provider_resume_tasks.pop("durable-wait")
-    resume_task.cancel()
-    await asyncio.gather(resume_task, return_exceptions=True)
+    resume_job = engine.provider_recovery.jobs.pop("durable-wait")
+    assert engine.scheduler.cancel(resume_job)
+    await engine.stop_runtime_services()
 
 
 @pytest.mark.asyncio
@@ -299,10 +315,10 @@ async def test_failed_final_assurance_reopens_only_repair_and_auditor(tmp_path):
 
 
 def test_cross_domain_request_has_rich_engine_agnostic_fallback():
-    analysis = analyze_task_complexity(AVATAR_PROMPT)
-    plan = SimplePlanner._fallback_plan(AVATAR_PROMPT, analysis)
+    analysis = analyze_task_complexity(COMPLEX_PROJECT_PROMPT)
+    plan = SimplePlanner._fallback_plan(COMPLEX_PROJECT_PROMPT, analysis)
 
-    assert analysis["level"] == "very_high"
+    assert analysis["level"] in {"high", "very_high"}
     assert len(plan["steps"]) >= 12
     specialists = [step["specialist"] for step in plan["steps"]]
     assert len(set(specialists)) == len(specialists)
@@ -323,7 +339,7 @@ def test_cross_domain_request_has_rich_engine_agnostic_fallback():
     assert {item["id"] for item in plan["requirements"]} == {"REQ-DELIVERY"}
     assert all(step["requirement_ids"] == ["REQ-DELIVERY"] for step in plan["steps"])
     assert not any(
-        str(path).startswith("src/avatar3d")
+        str(path).startswith("src/fixed-domain-package")
         for step in plan["steps"] for path in step["required_artifacts"]
     )
     assert plan["scope_changes"] == []
@@ -347,13 +363,17 @@ def test_plan_contract_preserves_specialist_quality_fields_and_rejects_bad_lists
 def test_skills_are_selected_for_each_specialist_not_only_the_parent_task():
     registry = _registry()
     vision = {skill.name for skill in registry.select("Face Reconstruction Engineer computer vision inference")}
-    garments = {skill.name for skill in registry.select("Garment Reconstruction Engineer cloth fitting draping")}
+    explicit_media = {
+        skill.name for skill in registry.select(
+            "Project-specific media adapter", requested=["computer-vision-ml"]
+        )
+    }
     integration = {skill.name for skill in registry.select("Autonomous Integration Repair Engineer acceptance tests root cause")}
 
-    assert "computer-vision-ml" in vision
-    assert "digital-garments" in garments
+    assert "computer-vision-ml" not in vision
+    assert "computer-vision-ml" in explicit_media
     assert "integration-delivery" in integration
-    assert vision != garments
+    assert all(skill.auto_select for skill in registry.select("generic software integration"))
 
 
 @pytest.mark.asyncio
@@ -585,7 +605,7 @@ async def test_transient_llm_errors_are_retried_without_losing_execution(tmp_pat
     llm = TransientLLM()
     engine, _ = _engine(tmp_path, llm)
     no_wait = AsyncMock()
-    monkeypatch.setattr("gptmoss.core.execution.asyncio.sleep", no_wait)
+    monkeypatch.setattr(engine.scheduler, "wait", no_wait)
 
     response = await engine._completion_with_recovery("recover", messages=[])
 

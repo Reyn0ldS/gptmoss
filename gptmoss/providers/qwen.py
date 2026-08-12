@@ -2,6 +2,7 @@ import hashlib
 import json
 import os
 import logging
+import asyncio
 from typing import List, Dict, Any, Optional
 from openai import AsyncOpenAI
 from gptmoss.interfaces.llm import LLMProvider
@@ -18,7 +19,9 @@ class QwenProvider(LLMProvider):
         self,
         api_key: Optional[str] = None,
         base_url: Optional[str] = None,
-        default_model: str = "qwen-turbo"
+        default_model: str = "qwen-turbo",
+        ssl_verify: bool = True,
+        ssl_cert_path: str = "",
     ):
         # Fall back to env variables or defaults
         self.api_key = api_key or os.getenv("OPENAI_API_KEY") or os.getenv("DASHSCOPE_API_KEY") or "mock-key"
@@ -29,12 +32,15 @@ class QwenProvider(LLMProvider):
         self.supports_vision = self._infer_vision(default_model)
         self._native_tools_supported: Optional[bool] = None
         self._learned_context_chars: Optional[int] = None
+        self._retired_clients = []
+        self._close_tasks: set[asyncio.Task] = set()
         
         logger.info(f"Initializing QwenProvider calling base_url={self.base_url} with default_model={self.default_model}")
         import httpx
         # Certificate validation is secure by default. A local/self-signed
         # endpoint can still be enabled explicitly through settings.
-        http_client = httpx.AsyncClient(verify=True)
+        verify_value = ssl_cert_path if ssl_verify and ssl_cert_path else bool(ssl_verify)
+        http_client = httpx.AsyncClient(verify=verify_value)
         # ExecutionEngine owns provider recovery and persists waiting state.
         # Hidden SDK retries multiply that policy and can make one request
         # monopolize an execution for many minutes without observable state.
@@ -66,7 +72,40 @@ class QwenProvider(LLMProvider):
         else:
             logger.error("Error in LLM completion: %s", error, exc_info=True)
 
-    def update_config(self, api_key: str, base_url: str, ssl_verify: bool = False, ssl_cert_path: str = "", model_name: str = "qwen-turbo"):
+    def _retire_client(self, client) -> None:
+        if client is None:
+            return
+        self._retired_clients.append(client)
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+
+        async def close_retired() -> None:
+            try:
+                await client.close()
+            finally:
+                if client in self._retired_clients:
+                    self._retired_clients.remove(client)
+
+        task = loop.create_task(close_retired())
+        self._close_tasks.add(task)
+        task.add_done_callback(self._close_tasks.discard)
+
+    async def close(self) -> None:
+        """Close the active SDK client and every superseded transport."""
+        pending_closes = list(self._close_tasks)
+        if pending_closes:
+            await asyncio.gather(*pending_closes, return_exceptions=True)
+        clients = list({id(client): client for client in [self.client, *self._retired_clients]}.values())
+        self._retired_clients = []
+        for client in clients:
+            try:
+                await client.close()
+            except Exception:
+                logger.warning("Unable to close an LLM HTTP client cleanly.", exc_info=True)
+
+    def update_config(self, api_key: str, base_url: str, ssl_verify: bool = True, ssl_cert_path: str = "", model_name: str = "qwen-turbo"):
         self.api_key = api_key
         self.base_url = base_url
         self.default_model = model_name
@@ -84,8 +123,10 @@ class QwenProvider(LLMProvider):
             verify_value = False
             
         http_client = httpx.AsyncClient(verify=verify_value)
+        previous_client = getattr(self, "client", None)
         self.client = AsyncOpenAI(api_key=self.api_key, base_url=self.base_url, http_client=http_client,
                                   max_retries=0, timeout=90.0)
+        self._retire_client(previous_client)
         logger.info(f"QwenProvider config updated. base_url={self.base_url}, ssl_verify={ssl_verify}, ssl_cert_path={ssl_cert_path}")
 
     @staticmethod

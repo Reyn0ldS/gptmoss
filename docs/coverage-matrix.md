@@ -8,8 +8,9 @@ modules et tests est dans `application-map.json` ; le présent document apporte 
 |---|---|---|---|---|
 | Bootstrap | `main.py`, scripts install/start | `/health`, `/readiness` | workspace, fournisseur, limites | `test_runtime_improvements`, `test_windows_portable_python` |
 | Supervision serveur | `server_supervisor.py` | centre Serveur, `/api/runtime-control`, API :8765 | ports CLI/environnement | `test_server_supervisor`, `test_functional_coverage_contract` |
-| Soumission/projets | kernel, API, filesystem | compositeur, `/executions`, `/projects` | `projects`, `workspace_path` | `test_api`, `test_end_to_end_workflow` |
-| Planification | `planners/simple.py`, execution | plan et statuts | contexte, autonomie, délégation | `test_planning_modes`, `test_lifecycle_chronology` |
+| Soumission/projets | kernel, API, filesystem, domains | compositeur, `/executions`, `/projects` | `projects`, domaines projet, `workspace_path` | `test_api`, `test_end_to_end_workflow`, `test_adaptive_autonomy` |
+| Planification temporelle | scheduler, kernel, reprise fournisseur | `delay_seconds`, `run_at`, statuts | échéance persistée | `test_scheduler_and_legacy_state`, `test_api`, `test_lifecycle_chronology` |
+| Planification fonctionnelle | `planners/simple.py`, domains, execution | plan et statuts | contexte, autonomie, délégation | `test_planning_modes`, `test_lifecycle_chronology` |
 | Exécution/outils | `core/execution.py`, capacités | timeline, feed, WebSocket | budgets, skills, permissions | `test_execution`, `test_adaptive_autonomy` |
 | Politique/shell | policy, shell/filesystem | approbation, pause/reprise | denied/approval, safe shell, autonomie | `test_policy`, `test_runtime_improvements` |
 | Sous-agents | agent, devteam, kernel | bibliothèque et endpoints subagents | profondeur/délégation | `test_agent_and_memory`, `test_devteam` |
@@ -17,11 +18,11 @@ modules et tests est dans `application-map.json` ; le présent document apporte 
 | Mémoire | JSON store, context, memory cap | bibliothèque `/memory` | scope projet implicite | `test_memory_v2` |
 | Skills/évolution | skills, evolution | bibliothèque, profils, évolution | skills par défaut, création/amélioration | `test_autonomous_evolution`, `test_skills_and_artifacts` |
 | Fournisseur LLM | qwen, reprise execution | test de connexion, diagnostics | URL, clé, modèle, TLS, vision | `test_provider_integration`, `test_api` |
-| Qualité documentaire | corpus, document_quality | résultats d'exécution | profil professionnel | `test_document_quality`, `test_corpus` |
+| Qualité documentaire | corpus, document_quality | résultats d'exécution | profil professionnel | `test_document_quality`, `test_quality_benchmarks`, `test_corpus` |
 | Assurance logiciel | delivery, artifact_validation | plan, métriques, feed | contrat produit par plan | `test_delivery_assurance`, `test_delivery_benchmarks` |
 | Paquet professionnel | professional_delivery, delivery_package | bouton Télécharger | profil professionnel | `test_professional_delivery` |
 | État/événements | state, event_bus, observability | WebSockets, diagnostics, audit | fichiers du workspace | `test_event_bus`, `test_lifecycle_chronology` |
-| Offline | scripts préparation, manifests | scripts BAT/install/start | versions épinglées | `test_offline_source_package`, `test_windows_portable_python` |
+| Offline/release | scripts préparation, manifests source/runtime | scripts BAT/install/start | versions épinglées | `test_offline_source_package`, `test_source_release`, `test_windows_portable_python`, CI archive propre |
 | Documentation vivante | docs, graphe de symboles + validateurs | dépôt et CLI d'impact | manifestes cartographiques | `test_application_map`, `test_symbol_map`, `test_documentation_contract` |
 
 ## Contrats de configuration
