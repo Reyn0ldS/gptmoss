@@ -1,0 +1,150 @@
+# Cartographie fonctionnelle et chronologique
+
+Ce document suit les parcours utilisateur jusqu'à leurs effets persistants. Les états
+d'exécution officiels sont `pending`, `running`, `paused`, `waiting_provider`,
+`cancelled`, `completed` et `failed`.
+
+## Démarrage et contrôle du serveur
+
+```text
+start.bat
+  -> find_python.bat
+  -> vérification des imports (ou install.bat)
+  -> server_supervisor.py :8765
+  -> contrôle du port cible
+  -> main.py --host/--port
+  -> bootstrap_runtime
+  -> /health puis /readiness
+  -> GUI connectée + WebSocket global
+```
+
+Le superviseur est le parent du serveur. `start`, `stop`, `restart` et `rebind` retournent
+l'état réel (`starting`, `running`, `stopped`, `error`) avec PID, port, disponibilité et
+dernière erreur. La GUI découvre ce canal par `/api/runtime-control`, puis interroge le
+superviseur avec son jeton. Un port occupé est signalé avant de démarrer l'enfant.
+
+## Soumission d'une tâche
+
+1. L'utilisateur choisit un projet, décrit le résultat attendu, sélectionne skills et
+   pièces jointes, puis la GUI appelle `POST /executions`.
+2. L'API vérifie projet et artefacts, constitue les variables et appelle
+   `RuntimeKernel.submit_task`.
+3. Le noyau crée l'identifiant, refuse les cycles de délégation, initialise l'état
+   `pending`, publie `TaskCreated` et lance le moteur en arrière-plan.
+4. Le moteur verrouille l'exécution, sélectionne les skills, calcule les capacités et
+   passe à `running` avec `ExecutionStarted`.
+5. Le contexte rassemble conversation, état, mémoire validée du projet, schémas d'outils
+   et pièces jointes bornées ; `ContextBuilt` est publié.
+6. Le planner produit exigences, interfaces, dépendances, validations et étapes. Le plan
+   est normalisé, les exigences héritées sont fusionnées et le profil professionnel est
+   appliqué aux travaux documentaires.
+7. Une réduction de périmètre requiert `ScopeApprovalRequested` avant toute exécution.
+
+## Ordonnancement et exécution d'une étape
+
+```text
+dépendances terminées
+  -> StepStarted
+  -> spécialisation/skills/contextualisation
+  -> boucle LLM
+       -> texte final provisoire, ou appel d'outil
+       -> contrôle policy : deny | approval | allow
+       -> exécution de la capacité
+       -> ToolCompleted + nouvelle preuve
+  -> vérification artefacts/interfaces/commandes/qualité
+       -> réparation/reprise si amélioration possible
+       -> StepCompleted ou StepFailed
+```
+
+Le plan est la source de l'ordre : une étape n'est exécutable qu'après ses dépendances.
+Les prérequis validés sont réutilisés, et les chemins possédés empêchent les spécialistes
+concurrents de modifier le même livrable. Une répétition sans preuve consomme le budget de
+stagnation ; une modification durable ou une nouvelle validation réussie le remet à zéro.
+
+Les appels shell peuvent mettre l'exécution en `paused` avec `ApprovalRequested`.
+L'approbation reprend exactement l'appel en attente ; le rejet devient une preuve à
+intégrer au raisonnement. Pause utilisateur, annulation et reprise sont propagées aux
+sous-agents compatibles.
+
+## Fournisseur indisponible et reprise
+
+Une erreur transitoire passe l'état à `waiting_provider`, préserve plan, conversation et
+résultats, publie `ExecutionWaitingProvider` et programme une nouvelle tentative. Une
+erreur d'authentification ou de configuration permanente devient `failed` avec un
+diagnostic exploitable : elle ne doit pas boucler comme une panne réseau.
+
+Au redémarrage, les exécutions interrompues et celles en attente fournisseur sont
+normalisées puis reprises sans dupliquer la tâche initiale. Le verrou par exécution
+empêche deux boucles simultanées.
+
+## Documents et corpus local
+
+1. `POST /artifacts` décode et stocke le fichier avec un nom sûr.
+2. La signature effective détermine le parseur, pas seulement l'extension annoncée.
+3. TXT/Markdown/CSV/JSON/XML/HTML, DOCX, PPTX et PDF sont normalisés en blocs avec
+   provenance ; les archives sont soumises aux limites de taille et de ratio.
+4. L'index documentaire est reconstruit/synchronisé puis devient interrogeable.
+5. L'exécution ne voit que les artefacts explicitement attachés. La capacité `documents`
+   impose l'ordre inventaire, recherche, lecture ciblée et chunks si nécessaire.
+6. Les citations internes se fondent sur les identifiants, fichiers et positions locales ;
+   aucune preuve Internet n'est fabriquée pour un mode corpus local.
+
+Un upload invalide renvoie une erreur client ; une indisponibilité de stockage renvoie un
+diagnostic temporaire. Les écritures utilisent des chemins compatibles UNC et un nom de
+métadonnées distinct du chemin utilisateur.
+
+## Mémoire gouvernée
+
+- `memory.search` expose par défaut uniquement les éléments validés, actifs et du projet.
+- `memory.propose` crée une proposition de projet non validée avec provenance d'exécution.
+- La GUI permet création, édition, validation et suppression ; le scope global est une
+  décision humaine explicite.
+- TTL, déduplication et supersession empêchent les entrées expirées ou remplacées de
+  contaminer le contexte courant.
+
+La mémoire conserve des préférences et faits réutilisables ; l'état d'exécution conserve
+la chronologie d'une tâche. Ces deux responsabilités ne doivent pas être confondues.
+
+## Sous-agents et équipe de développement
+
+La capacité `agent` crée un enfant lié au parent. La lignée normalisée interdit de
+redéléguer exactement une tâche ancestrale et la profondeur suit la configuration. Les
+enfants héritent du projet, des exigences nécessaires et des skills demandés.
+
+`devteam.build_project` orchestre architecture, sécurité, code, tests, réparation et
+documentation. Il demande `devteam.approve_quality_gate` avant de présenter le projet
+comme livré. Ce pipeline est une fonctionnalité spécialisée, pas le comportement imposé
+à toutes les tâches GPTMOSS.
+
+## Assurance et livraison professionnelle
+
+Après toutes les étapes :
+
+1. le moteur évalue le contrat gelé à partir du workspace et des historiques réels ;
+2. toute défaillance déclenche une réparation ciblée ou échoue explicitement ;
+3. `DeliveryAssuranceCompleted` enregistre contrôles et preuves ;
+4. une tâche documentaire professionnelle génère un DOCX, le rapport d'assurance JSON,
+   un manifeste SHA-256 et un ZIP ;
+5. l'état devient `completed` seulement après convergence ;
+6. la GUI affiche le bouton de téléchargement uniquement si le paquet existe.
+
+Les critères documentaires interdisent notamment les placeholders, doublons et volumes
+insuffisants, et exigent couverture des pièces et références locales selon le profil.
+
+## Réglages à chaud
+
+La GUI lit `/api/settings`, masque la clé et soumet le modèle complet. L'API exige une
+confirmation pour les changements sensibles, écrit `config.json`, met à jour fournisseur,
+politique, shell, limites, registres et capacités, puis écrit l'audit. Un changement de
+workspace resynchronise artefacts et documents. Le test de connexion vérifie à la fois le
+catalogue `/models` et une complétion minimale, donc une clé sans droit d'inférence est
+détectée avant une vraie exécution.
+
+## Suppression et conservation
+
+- Une annulation conserve les traces mais arrête les processus connus.
+- La suppression d'une exécution refuse un travail encore actif et propage l'événement.
+- La suppression d'un artefact retire fichier, métadonnées et index.
+- Seuls les skills appartenant au workspace sont modifiables ou supprimables.
+- `clear-all` ne doit pas masquer une exécution active.
+- Les paquets livrés restent associés au projet, séparés des uploads et du dépôt source.

@@ -1,0 +1,337 @@
+{
+  "schema_version": 1,
+  "application": "GPTMOSS",
+  "entrypoints": [
+    "main.py",
+    "start.bat",
+    "start.sh",
+    "install.bat",
+    "install.sh",
+    "prepare-offline-source.bat"
+  ],
+  "modules": {
+    "gptmoss/api/server.py": "api",
+    "gptmoss/capabilities/agent.py": "capability",
+    "gptmoss/capabilities/devteam.py": "capability",
+    "gptmoss/capabilities/documents.py": "capability",
+    "gptmoss/capabilities/filesystem.py": "capability",
+    "gptmoss/capabilities/memory.py": "capability",
+    "gptmoss/capabilities/shell.py": "capability",
+    "gptmoss/core/adaptive.py": "runtime",
+    "gptmoss/core/artifact_validation.py": "assurance",
+    "gptmoss/core/artifacts.py": "documents",
+    "gptmoss/core/constants.py": "runtime",
+    "gptmoss/core/context.py": "memory",
+    "gptmoss/core/corpus.py": "assurance",
+    "gptmoss/core/delivery.py": "assurance",
+    "gptmoss/core/delivery_package.py": "delivery",
+    "gptmoss/core/document_quality.py": "assurance",
+    "gptmoss/core/documents.py": "documents",
+    "gptmoss/core/durable_io.py": "persistence",
+    "gptmoss/core/event_bus.py": "runtime",
+    "gptmoss/core/evolution.py": "skills",
+    "gptmoss/core/execution.py": "runtime",
+    "gptmoss/core/kernel.py": "runtime",
+    "gptmoss/core/observability.py": "observability",
+    "gptmoss/core/professional_delivery.py": "delivery",
+    "gptmoss/core/scheduler.py": "reserved",
+    "gptmoss/core/skills.py": "skills",
+    "gptmoss/core/state.py": "persistence",
+    "gptmoss/interfaces/capability.py": "contract",
+    "gptmoss/interfaces/llm.py": "contract",
+    "gptmoss/interfaces/memory.py": "contract",
+    "gptmoss/interfaces/planner.py": "contract",
+    "gptmoss/interfaces/policy.py": "contract",
+    "gptmoss/memory/json_store.py": "memory",
+    "gptmoss/memory/ram.py": "memory",
+    "gptmoss/planners/simple.py": "planning",
+    "gptmoss/policies/simple.py": "security",
+    "gptmoss/providers/qwen.py": "provider"
+  },
+  "operational_files": [
+    "scripts/browser_layout_audit.py",
+    "scripts/configure_embedded_python.py",
+    "scripts/find_python.bat",
+    "scripts/prepare_offline_source.py",
+    "scripts/prepare_offline_source_launcher.py",
+    "scripts/prepare_portable_python.py",
+    "scripts/run_delivery_benchmarks.py",
+    "scripts/server_supervisor.py",
+    "scripts/validate_application_map.py",
+    "scripts/validate_document.py"
+  ],
+  "capabilities": {
+    "agent": {
+      "module": "gptmoss/capabilities/agent.py",
+      "actions": ["spawn", "status", "execute_subtask"]
+    },
+    "devteam": {
+      "module": "gptmoss/capabilities/devteam.py",
+      "actions": ["approve_quality_gate", "build_project"]
+    },
+    "documents": {
+      "module": "gptmoss/capabilities/documents.py",
+      "actions": ["inventory", "search", "read", "read_chunk"]
+    },
+    "filesystem": {
+      "module": "gptmoss/capabilities/filesystem.py",
+      "actions": ["read", "write", "list_dir", "delete"]
+    },
+    "memory": {
+      "module": "gptmoss/capabilities/memory.py",
+      "actions": ["search", "propose"]
+    },
+    "shell": {
+      "module": "gptmoss/capabilities/shell.py",
+      "actions": ["execute"]
+    }
+  },
+  "api_routes": [
+    ["GET", "/", "get_gui"],
+    ["GET", "/health", "health"],
+    ["GET", "/api/runtime-control", "runtime_control"],
+    ["GET", "/readiness", "readiness"],
+    ["POST", "/executions", "submit_task"],
+    ["GET", "/projects", "list_projects"],
+    ["POST", "/projects", "create_project"],
+    ["POST", "/artifacts", "upload_artifact"],
+    ["GET", "/artifacts", "list_artifacts"],
+    ["GET", "/artifacts/search", "search_artifacts"],
+    ["GET", "/artifacts/{artifact_id}/preview", "preview_artifact"],
+    ["DELETE", "/artifacts/{artifact_id}", "delete_artifact"],
+    ["POST", "/skills", "save_skill"],
+    ["POST", "/skills/import", "import_skill"],
+    ["POST", "/skills/{name}/validate", "validate_skill"],
+    ["DELETE", "/skills/{name}", "delete_skill"],
+    ["GET", "/memory", "list_memory"],
+    ["POST", "/memory", "create_memory"],
+    ["PUT", "/memory/{memory_id}", "update_memory"],
+    ["POST", "/memory/{memory_id}/validate", "validate_memory"],
+    ["DELETE", "/memory/{memory_id}", "delete_memory"],
+    ["GET", "/skills", "list_skills"],
+    ["GET", "/agent-profiles", "list_agent_profiles"],
+    ["GET", "/evolution", "evolution_status"],
+    ["GET", "/executions", "list_executions"],
+    ["GET", "/executions/{execution_id}", "get_execution"],
+    ["GET", "/executions/{execution_id}/delivery", "get_execution_delivery"],
+    ["GET", "/executions/{execution_id}/subagents", "list_subagents"],
+    ["POST", "/executions/{execution_id}/subagents", "create_subagent"],
+    ["GET", "/api/diagnostics", "get_diagnostics"],
+    ["GET", "/executions/{execution_id}/metrics", "get_execution_metrics"],
+    ["GET", "/executions/{execution_id}/unified-feed", "get_unified_feed"],
+    ["POST", "/executions/{execution_id}/approve", "approve_execution"],
+    ["POST", "/executions/{execution_id}/reject", "reject_execution"],
+    ["POST", "/executions/{execution_id}/pause", "pause_execution"],
+    ["POST", "/executions/{execution_id}/resume", "resume_execution"],
+    ["POST", "/executions/{execution_id}/cancel", "cancel_execution"],
+    ["DELETE", "/executions/{execution_id}", "delete_execution"],
+    ["POST", "/executions/clear-all", "clear_all_executions"],
+    ["WEBSOCKET", "/ws/events", "ws_events"],
+    ["WEBSOCKET", "/ws/executions/{execution_id}", "ws_execution_events"],
+    ["GET", "/api/audit", "get_audit"],
+    ["POST", "/api/settings/reveal-secret", "reveal_secret"],
+    ["GET", "/api/settings", "get_settings"],
+    ["POST", "/api/settings/test-connection", "test_connection"],
+    ["POST", "/api/settings", "update_settings"]
+  ],
+  "events": [
+    "ApprovalRequested",
+    "ArtifactRescueRequested",
+    "ArtifactRescued",
+    "AutonomousSpecializationPrepared",
+    "ContextBuilt",
+    "DeliveryAssuranceCompleted",
+    "DeliveryRepairScheduled",
+    "ExecutionCancelled",
+    "ExecutionCompleted",
+    "ExecutionFailed",
+    "ExecutionPaused",
+    "ExecutionProviderRetry",
+    "ExecutionResumed",
+    "ExecutionStarted",
+    "ExecutionWaitingProvider",
+    "FileOwnershipViolation",
+    "LLMRequest",
+    "LLMResponse",
+    "LLMRetryScheduled",
+    "PlanGenerated",
+    "ProjectCreated",
+    "ScopeApprovalRequested",
+    "ScopeApproved",
+    "StaleDelegatedApprovalCleared",
+    "StepCompleted",
+    "StepFailed",
+    "StepQualityImproved",
+    "StepRetryScheduled",
+    "StepStarted",
+    "TaskCreated",
+    "TaskDeleted",
+    "TasksCleared",
+    "ToolCalled",
+    "ToolCompleted",
+    "ToolReused",
+    "ValidationRepairHandoff"
+  ],
+  "execution_statuses": [
+    "pending",
+    "running",
+    "paused",
+    "waiting_provider",
+    "cancelled",
+    "completed",
+    "failed"
+  ],
+  "configuration_fields": [
+    "api_key",
+    "base_url",
+    "model_name",
+    "vision_mode",
+    "ssl_verify",
+    "ssl_cert_path",
+    "denied_capabilities",
+    "approval_required_capabilities",
+    "workspace_full_autonomy",
+    "continue_while_progress",
+    "adaptive_resource_management",
+    "strict_skill_capabilities",
+    "allow_nested_delegation",
+    "max_delegation_depth",
+    "autonomous_specialization",
+    "autonomous_skill_creation",
+    "autonomous_skill_improvement",
+    "skill_coverage_threshold",
+    "max_autonomous_skills_per_execution",
+    "workspace_path",
+    "restrict_to_workspace",
+    "allow_subfolders",
+    "max_context_chars",
+    "max_upload_bytes",
+    "max_attachment_text_chars",
+    "max_step_iterations",
+    "max_step_retries",
+    "safe_shell_mode",
+    "shell_timeout_seconds",
+    "shell_max_output_chars",
+    "default_skills",
+    "projects"
+  ],
+  "gui_surfaces": [
+    {
+      "id": "task-composer",
+      "evidence": ["submitNewTask", "/executions", "/projects", "/artifacts"]
+    },
+    {
+      "id": "execution-control",
+      "evidence": ["pauseActiveExecution", "resumeActiveExecution", "cancelActiveExecution", "downloadActiveDelivery"]
+    },
+    {
+      "id": "execution-observation",
+      "evidence": ["setupWebSocket", "/ws/events", "/unified-feed", "fetchExecutionDetails"]
+    },
+    {
+      "id": "library",
+      "evidence": ["refreshLibrary", "/artifacts/search", "/memory", "/skills", "/api/diagnostics"]
+    },
+    {
+      "id": "settings",
+      "evidence": ["collectSettingsPayload", "/api/settings", "/api/settings/test-connection"]
+    },
+    {
+      "id": "runtime-control",
+      "evidence": ["initializeRuntimeControl", "/api/runtime-control", "refreshServerStatus", "serverAction"]
+    }
+  ],
+  "persistence": [
+    ["workspace/config.json", "active configuration"],
+    ["workspace/state_store.json", "execution and conversation states"],
+    ["workspace/memories.json", "governed long-term memory"],
+    ["workspace/telemetry.jsonl", "local execution telemetry"],
+    ["workspace/settings_audit.jsonl", "settings and secret access audit"],
+    ["workspace/uploads", "attachments, normalized documents and index"],
+    ["workspace/projects/<project_id>", "default project workspaces"],
+    ["workspace/agents", "persistent specialist profiles"],
+    ["workspace/skills", "user and generated skills"],
+    ["workspace/evolution/events.jsonl", "skill evolution history"],
+    ["<project>/.gptmoss/deliveries/<execution_id>", "professional delivery package"]
+  ],
+  "features": [
+    {
+      "id": "runtime-api-gui",
+      "tests": ["tests/test_api.py", "tests/test_end_to_end_workflow.py", "tests/test_functional_coverage_contract.py"]
+    },
+    {
+      "id": "planning-execution-lifecycle",
+      "tests": ["tests/test_execution.py", "tests/test_lifecycle_chronology.py", "tests/test_planning_modes.py", "tests/test_general_runtime_adaptation.py", "tests/test_adaptive_autonomy.py"]
+    },
+    {
+      "id": "provider-recovery",
+      "tests": ["tests/test_provider_integration.py", "tests/test_runtime_improvements.py"]
+    },
+    {
+      "id": "policy-tools-delegation",
+      "tests": ["tests/test_policy.py", "tests/test_agent_and_memory.py", "tests/test_devteam.py"]
+    },
+    {
+      "id": "documents-artifacts",
+      "tests": ["tests/test_documents.py", "tests/test_document_capability.py", "tests/test_skills_and_artifacts.py"]
+    },
+    {
+      "id": "memory-v2",
+      "tests": ["tests/test_memory_v2.py"]
+    },
+    {
+      "id": "document-quality-delivery",
+      "tests": ["tests/test_document_quality.py", "tests/test_document_planner_fallback.py", "tests/test_professional_delivery.py", "tests/test_delivery_assurance.py", "tests/test_delivery_benchmarks.py", "tests/test_corpus.py"]
+    },
+    {
+      "id": "skills-evolution",
+      "tests": ["tests/test_autonomous_evolution.py"]
+    },
+    {
+      "id": "events-observability",
+      "tests": ["tests/test_event_bus.py"]
+    },
+    {
+      "id": "server-supervision",
+      "tests": ["tests/test_server_supervisor.py"]
+    },
+    {
+      "id": "offline-portable-runtime",
+      "tests": ["tests/test_offline_source_package.py", "tests/test_windows_portable_python.py"]
+    },
+    {
+      "id": "documentation-cartography",
+      "tests": ["tests/test_documentation_contract.py", "tests/test_application_map.py"]
+    }
+  ],
+  "offline": {
+    "runtime_directory": "python-3.13.14-embed-amd64",
+    "requirements": "requirements-runtime.txt",
+    "constraints": "constraints-runtime.txt",
+    "manifest": "offline-runtime-manifest.json",
+    "builder": "scripts/prepare_offline_source.py",
+    "launcher": "scripts/prepare_offline_source_launcher.py",
+    "required_repository_files": [
+      "main.py",
+      "gptmoss/api/gui.html",
+      "gptmoss/api/server.py",
+      "requirements-runtime.txt",
+      "constraints-runtime.txt",
+      "offline-runtime-manifest.json",
+      "install.bat",
+      "start.bat",
+      "prepare-offline-source.bat",
+      "scripts/find_python.bat",
+      "scripts/configure_embedded_python.py",
+      "scripts/prepare_offline_source.py",
+      "scripts/prepare_offline_source_launcher.py",
+      "scripts/server_supervisor.py"
+    ]
+  },
+  "documents": [
+    "docs/architecture.md",
+    "docs/functional-map.md",
+    "docs/coverage-matrix.md",
+    "docs/offline-package-manifest.md"
+  ]
+}

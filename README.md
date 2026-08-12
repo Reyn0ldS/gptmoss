@@ -8,6 +8,13 @@ La conception de la traçabilité, des propriétaires de fichiers, de l'audit
 indépendant, des reprises LLM et du benchmark multi-prompts est détaillée dans
 [DELIVERY_ASSURANCE.md](DELIVERY_ASSURANCE.md).
 
+La cartographie vivante de l'application est répartie entre
+[l'architecture](docs/architecture.md), les
+[parcours fonctionnels](docs/functional-map.md), la
+[matrice de couverture](docs/coverage-matrix.md) et le
+[contrat du paquet offline](docs/offline-package-manifest.md). Son inventaire machine
+`docs/application-map.json` est vérifié par `python scripts/validate_application_map.py`.
+
 ## Sommaire
 
 - [Démarrage rapide](#démarrage-rapide)
