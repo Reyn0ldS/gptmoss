@@ -98,6 +98,36 @@ def test_process_runner_bounds_large_output_before_returning(monkeypatch, tmp_pa
     assert "output truncated by shell safety limit" in output
 
 
+def test_process_runner_reports_cancellation_that_races_with_process_exit(
+    monkeypatch, tmp_path
+):
+    class Process:
+        returncode = -15
+        pid = 44
+
+        def wait(self, timeout=None):
+            return self.returncode
+
+    monkeypatch.setattr(
+        "gptmoss.capabilities.shell_runtime.subprocess.Popen",
+        lambda *args, **kwargs: Process(),
+    )
+    cancellation_checks = iter((False, True))
+    runner = ProcessRunner(ProcessRegistry())
+
+    output = runner.run(
+        ["ignored"],
+        use_shell=False,
+        cwd=str(tmp_path),
+        execution_id="cancel-race",
+        timeout=1,
+        max_output_chars=128,
+        cancelled=lambda _: next(cancellation_checks),
+    )
+
+    assert output == "Error: Command execution cancelled."
+
+
 @pytest.mark.asyncio
 async def test_qwen_reconfiguration_closes_superseded_and_active_clients(monkeypatch):
     created = []

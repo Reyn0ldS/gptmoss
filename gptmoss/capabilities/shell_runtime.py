@@ -160,6 +160,12 @@ class ProcessRunner:
             finally:
                 self.registry.unregister(execution_id, process)
 
+            # Cancellation can terminate the process between the polling check
+            # above and wait() returning.  The execution state is authoritative;
+            # do not expose the platform-specific termination exit code instead.
+            if cancelled(execution_id):
+                return "Error: Command execution cancelled."
+
             budget = max_output_chars if max_output_chars else None
             stdout_file.seek(0)
             stdout = stdout_file.read(budget)

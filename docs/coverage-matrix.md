@@ -6,7 +6,7 @@ modules et tests est dans `application-map.json` ; le présent document apporte 
 
 | Domaine | Code propriétaire | GUI/API | Configuration | Preuves principales |
 |---|---|---|---|---|
-| Bootstrap | `main.py`, scripts install/start | `/health`, `/readiness` | workspace, fournisseur, limites | `test_runtime_improvements`, `test_windows_portable_python` |
+| Bootstrap | `main.py`, scripts install/start | `/health`, `/readiness` | workspace, fournisseur, limites | `test_runtime_improvements`, `test_windows_portable_python`, `test_browser_layout_audit` |
 | Supervision serveur | `server_supervisor.py` | centre Serveur, `/api/runtime-control`, API :8765 | ports CLI/environnement | `test_server_supervisor`, `test_functional_coverage_contract` |
 | Soumission/projets | kernel, API, filesystem, domains | compositeur, `/executions`, `/projects` | `projects`, domaines projet, `workspace_path` | `test_api`, `test_end_to_end_workflow`, `test_adaptive_autonomy` |
 | Planification temporelle | scheduler, kernel, reprise fournisseur | `delay_seconds`, `run_at`, statuts | échéance persistée | `test_scheduler_and_legacy_state`, `test_api`, `test_lifecycle_chronology` |

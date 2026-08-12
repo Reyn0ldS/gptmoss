@@ -270,7 +270,7 @@
   "features": [
     {
       "id": "runtime-api-gui",
-      "tests": ["tests/test_api.py", "tests/test_end_to_end_workflow.py", "tests/test_functional_coverage_contract.py"]
+      "tests": ["tests/test_api.py", "tests/test_browser_layout_audit.py", "tests/test_end_to_end_workflow.py", "tests/test_functional_coverage_contract.py"]
     },
     {
       "id": "planning-execution-lifecycle",
