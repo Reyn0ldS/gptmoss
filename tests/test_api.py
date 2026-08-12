@@ -456,6 +456,11 @@ def test_api_settings_preserve_secret_and_context_budget(tmp_path):
         "projects": [{"id": "proj-default", "name": "Default"}],
         "max_step_iterations": 12,
         "max_step_retries": 5,
+        "document_engine_enabled": True,
+        "document_checkpoint_enabled": False,
+        "document_target_section_words": 900,
+        "diagram_rendering": False,
+        "docx_embed_diagrams": False,
         "max_context_chars": 24000,
         "max_upload_bytes": 100000,
         "max_attachment_text_chars": 5000,
@@ -478,6 +483,10 @@ def test_api_settings_preserve_secret_and_context_budget(tmp_path):
     assert public_settings["max_step_retries"] == 5
     assert public_settings["max_upload_bytes"] == 100000
     assert public_settings["max_attachment_text_chars"] == 5000
+    assert public_settings["document_checkpoint_enabled"] is False
+    assert public_settings["document_target_section_words"] == 900
+    assert public_settings["diagram_rendering"] is False
+    assert public_settings["docx_embed_diagrams"] is False
     assert policy.denied == ["documents.read_chunk"]
     assert exec_engine.continue_while_progress is False
     assert exec_engine.adaptive_resource_management is False
@@ -485,6 +494,11 @@ def test_api_settings_preserve_secret_and_context_budget(tmp_path):
     assert exec_engine.allow_nested_delegation is False
     assert exec_engine.max_delegation_depth == 4
     assert exec_engine.max_step_retries == 5
+    assert exec_engine.document_engine_enabled is True
+    assert exec_engine.document_checkpoint_enabled is False
+    assert exec_engine.document_target_section_words == 900
+    assert exec_engine.diagram_rendering is False
+    assert exec_engine.docx_embed_diagrams is False
     assert exec_engine.context_engine.adaptive is False
     assert exec_engine.context_engine.max_history_chars == 24000
     assert exec_engine.artifact_store.max_bytes == 100000
@@ -831,6 +845,9 @@ def test_gui_contains_complete_management_controls():
         "serverAction", "refreshServerStatus", 'id="server-modal"',
         'id="server-start"', 'id="server-stop"', 'id="server-restart"',
         'id="server-rebind"', "/api/runtime-control",
+        'id="settings-document-engine"', 'id="settings-document-checkpoint"',
+        'id="settings-document-target-words"', 'id="settings-diagram-rendering"',
+        'id="settings-docx-embed-diagrams"',
         'id="library-document-search"', 'id="library-document-results"',
         "/artifacts/search", 'id="library-agent-profiles"',
         'id="library-evolution"', "/agent-profiles", "/evolution",

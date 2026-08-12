@@ -232,6 +232,10 @@ signalÃ©e, jamais remplacÃ©e par une image trompeuse.
 
 Options dédiées : `document_engine_enabled`, `document_checkpoint_enabled`,
 `document_target_section_words`, `diagram_rendering` et `docx_embed_diagrams`.
+Elles sont modifiables dans la fenêtre Paramètres. Les chemins de checkpoint et de
+sortie sont confinés au workspace de l'exécution ; l'API expose uniquement leur
+disponibilité, jamais leur chemin local. Des identifiants et descriptions de figures
+uniques sont générés lorsque plusieurs diagrammes sont intégrés au même DOCX.
 
 ### Projets et dossiers de travail
 

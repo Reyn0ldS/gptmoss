@@ -56,22 +56,27 @@ def _table(rows: list[list[str]]) -> str:
     ) + "</w:tbl>"
 
 
-def _drawing(rel_id: str, name: str) -> str:
+def _drawing(rel_id: str, name: str, drawing_id: int, alt_text: str) -> str:
     return (
         '<w:p><w:r><w:drawing><wp:inline xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" '
         'distT="0" distB="0" distL="0" distR="0"><wp:extent cx="8500000" cy="4400000"/>'
-        '<wp:docPr id="1" name="' + _xml_text(name) + '"/><a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">'
+        '<wp:docPr id="' + str(drawing_id) + '" name="' + _xml_text(name) + '" descr="' + _xml_text(alt_text) + '"/><a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">'
         '<a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">'
-        '<pic:nvPicPr><pic:cNvPr id="0" name="' + _xml_text(name) + '"/><pic:cNvPicPr/></pic:nvPicPr>'
+        '<pic:nvPicPr><pic:cNvPr id="' + str(drawing_id) + '" name="' + _xml_text(name) + '"/><pic:cNvPicPr/></pic:nvPicPr>'
         '<pic:blipFill><a:blip r:embed="' + rel_id + '" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill>'
         '<pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="8500000" cy="4400000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr>'
         '</pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>'
     )
 
 
-def _markdown_parts(markdown: str) -> tuple[str, list[tuple[str, bytes, str]]]:
+def _markdown_parts(
+    markdown: str,
+    *,
+    render_diagrams: bool = True,
+    embed_diagrams: bool = True,
+) -> tuple[str, list[tuple[str, bytes, str, str]]]:
     output = []
-    media: list[tuple[str, bytes, str]] = []
+    media: list[tuple[str, bytes, str, str]] = []
     lines = markdown.splitlines()
     index = 0
     diagram_index = 0
@@ -84,14 +89,22 @@ def _markdown_parts(markdown: str) -> tuple[str, list[tuple[str, bytes, str]]]:
             while index < len(lines) and not re.match(r"^\s*```\s*$", lines[index]):
                 diagram_lines.append(lines[index])
                 index += 1
+            if not render_diagrams:
+                output.append(_paragraph("Diagram source (rendering disabled):"))
+                output.extend(_paragraph(item) for item in diagram_lines)
+                index += 1
+                continue
             spec = parse_mermaid("\n".join(diagram_lines), diagram_id=f"diagram-{diagram_index + 1}")
             diagram_index += 1
             validation = validate_diagram(spec)
             if validation["valid"]:
-                name = f"diagram-{diagram_index}.svg"
-                rel_id = f"rId{diagram_index + 1}"
-                media.append((name, render_svg(spec).encode("utf-8"), rel_id))
-                output.append(_drawing(rel_id, name))
+                if embed_diagrams:
+                    name = f"diagram-{diagram_index}.svg"
+                    rel_id = f"rId{diagram_index + 1}"
+                    media.append((name, render_svg(spec).encode("utf-8"), rel_id, spec.alt_text))
+                    output.append(_drawing(rel_id, name, diagram_index, spec.alt_text))
+                else:
+                    output.append(_paragraph(f"Diagram: {spec.caption} ({spec.alt_text})"))
             else:
                 output.append(_paragraph("Diagram rejected: " + "; ".join(validation["issues"])))
             index += 1
@@ -121,10 +134,21 @@ def _markdown_parts(markdown: str) -> tuple[str, list[tuple[str, bytes, str]]]:
     return "".join(output), media
 
 
-def render_docx(markdown: str, *, title: str, subject: str = "GPTMOSS delivery") -> bytes:
+def render_docx(
+    markdown: str,
+    *,
+    title: str,
+    subject: str = "GPTMOSS delivery",
+    render_diagrams: bool = True,
+    embed_diagrams: bool = True,
+) -> bytes:
     """Render Markdown to a standards-compliant DOCX without optional dependencies."""
     now = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
-    body, media = _markdown_parts(markdown)
+    body, media = _markdown_parts(
+        markdown,
+        render_diagrams=render_diagrams,
+        embed_diagrams=embed_diagrams,
+    )
     document = (
         '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
         '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
@@ -147,7 +171,7 @@ def render_docx(markdown: str, *, title: str, subject: str = "GPTMOSS delivery")
     relationship_rows = ['<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>']
     relationship_rows.extend(
         f'<Relationship Id="{rel_id}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/{name}"/>'
-        for name, _, rel_id in media
+        for name, _, rel_id, _ in media
     )
     document_rels = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' + "".join(relationship_rows) + "</Relationships>"
     core = f'''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
@@ -160,7 +184,7 @@ def render_docx(markdown: str, *, title: str, subject: str = "GPTMOSS delivery")
         archive.writestr("word/styles.xml", styles)
         archive.writestr("word/_rels/document.xml.rels", document_rels)
         archive.writestr("docProps/core.xml", core)
-        for name, payload, _ in media:
+        for name, payload, _, _ in media:
             archive.writestr(f"word/media/{name}", payload)
     return stream.getvalue()
 
@@ -183,6 +207,9 @@ def build_delivery_package(
     execution_id: str,
     plan: Dict[str, Any],
     assurance_report: Dict[str, Any],
+    *,
+    diagram_rendering: bool = True,
+    docx_embed_diagrams: bool = True,
 ) -> Dict[str, Any] | None:
     """Package validated files, a styled DOCX, assurance evidence, and hashes."""
     profile = plan.get("professional_profile") or {}
@@ -196,7 +223,12 @@ def build_delivery_package(
     markdown = primary_path.read_text(encoding="utf-8")
     title_match = re.search(r"(?m)^#\s+(.+)$", markdown)
     title = title_match.group(1).strip() if title_match else primary_path.stem.replace("-", " ").title()
-    docx_bytes = render_docx(markdown, title=title)
+    docx_bytes = render_docx(
+        markdown,
+        title=title,
+        render_diagrams=diagram_rendering,
+        embed_diagrams=docx_embed_diagrams,
+    )
     delivery_dir = root / ".gptmoss" / "deliveries" / execution_id
     delivery_dir.mkdir(parents=True, exist_ok=True)
     docx_path = delivery_dir / (primary_path.stem + ".docx")

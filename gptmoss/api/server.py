@@ -22,6 +22,7 @@ GUI_FILE_PATH = os.path.join(CURRENT_DIR, "gui.html")
 
 from gptmoss.core import EventBus, Event, StateEngine, RuntimeKernel, ExecutionEngine, DEFAULT_SYSTEM_PROMPT, RuntimeSettings, ProjectDomainRegistry
 from gptmoss.core.artifacts import ArtifactStore
+from gptmoss.core.document_model import DocumentModelStore
 from gptmoss.capabilities.documents import DocumentCapability
 from gptmoss.core.evolution import AgentProfileRegistry, AutonomousSkillLifecycle
 from gptmoss.core.skills import SkillRegistry
@@ -751,12 +752,24 @@ async def get_execution_document_state(execution_id: str):
     state = app_state.state_engine.get_execution(execution_id)
     checkpoint = state.variables.get("document_model_checkpoint")
     model = None
-    if checkpoint:
-        path = Path(str(checkpoint)).resolve()
-        if path.is_file():
+    checkpoint_available = False
+    filesystem = _filesystem_capability()
+    if checkpoint and filesystem:
+        workspace = Path(filesystem._get_workspace_for_execution(execution_id)).resolve()
+        checkpoint_root = workspace / ".gptmoss" / "document-state"
+        path = checkpoint_root / f"{execution_id}.document.json"
+        expected_relative = str(Path(".gptmoss") / "document-state" / path.name).replace("\\", "/")
+        if (
+            checkpoint_root.is_dir()
+            and str(checkpoint).replace("\\", "/") == expected_relative
+            and path.is_file()
+        ):
             try:
-                model = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, ValueError):
+                store = DocumentModelStore(checkpoint_root)
+                loaded = store.load(execution_id)
+                model = loaded.to_dict() if loaded is not None else None
+                checkpoint_available = model is not None
+            except ValueError:
                 model = None
     if model is None:
         model = {
@@ -772,7 +785,7 @@ async def get_execution_document_state(execution_id: str):
     return {
         "execution_id": execution_id,
         "status": model.get("status", "unknown"),
-        "checkpoint": str(checkpoint or ""),
+        "checkpoint_available": checkpoint_available,
         "revision": model.get("revision", 0),
         "section_count": len(sections),
         "completed_sections": completed,
@@ -1212,6 +1225,11 @@ async def get_settings():
         config.setdefault("autonomous_skill_improvement", True)
         config.setdefault("skill_coverage_threshold", 4)
         config.setdefault("max_autonomous_skills_per_execution", 0)
+        config.setdefault("document_engine_enabled", True)
+        config.setdefault("document_checkpoint_enabled", True)
+        config.setdefault("document_target_section_words", 450)
+        config.setdefault("diagram_rendering", True)
+        config.setdefault("docx_embed_diagrams", True)
         return config
             
     # Fallback to current memory values
@@ -1237,6 +1255,11 @@ async def get_settings():
         "autonomous_skill_improvement": getattr(getattr(app_state.execution_engine, "skill_lifecycle", None), "improvement_enabled", True),
         "skill_coverage_threshold": getattr(getattr(app_state.execution_engine, "skill_lifecycle", None), "coverage_threshold", 4),
         "max_autonomous_skills_per_execution": getattr(getattr(app_state.execution_engine, "skill_lifecycle", None), "max_skills_per_execution", 0),
+        "document_engine_enabled": getattr(app_state.execution_engine, "document_engine_enabled", True),
+        "document_checkpoint_enabled": getattr(app_state.execution_engine, "document_checkpoint_enabled", True),
+        "document_target_section_words": getattr(app_state.execution_engine, "document_target_section_words", 450),
+        "diagram_rendering": getattr(app_state.execution_engine, "diagram_rendering", True),
+        "docx_embed_diagrams": getattr(app_state.execution_engine, "docx_embed_diagrams", True),
         "workspace_path": getattr(fs, "workspace_root", "."),
         "restrict_to_workspace": getattr(fs, "restrict_to_workspace", True),
         "allow_subfolders": getattr(fs, "allow_subfolders", True),
@@ -1363,6 +1386,11 @@ async def update_settings(req: SettingsRequest):
         "autonomous_skill_improvement": req.autonomous_skill_improvement,
         "skill_coverage_threshold": req.skill_coverage_threshold,
         "max_autonomous_skills_per_execution": req.max_autonomous_skills_per_execution,
+        "document_engine_enabled": req.document_engine_enabled,
+        "document_checkpoint_enabled": req.document_checkpoint_enabled,
+        "document_target_section_words": req.document_target_section_words,
+        "diagram_rendering": req.diagram_rendering,
+        "docx_embed_diagrams": req.docx_embed_diagrams,
         "workspace_path": req.workspace_path,
         "restrict_to_workspace": req.restrict_to_workspace,
         "allow_subfolders": req.allow_subfolders,
@@ -1407,6 +1435,11 @@ async def update_settings(req: SettingsRequest):
     app_state.execution_engine.default_skills = [skill.lower() for skill in req.default_skills]
     app_state.execution_engine.max_step_iterations = req.max_step_iterations
     app_state.execution_engine.max_step_retries = req.max_step_retries
+    app_state.execution_engine.document_engine_enabled = req.document_engine_enabled
+    app_state.execution_engine.document_checkpoint_enabled = req.document_checkpoint_enabled
+    app_state.execution_engine.document_target_section_words = req.document_target_section_words
+    app_state.execution_engine.diagram_rendering = req.diagram_rendering
+    app_state.execution_engine.docx_embed_diagrams = req.docx_embed_diagrams
     app_state.execution_engine.continue_while_progress = req.continue_while_progress
     app_state.execution_engine.adaptive_resource_management = req.adaptive_resource_management
     app_state.execution_engine.strict_skill_capabilities = req.strict_skill_capabilities

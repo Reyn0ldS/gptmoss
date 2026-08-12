@@ -8,8 +8,9 @@ while retaining independent repair and final assurance for every document.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
-from typing import Any, Callable
+from dataclasses import dataclass, replace
+from typing import Any
+from unicodedata import combining, normalize
 
 
 @dataclass(frozen=True)
@@ -26,8 +27,38 @@ class DocumentWorkEstimate:
 def estimate_document_work(task: str, analysis: dict[str, Any] | None = None) -> DocumentWorkEstimate:
     text = str(task or "")
     lowered = text.casefold()
-    sources = re.findall(r"\b[A-Za-z0-9][A-Za-z0-9_.-]*\.(?:docx|pptx|pdf|txt|html|md)\b", text, re.I)
-    outputs = re.findall(r"\b[A-Za-z0-9][A-Za-z0-9_.-]*\.(?:md|json|txt|html|docx|pptx)\b", text, re.I)
+    file_matches = list(re.finditer(
+        r"\b[A-Za-z0-9][A-Za-z0-9_.-]*\.(?:docx|pptx|pdf|txt|html|md|json)\b",
+        text,
+        re.I,
+    ))
+    output_name = re.compile(
+        r"(?i)(?:deliverable|delivery|livrable|output|report|rapport|dossier|manifest|"
+        r"decision-log|traceability|requirements|executive-summary)"
+    )
+    source_context = re.compile(
+        r"\b(?:from|using|source|sources|input|inputs|attachment|attachments|"
+        r"depuis|corpus|piece jointe|pieces jointes|a partir de|analyse|inspecte)\b"
+    )
+    output_context = re.compile(
+        r"\b(?:create|generate|produce|write|export|save|deliver|output|"
+        r"cree|generer|genere|produis|produire|redige|exporte|enregistre|livre|livrable)\b"
+    )
+    sources: list[str] = []
+    outputs: list[str] = []
+    for file_match in file_matches:
+        filename = file_match.group(0)
+        raw_context = text[max(0, file_match.start() - 64):file_match.start()]
+        context = "".join(
+            character for character in normalize("NFKD", raw_context).casefold()
+            if not combining(character)
+        )
+        last_source = max((item.start() for item in source_context.finditer(context)), default=-1)
+        last_output = max((item.start() for item in output_context.finditer(context)), default=-1)
+        if output_name.search(filename) or last_output > last_source:
+            outputs.append(filename)
+        else:
+            sources.append(filename)
     requested_words = 0
     match = re.search(r"(?i)\b(?:minimums?\s+)?words\s*=\s*(\d[\d _]*)", text)
     if match:
@@ -74,7 +105,10 @@ def _renumber(steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
     for index, original in enumerate(steps):
         step = dict(original)
         step["id"] = index
-        step["dependencies"] = [mapping[str(item)] for item in original.get("dependencies", []) if str(item) in mapping]
+        dependencies = [mapping[str(item)] for item in original.get("dependencies", []) if str(item) in mapping]
+        if index and not dependencies:
+            dependencies = [index - 1]
+        step["dependencies"] = dependencies
         result.append(step)
     return result
 
@@ -83,7 +117,6 @@ def adapt_document_steps(
     task: str,
     analysis: dict[str, Any],
     steps: list[dict[str, Any]],
-    step_factory: Callable[..., dict[str, Any]] | None = None,
 ) -> tuple[list[dict[str, Any]], DocumentWorkEstimate]:
     """Select a justified subset of the canonical stages and repair the DAG.
 
@@ -94,7 +127,7 @@ def adapt_document_steps(
     """
     estimate = estimate_document_work(task, analysis)
     if estimate.complexity == "very_high":
-        return steps, estimate
+        return steps, replace(estimate, stage_budget=len(steps))
 
     by_name = {str(step.get("specialist", "")).casefold(): step for step in steps}
     names = list(by_name)
@@ -152,4 +185,5 @@ def adapt_document_steps(
             seen.add(name)
     if len(selected) < 4:
         selected = [steps[0], steps[1], steps[7], steps[8], steps[9], steps[12]]
-    return _renumber(selected), estimate
+    selected = _renumber(selected)
+    return selected, replace(estimate, stage_budget=len(selected))

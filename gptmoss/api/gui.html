@@ -2505,6 +2505,11 @@
                 document.getElementById("settings-safe-shell-mode").checked = data.safe_shell_mode !== false;
                 document.getElementById("settings-shell-timeout").value = data.shell_timeout_seconds ?? 0;
                 document.getElementById("settings-shell-output").value = data.shell_max_output_chars ?? 12000;
+                document.getElementById("settings-document-engine").checked = data.document_engine_enabled !== false;
+                document.getElementById("settings-document-checkpoint").checked = data.document_checkpoint_enabled !== false;
+                document.getElementById("settings-document-target-words").value = data.document_target_section_words ?? 450;
+                document.getElementById("settings-diagram-rendering").checked = data.diagram_rendering !== false;
+                document.getElementById("settings-docx-embed-diagrams").checked = data.docx_embed_diagrams !== false;
 
                 // Projects list
                 localProjects = data.projects || [{"id": "proj-default", "name": "Projet Par Défaut"}];
@@ -2554,6 +2559,11 @@
                 safe_shell_mode: document.getElementById("settings-safe-shell-mode").checked,
                 shell_timeout_seconds: Math.max(0, parseInt(document.getElementById("settings-shell-timeout").value, 10) || 0),
                 shell_max_output_chars: Math.max(0, parseInt(document.getElementById("settings-shell-output").value, 10) || 0),
+                document_engine_enabled: document.getElementById("settings-document-engine").checked,
+                document_checkpoint_enabled: document.getElementById("settings-document-checkpoint").checked,
+                document_target_section_words: Math.max(80, parseInt(document.getElementById("settings-document-target-words").value, 10) || 450),
+                diagram_rendering: document.getElementById("settings-diagram-rendering").checked,
+                docx_embed_diagrams: document.getElementById("settings-docx-embed-diagrams").checked,
                 default_skills: Array.from(document.querySelectorAll("input[name='settings-default-skill']:checked"), cb => cb.value),
                 confirm_sensitive: false,
             };
@@ -2962,6 +2972,14 @@
                     <label style="font-size: 11px; display: inline-flex; align-items: center; gap: 4px; cursor: pointer;"><input type="checkbox" id="settings-safe-shell-mode"> Mode shell sécurisé</label>
                     <label style="font-size: 11px; flex: 1 1 120px;">Délai shell (s, 0 = auto)<input type="number" id="settings-shell-timeout" class="approval-reason-input" min="0" style="margin: 4px 0 0; width: 100%;"></label>
                     <label style="font-size: 11px; flex: 1 1 150px;">Sortie shell max. (0 = complète)<input type="number" id="settings-shell-output" class="approval-reason-input" min="0" style="margin: 4px 0 0; width: 100%;"></label>
+                </div>
+                <div style="padding: 9px; border: 1px solid var(--border-color); border-radius: 4px; display: grid; gap: 7px; margin-top: 8px;">
+                    <strong style="font-size: 12px; color: var(--text-normal);">Rédaction documentaire professionnelle</strong>
+                    <label style="font-size: 11px; display: flex; gap: 6px;"><input type="checkbox" id="settings-document-engine">Activer le moteur de rédaction longue section par section.</label>
+                    <label style="font-size: 11px; display: flex; gap: 6px;"><input type="checkbox" id="settings-document-checkpoint">Conserver des points de reprise documentaires atomiques.</label>
+                    <label style="font-size: 11px;">Objectif de mots par section<input type="number" id="settings-document-target-words" class="approval-reason-input" min="80" max="20000" style="margin:4px 0 0;width:100%"></label>
+                    <label style="font-size: 11px; display: flex; gap: 6px;"><input type="checkbox" id="settings-diagram-rendering">Valider et rendre les diagrammes déclaratifs.</label>
+                    <label style="font-size: 11px; display: flex; gap: 6px;"><input type="checkbox" id="settings-docx-embed-diagrams">Intégrer les diagrammes rendus dans les DOCX.</label>
                 </div>
                 <div style="display: flex; flex-direction: column; gap: 8px; margin-top: 8px;">
                     <div style="font-size: 12px; color: var(--text-normal); font-weight: 500;">Capacités nécessitant une validation humaine :</div>

@@ -15,6 +15,10 @@ def validate_diagram(spec: DiagramSpec, *, max_nodes: int = 80, max_edges: int =
         issues.append("diagram_id is required")
     if not spec.title.strip() or not spec.caption.strip() or not spec.alt_text.strip():
         issues.append("title, caption and alt_text are required")
+    if not spec.nodes:
+        issues.append("diagram must contain at least one node")
+    if any(not node.node_id.strip() or not node.label.strip() for node in spec.nodes):
+        issues.append("node identifiers and labels are required")
     if len(node_ids) != len(node_set):
         issues.append("node identifiers must be unique")
     if len(spec.nodes) > max_nodes:

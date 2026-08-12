@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import tempfile
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -121,6 +122,7 @@ class DocumentModel:
     execution_id: str
     title: str
     output_path: str
+    writing_brief: str = ""
     sections: list[DocumentSection] = field(default_factory=list)
     evidence_inventory: list[dict[str, Any]] = field(default_factory=list)
     diagrams: list[dict[str, Any]] = field(default_factory=list)
@@ -144,6 +146,11 @@ class DocumentModel:
         self.status = "writing"
         self.updated_at = _now()
 
+    def mark_status(self, status: str) -> None:
+        self.status = str(status)
+        self.revision += 1
+        self.updated_at = _now()
+
     def assemble_markdown(self) -> str:
         parts = [f"# {self.title}".strip()]
         for section in self.sections:
@@ -157,6 +164,7 @@ class DocumentModel:
             "execution_id": self.execution_id,
             "title": self.title,
             "output_path": self.output_path,
+            "writing_brief": self.writing_brief,
             "sections": [item.to_dict() for item in self.sections],
             "evidence_inventory": self.evidence_inventory,
             "diagrams": self.diagrams,
@@ -176,6 +184,7 @@ class DocumentModel:
             execution_id=str(value.get("execution_id", "")),
             title=str(value.get("title", "Document")),
             output_path=str(value.get("output_path", "deliverable.md")),
+            writing_brief=str(value.get("writing_brief", "")),
             sections=[DocumentSection.from_dict(item) for item in value.get("sections", [])],
             evidence_inventory=list(value.get("evidence_inventory", [])),
             diagrams=list(value.get("diagrams", [])),
@@ -195,9 +204,9 @@ class DocumentModelStore:
         self.root.mkdir(parents=True, exist_ok=True)
 
     def path_for(self, execution_id: str) -> Path:
-        safe_id = "".join(char for char in str(execution_id) if char.isalnum() or char in "-_")
-        if not safe_id:
-            raise ValueError("execution_id must contain at least one safe character")
+        safe_id = str(execution_id)
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", safe_id):
+            raise ValueError("execution_id must contain only 1-128 letters, digits, '-' or '_'")
         return self.root / f"{safe_id}.document.json"
 
     def save(self, model: DocumentModel) -> Path:
