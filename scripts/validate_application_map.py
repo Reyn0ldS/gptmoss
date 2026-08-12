@@ -10,6 +10,12 @@ import sys
 from pathlib import Path
 from typing import Any, Iterable
 
+try:
+    from scripts.generate_symbol_map import check as check_symbol_map
+except ModuleNotFoundError:  # Direct execution places scripts/ first on sys.path.
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from generate_symbol_map import check as check_symbol_map
+
 
 ROOT = Path(__file__).resolve().parents[1]
 MAP_PATH = ROOT / "docs" / "application-map.json"
@@ -208,6 +214,8 @@ def validate(root: Path = ROOT) -> list[str]:
         if not (ROOT / offline["runtime_directory"]).is_dir():
             errors.append("Offline runtime directory is absent")
 
+        errors.extend(check_symbol_map(ROOT / "docs" / "symbol-map.json", ROOT))
+
         return errors
     finally:
         ROOT, MAP_PATH = previous_root, previous_map
@@ -224,7 +232,7 @@ def main() -> int:
         for error in errors:
             print(f" - {error}")
         return 1
-    print("[PASS] GPTMOSS application map matches modules, API, GUI, tests, config and offline metadata.")
+    print("[PASS] GPTMOSS maps match symbols, modules, API, GUI, tests, config and offline metadata.")
     return 0
 
 

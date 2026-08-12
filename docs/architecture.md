@@ -1,9 +1,10 @@
 # Architecture de GPTMOSS
 
-Cette cartographie décrit le système réellement versionné. Son inventaire machine est
-`docs/application-map.json` et sa cohérence est contrôlée par
+Cette cartographie décrit le système réellement versionné. Son inventaire fonctionnel est
+`docs/application-map.json` et son [graphe relationnel](symbol-relations.md) est
+`docs/symbol-map.json`. Leur cohérence est contrôlée par
 `scripts/validate_application_map.py`. Toute évolution des surfaces publiques doit modifier
-le code, la carte et les tests dans le même commit.
+le code, les cartes et les tests dans le même commit.
 
 ## Vue d'ensemble
 
@@ -92,6 +93,11 @@ les modifications shell hors périmètre ne deviennent pas sûres du seul fait q
 sont demandées par le modèle.
 
 ## Règles d'évolution
+
+Avant de modifier un symbole structurant, exécuter
+`python scripts/analyze_impact.py <symbole>` afin d'identifier ses appelants, données,
+surfaces publiques et tests. Le graphe doit ensuite être régénéré avec
+`python scripts/generate_symbol_map.py`.
 
 - Une nouvelle route doit figurer dans la carte, avoir un consommateur ou une raison API,
   et être couverte par un test.

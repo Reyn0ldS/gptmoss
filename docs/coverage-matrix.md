@@ -22,7 +22,7 @@ modules et tests est dans `application-map.json` ; le présent document apporte 
 | Paquet professionnel | professional_delivery, delivery_package | bouton Télécharger | profil professionnel | `test_professional_delivery` |
 | État/événements | state, event_bus, observability | WebSockets, diagnostics, audit | fichiers du workspace | `test_event_bus`, `test_lifecycle_chronology` |
 | Offline | scripts préparation, manifests | scripts BAT/install/start | versions épinglées | `test_offline_source_package`, `test_windows_portable_python` |
-| Documentation vivante | docs + validateur | dépôt | manifeste cartographique | `test_application_map`, `test_documentation_contract` |
+| Documentation vivante | docs, graphe de symboles + validateurs | dépôt et CLI d'impact | manifestes cartographiques | `test_application_map`, `test_symbol_map`, `test_documentation_contract` |
 
 ## Contrats de configuration
 
@@ -84,8 +84,10 @@ tests attachés déterminent la profondeur de preuve.
 ## Procédure de changement
 
 1. Identifier le domaine et le propriétaire dans cette matrice.
-2. Mettre à jour interfaces, chronologie, configuration et frontières concernées.
-3. Ajouter ou adapter les tests au niveau de risque approprié.
-4. Mettre à jour `application-map.json` si une surface inventoriée change.
-5. Exécuter `python scripts/validate_application_map.py` puis la suite complète.
-6. Pour une dépendance ou un script de lancement, appliquer aussi la qualification offline.
+2. Exécuter `python scripts/analyze_impact.py <symbole>` ou `--file <chemin>`.
+3. Mettre à jour interfaces, chronologie, configuration et frontières concernées.
+4. Ajouter ou adapter les tests proposés au niveau de risque approprié.
+5. Mettre à jour `application-map.json` si une surface inventoriée change, puis régénérer
+   `symbol-map.json`.
+6. Exécuter `python scripts/validate_application_map.py` puis la suite complète.
+7. Pour une dépendance ou un script de lancement, appliquer aussi la qualification offline.

@@ -13,7 +13,9 @@ La cartographie vivante de l'application est répartie entre
 [parcours fonctionnels](docs/functional-map.md), la
 [matrice de couverture](docs/coverage-matrix.md) et le
 [contrat du paquet offline](docs/offline-package-manifest.md). Son inventaire machine
-`docs/application-map.json` est vérifié par `python scripts/validate_application_map.py`.
+`docs/application-map.json` et son [graphe relationnel des classes, méthodes et données](docs/symbol-relations.md)
+sont vérifiés par `python scripts/validate_application_map.py`. Avant une évolution,
+`python scripts/analyze_impact.py <symbole>` indique les appelants, contrats et tests concernés.
 
 ## Sommaire
 

@@ -51,7 +51,9 @@
   "operational_files": [
     "scripts/browser_layout_audit.py",
     "scripts/configure_embedded_python.py",
+    "scripts/analyze_impact.py",
     "scripts/find_python.bat",
+    "scripts/generate_symbol_map.py",
     "scripts/prepare_offline_source.py",
     "scripts/prepare_offline_source_launcher.py",
     "scripts/prepare_portable_python.py",
@@ -301,7 +303,7 @@
     },
     {
       "id": "documentation-cartography",
-      "tests": ["tests/test_documentation_contract.py", "tests/test_application_map.py"]
+      "tests": ["tests/test_documentation_contract.py", "tests/test_application_map.py", "tests/test_symbol_map.py"]
     }
   ],
   "offline": {
@@ -321,8 +323,12 @@
       "install.bat",
       "start.bat",
       "prepare-offline-source.bat",
+      "docs/application-map.json",
+      "docs/symbol-map.json",
       "scripts/find_python.bat",
+      "scripts/analyze_impact.py",
       "scripts/configure_embedded_python.py",
+      "scripts/generate_symbol_map.py",
       "scripts/prepare_offline_source.py",
       "scripts/prepare_offline_source_launcher.py",
       "scripts/server_supervisor.py"
@@ -332,6 +338,7 @@
     "docs/architecture.md",
     "docs/functional-map.md",
     "docs/coverage-matrix.md",
-    "docs/offline-package-manifest.md"
+    "docs/offline-package-manifest.md",
+    "docs/symbol-relations.md"
   ]
 }
