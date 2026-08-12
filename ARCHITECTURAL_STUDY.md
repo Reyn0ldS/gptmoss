@@ -10,7 +10,7 @@ Le tableau ci-dessous compare la structure d'exécution de GPTMOSS avec les autr
 
 | Dimension | Modèle Actuel (GPTMOSS) | Modèle Hermes (Sequential/Gated) | Modèle OpenClaw (DAG-based / Parallel) |
 | :--- | :--- | :--- | :--- |
-| **Orchestration** | Plan linéaire séquentiel piloté par le Coordinateur. | Portes de validation strictes entre phases (ex: Spec -> Code). | Graphe de Dépendances (DAG) exécuté en parallèle asynchrone. |
+| **Orchestration** | DAG de spécialistes exécuté en parallèle selon les dépendances, avec un coordinateur final. | Portes de validation strictes entre phases (ex: Spec -> Code). | Graphe de Dépendances (DAG) exécuté en parallèle asynchrone. |
 | **Gestion Concurrence** | Verrouillage de fichier au niveau stockage (`state_store.json`). | Verrouillage exclusif par fichier/branche de code. | Routage d'espaces de travail isolés (sandboxes éphémères). |
 | **Capacités (Capabilities)** | Actions bas niveau granulaires (`filesystem`, `shell`). | Actions sémantiques haut niveau (Skills). | Outils composites packagés par rôle métier. |
 | **Flux de Dialogue** | Flux chronologique unifié (Inter-Agents). | Logs d'événements discrets par agent. | Dialogue centralisé via un bus d'événements sémantiques. |

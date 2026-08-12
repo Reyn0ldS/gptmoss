@@ -31,6 +31,7 @@ from gptmoss.core.settings import (
     DEFAULT_MAX_TRANSITIONS_PER_EXECUTION,
     DEFAULT_MAX_UPLOAD_BYTES,
 )
+from gptmoss.capabilities.agent import child_agent_config
 
 logger = logging.getLogger("gptmoss.api")
 
@@ -135,13 +136,32 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(title="MOSS Agent Runtime Platform API", version="0.1.0", lifespan=lifespan)
 
-# CORS middleware for potential frontend clients
+# Local GUI may be rebound to any loopback port by the supervisor.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://127.0.0.1:8000", "http://localhost:8000"],
+    allow_origins=[],
+    allow_origin_regex=r"https?://(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$",
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
+)
+
+ACTIVE_EXECUTION_STATUSES = frozenset({"pending", "running", "paused", "waiting_provider"})
+PUBLIC_EXECUTION_VARIABLE_KEYS = (
+    "task",
+    "project_id",
+    "project_path",
+    "project_domains",
+    "attachment_ids",
+    "role_name",
+    "parent_execution_id",
+    "pending_approval",
+    "pending_scope_approval",
+    "scheduled_for",
+    "document_model_checkpoint",
+    "active_skills",
+    "delivery_contract",
+    "requested_skills",
 )
 
 # Store active websocket connections
@@ -192,6 +212,56 @@ class ConnectionManager:
 manager = ConnectionManager()
 
 DEFAULT_PROJECT = {"id": "proj-default", "name": "Projet Par Défaut"}
+
+
+def _status_value(state) -> str:
+    status = getattr(state, "status", state)
+    return str(getattr(status, "value", status))
+
+
+def _descendant_ids(state_engine, execution_id: str) -> List[str]:
+    to_visit = [execution_id]
+    collected: List[str] = []
+    while to_visit:
+        current = to_visit.pop(0)
+        collected.append(current)
+        for child_id, child_state in state_engine.executions.items():
+            parent_id = child_state.variables.get("parent_execution_id")
+            if parent_id == current and child_id not in collected and child_id not in to_visit:
+                to_visit.append(child_id)
+    return collected
+
+
+def _has_active_execution(state_engine, execution_ids: Optional[List[str]] = None) -> bool:
+    if execution_ids is None:
+        states = state_engine.executions.values()
+    else:
+        states = (
+            state_engine.executions[item]
+            for item in execution_ids
+            if item in state_engine.executions
+        )
+    return any(_status_value(state) in ACTIVE_EXECUTION_STATUSES for state in states)
+
+
+def _public_execution_variables(variables: Dict[str, Any]) -> Dict[str, Any]:
+    public = {
+        key: variables[key]
+        for key in PUBLIC_EXECUTION_VARIABLE_KEYS
+        if key in variables
+    }
+    pending = public.get("pending_approval")
+    if isinstance(pending, dict):
+        pending = dict(pending)
+        arguments = pending.get("arguments")
+        if isinstance(arguments, dict):
+            trimmed = dict(arguments)
+            content = trimmed.get("content")
+            if isinstance(content, str) and len(content) > 8_000:
+                trimmed["content"] = content[:8_000] + "\n… [truncated]"
+            pending["arguments"] = trimmed
+        public["pending_approval"] = pending
+    return public
 
 def _filesystem_capability():
     if not app_state.execution_engine:
@@ -375,10 +445,13 @@ async def create_project(req: ProjectRequest):
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         project["domains"] = req.domains
     if req.path and req.path.strip():
-        path = Path(req.path.strip()).expanduser()
-        if not path.is_absolute():
+        raw_path = Path(req.path.strip()).expanduser()
+        if ".." in raw_path.parts:
+            raise HTTPException(status_code=400, detail="A custom project path cannot contain parent-directory segments.")
+        if not raw_path.is_absolute():
             raise HTTPException(status_code=400, detail="A custom project path must be absolute.")
-        project["path"] = str(path.resolve())
+        path = raw_path.resolve()
+        project["path"] = str(path)
         path.mkdir(parents=True, exist_ok=True)
     else:
         filesystem = _filesystem_capability()
@@ -715,7 +788,7 @@ async def get_execution(execution_id: str):
         "status": state.status,
         "current_step": state.current_step,
         "plan": state.current_plan,
-        "variables": state.variables,
+        "variables": _public_execution_variables(state.variables),
         "results": state.results,
         "messages": convo.messages
     }
@@ -821,10 +894,15 @@ async def create_subagent(execution_id: str, req: SubAgentRequest):
         raise HTTPException(status_code=500, detail="Runtime kernel not initialized.")
     if execution_id not in app_state.state_engine.executions:
         raise HTTPException(status_code=404, detail="Parent execution not found.")
-    child_id = await app_state.kernel.submit_task(req.task.strip(), {
-        "system_prompt": req.system_prompt.strip(), "role_name": req.role_name.strip(),
-        "parent_execution_id": execution_id,
-    })
+    child_id = await app_state.kernel.submit_task(
+        req.task.strip(),
+        child_agent_config(
+            app_state.state_engine,
+            execution_id,
+            system_prompt=req.system_prompt.strip(),
+            role_name=req.role_name.strip(),
+        ),
+    )
     return {"execution_id": child_id, "parent_execution_id": execution_id, "status": "running"}
 
 @app.get("/api/diagnostics")
@@ -1081,21 +1159,19 @@ async def delete_execution(execution_id: str):
         
     if execution_id not in app_state.state_engine.executions:
         raise HTTPException(status_code=404, detail="Execution not found.")
-        
-    # Cascade delete all descendants
-    to_delete = [execution_id]
+
+    subtree = _descendant_ids(app_state.state_engine, execution_id)
+    if _has_active_execution(app_state.state_engine, subtree):
+        raise HTTPException(
+            status_code=409,
+            detail="Cannot delete an active execution. Cancel it first.",
+        )
+
     deleted = []
-    while to_delete:
-        curr = to_delete.pop(0)
-        deleted.append(curr)
-        for child_id, child_state in list(app_state.state_engine.executions.items()):
-            parent_id = child_state.variables.get("parent_execution_id")
-            if parent_id == curr and child_id not in deleted and child_id not in to_delete:
-                to_delete.append(child_id)
-                
-    for exec_id in deleted:
+    for exec_id in subtree:
         app_state.state_engine.executions.pop(exec_id, None)
         app_state.state_engine.conversations.pop(exec_id, None)
+        deleted.append(exec_id)
         
     app_state.state_engine.save_to_disk()
     
@@ -1109,7 +1185,13 @@ async def delete_execution(execution_id: str):
 async def clear_all_executions():
     if not app_state.state_engine or not app_state.event_bus:
         raise HTTPException(status_code=500, detail="Engine not initialized.")
-        
+
+    if _has_active_execution(app_state.state_engine):
+        raise HTTPException(
+            status_code=409,
+            detail="Cannot clear history while an execution is still active. Cancel running tasks first.",
+        )
+
     app_state.state_engine.executions.clear()
     app_state.state_engine.conversations.clear()
     app_state.state_engine.save_to_disk()
@@ -1240,8 +1322,8 @@ async def get_settings():
         "base_url": getattr(llm, "base_url", ""),
         "model_name": getattr(llm, "default_model", ""),
         "vision_mode": getattr(llm, "vision_mode", "auto"),
-        "ssl_verify": False,
-        "ssl_cert_path": "",
+        "ssl_verify": bool(getattr(llm, "ssl_verify", True)),
+        "ssl_cert_path": getattr(llm, "ssl_cert_path", "") or "",
         "denied_capabilities": getattr(policy, "denied", []),
         "approval_required_capabilities": getattr(policy, "approval_required", []),
         "workspace_full_autonomy": getattr(policy, "workspace_full_autonomy", False),

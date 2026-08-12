@@ -2246,6 +2246,7 @@
                 fetchExecutions();
             } catch (err) {
                 console.error("Error deleting task:", err);
+                showToast(err.message || "Impossible de supprimer cette tâche.", "error");
             }
         }
 
@@ -2258,6 +2259,7 @@
                 fetchExecutions();
             } catch (err) {
                 console.error("Error clearing task history:", err);
+                showToast(err.message || "Impossible d'effacer l'historique.", "error");
             }
         }
 

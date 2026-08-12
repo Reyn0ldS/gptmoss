@@ -169,4 +169,15 @@ def test_small_software_readme_request_keeps_software_fallback():
     plan = SimplePlanner._fallback_plan(task, analyze_task_complexity(task))
 
     assert any(step["role"] == "developer" for step in plan["steps"])
+    assert len(plan["steps"]) <= 5
     assert not plan.get("artifact_validations")
+
+
+def test_simple_repair_request_does_not_inflate_to_a_full_software_team():
+    task = "Corrige les tests qui échouent dans ce projet."
+    analysis = analyze_task_complexity(task)
+    plan = SimplePlanner._fallback_plan(task, analysis)
+
+    assert analysis["level"] == "low"
+    assert len(plan["steps"]) <= 5
+    assert plan["steps"][-1]["role"] == "coordinator"

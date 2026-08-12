@@ -247,6 +247,7 @@ def test_api_settings_flow(tmp_path):
     body_get = response_get.json()
     assert "api_key" not in body_get
     assert "base_url" in body_get
+    assert body_get["ssl_verify"] is True
 
     # Post new settings
     new_settings = {
@@ -335,6 +336,102 @@ def test_api_delete_cascade_flow():
     # Verify both parent and child are popped and deleted cascaded
     assert parent_id not in state_engine.executions
     assert child_id not in state_engine.executions
+
+
+def _bare_api_client():
+    event_bus = EventBus()
+    state_engine = StateEngine()
+    llm = MockLLMProvider()
+    engine = ExecutionEngine(
+        event_bus, state_engine,
+        ContextEngine(state_engine, RAMMemoryProvider()), llm,
+        SimplePlanner(llm), SimplePolicyProvider(),
+    )
+    kernel = RuntimeKernel(event_bus, state_engine, engine)
+    init_app(kernel, engine, state_engine, event_bus)
+    return ASGIClient(app), state_engine, engine
+
+
+def test_api_delete_and_clear_all_refuse_active_executions():
+    client, state_engine, _engine = _bare_api_client()
+    running = state_engine.get_execution("active-root")
+    running.status = "running"
+    child = state_engine.get_execution("active-child")
+    child.status = "paused"
+    child.variables["parent_execution_id"] = "active-root"
+
+    denied_delete = client.delete("/executions/active-root")
+    assert denied_delete.status_code == 409
+    assert "active-root" in state_engine.executions
+    assert "active-child" in state_engine.executions
+
+    denied_clear = client.post("/executions/clear-all")
+    assert denied_clear.status_code == 409
+    assert "active-root" in state_engine.executions
+
+    cancelled = client.post("/executions/active-root/cancel")
+    assert cancelled.status_code == 200
+    assert client.delete("/executions/active-root").status_code == 200
+    assert "active-root" not in state_engine.executions
+    leftover = state_engine.get_execution("done-item")
+    leftover.status = "completed"
+    assert client.post("/executions/clear-all").status_code == 200
+    assert not state_engine.executions
+
+
+def test_api_get_execution_omits_internal_tool_history():
+    client, state_engine, _engine = _bare_api_client()
+    state = state_engine.get_execution("public-vars")
+    state.status = "completed"
+    state.variables.update({
+        "task": "Inspect",
+        "project_id": "proj-default",
+        "role_name": "Coordinateur",
+        "tool_call_history": [{"capability": "shell", "action": "execute", "result": "secret-output"}],
+        "pending_approval": {
+            "capability": "shell",
+            "action": "execute",
+            "arguments": {"command": "python -m pytest -q", "content": "x" * 9000},
+        },
+    })
+
+    body = client.get("/executions/public-vars").json()
+    assert body["variables"]["task"] == "Inspect"
+    assert body["variables"]["pending_approval"]["capability"] == "shell"
+    assert "tool_call_history" not in body["variables"]
+    assert len(body["variables"]["pending_approval"]["arguments"]["content"]) < 9000
+
+
+def test_api_loopback_cors_allows_any_local_port():
+    client, _state, _engine = _bare_api_client()
+    allowed = client.get("/health", headers={"Origin": "http://127.0.0.1:8123"})
+    denied = client.get("/health", headers={"Origin": "http://evil.example"})
+    assert allowed.status_code == 200
+    assert allowed.headers.get("access-control-allow-origin") == "http://127.0.0.1:8123"
+    assert "access-control-allow-origin" not in {key.lower() for key in denied.headers.keys()} or denied.headers.get("access-control-allow-origin") != "http://evil.example"
+
+
+def test_api_subagent_inherits_parent_project_context():
+    client, state_engine, engine = _bare_api_client()
+    parent = state_engine.get_execution("inherit-parent")
+    parent.status = "running"
+    parent.variables.update({
+        "project_id": "site-demo",
+        "attachment_ids": ["doc-1"],
+        "requested_skills": ["code-review"],
+        "task": "Parent work",
+    })
+    engine.execute_task = AsyncMock()
+    response = client.post("/executions/inherit-parent/subagents", json={
+        "task": "Inspect", "role_name": "Reviewer", "system_prompt": "Review.",
+    })
+    assert response.status_code == 201
+    child_id = response.json()["execution_id"]
+    child = state_engine.get_execution(child_id)
+    assert child.variables["project_id"] == "site-demo"
+    assert child.variables["attachment_ids"] == ["doc-1"]
+    assert child.variables["requested_skills"] == ["code-review"]
+
 
 def test_api_unified_feed_flow():
     # Setup test dependencies

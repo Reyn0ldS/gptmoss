@@ -8,379 +8,19 @@ from typing import Any, Dict, List
 
 from gptmoss.interfaces.llm import LLMProvider
 from gptmoss.interfaces.planner import PlannerProvider
-from gptmoss.core.delivery import extract_requirements
-from gptmoss.core.domains import DEFAULT_DOMAIN_REGISTRY, ProjectDomainRegistry
-from gptmoss.core.document_planning import adapt_document_steps, estimate_document_work
-
-logger = logging.getLogger("gptmoss.planners.simple")
-
-def analyze_task_complexity(
-    task: str, domain_registry: ProjectDomainRegistry | None = None
-) -> Dict[str, Any]:
-    """Return deterministic hints so the LLM cannot silently trivialize a task."""
-    text = str(task or "").lower()
-    domains = (domain_registry or DEFAULT_DOMAIN_REGISTRY).classify(text)
-    requested_outcomes = len(re.findall(
-        r"\b(?:doit|devra|pouvoir|créer|creer|faire|importer|extrapoler|intégrer|integrer|"
-        r"must|should|create|build|implement|support|import)\b", text,
-    ))
-    if "software-engineering" in domains:
-        requested_outcomes = max(
-            requested_outcomes,
-            min(5, len(re.findall(r"[,;]", text)) + 1),
-        )
-    score = len(domains) * 2 + min(requested_outcomes, 5)
-    score += 2 if len(text) > 300 else 1 if len(text) > 140 else 0
-    if score >= 14:
-        level, minimum = "very_high", 12
-    elif score >= 9:
-        level, minimum = "high", 9
-    elif score >= 5:
-        level, minimum = "moderate", 5
-    else:
-        level, minimum = "low", 1
-    return {"level": level, "score": score, "domains": domains,
-            "requested_outcomes": requested_outcomes, "suggested_min_steps": minimum}
-
-
-_ARTIFACT_NAME = re.compile(
-    r"(?<![\w./-])([A-Za-z0-9][A-Za-z0-9_.-]*\.(?:md|json|txt|html|docx|pptx))(?![\w.-])",
-    flags=re.IGNORECASE,
+from gptmoss.core.document_planning import adapt_document_steps
+from gptmoss.core.domains import ProjectDomainRegistry
+from gptmoss.planners.complexity import analyze_task_complexity
+from gptmoss.planners.fallbacks import (
+    _assign_document_requirements,
+    _document_deliverable_task,
+    _document_validation_policy,
+    _requested_output_artifacts,
+    _step,
+    _supporting_document_validation_policies,
 )
 
-
-def _document_deliverable_task(task: str) -> bool:
-    """Distinguish source-grounded writing from generic software documentation."""
-    text = str(task or "")
-    lowered = text.casefold()
-    formats = {
-        suffix for suffix in ("docx", "pptx", "txt", "html", "markdown")
-        if re.search(rf"(?<!\w){suffix}(?!\w)", lowered)
-    }
-    source_signals = sum(
-        marker in lowered
-        for marker in (
-            "corpus", "pièces jointes", "pieces jointes", "attached files",
-            "fichiers locaux", "local files", "documents.inventory", "documents.search",
-        )
-    )
-    writing_signal = any(
-        marker in lowered
-        for marker in (
-            "rédige", "redige", "rédaction", "redaction", "dossier", "rapport",
-            "synthèse", "synthese", "livrable", "long-form", "write a", "produce a",
-        )
-    )
-    explicit_validator = bool(re.search(
-        r"(?i)(?:validator\s*=\s*document|validator[^\n]{0,20}document|"
-        r"document-analysis|document quality)",
-        text,
-    ))
-    return explicit_validator or (writing_signal and (len(formats) >= 2 or source_signals >= 2))
-
-
-def _requested_output_artifacts(task: str) -> List[str]:
-    """Extract output filenames without mistaking inline source citations for outputs."""
-    outputs: List[str] = []
-    for line in str(task or "").splitlines():
-        if not re.match(r"\s*(?:\d+[.)]|[-*])\s+", line):
-            continue
-        match = _ARTIFACT_NAME.search(line)
-        if match and match.group(1) not in outputs:
-            outputs.append(match.group(1))
-    verb_pattern = re.compile(
-        r"(?i)\b(?:crée|cree|produis|génère|genere|write|create|produce|generate)"
-        r"[^\r\n]{0,100}?" + _ARTIFACT_NAME.pattern
-    )
-    for match in verb_pattern.finditer(str(task or "")):
-        filename = match.group(1)
-        if filename and filename not in outputs:
-            outputs.append(filename)
-    return outputs
-
-
-def _expanded_identifier_ranges(task: str) -> List[str]:
-    identifiers: List[str] = []
-    pattern = re.compile(
-        r"\b([A-Z][A-Z0-9]{1,12})-(\d{2,4})\s*"
-        r"(?:à|a|to|through|–|-)\s*(?:\1-)?(\d{2,4})\b",
-        flags=re.IGNORECASE,
-    )
-    for match in pattern.finditer(str(task or "")):
-        prefix, start_text, end_text = match.groups()
-        start, end = int(start_text), int(end_text)
-        if end < start or end - start > 200:
-            continue
-        width = max(len(start_text), len(end_text))
-        for value in range(start, end + 1):
-            identifier = f"{prefix.upper()}-{value:0{width}d}"
-            if identifier not in identifiers:
-                identifiers.append(identifier)
-    return identifiers
-
-
-def _required_document_headings(task: str) -> List[str]:
-    match = re.search(
-        r"(?is)sections?[^\n:]{0,160}(?:exactement|exactly)\s*:\s*"
-        r"(.+?)(?:\r?\n\s*\r?\n|\bChaque\b|\bEvery\b)",
-        str(task or ""),
-    )
-    if not match:
-        return []
-    headings = []
-    for item in match.group(1).split(";"):
-        heading = item.strip().strip(". ")
-        if heading and len(heading) <= 160 and heading not in headings:
-            headings.append(heading)
-    return headings
-
-
-def _source_inventory(task: str, outputs: List[str]) -> Dict[str, Dict[str, int]]:
-    inventory: Dict[str, Dict[str, int]] = {}
-    pattern = re.compile(
-        r"\b([A-Za-z0-9][A-Za-z0-9_.-]*\.(?:docx|pptx|txt|html))\s+"
-        r"(blocks|slides)\s*=\s*(\d+)",
-        flags=re.IGNORECASE,
-    )
-    output_names = {item.casefold() for item in outputs}
-    for filename, unit, count in pattern.findall(str(task or "")):
-        if filename.casefold() in output_names:
-            continue
-        key = "slides" if unit.casefold() == "slides" else "blocks"
-        inventory[filename] = {key: int(count)}
-    return inventory
-
-
-def _named_integer(task: str, name: str) -> int | None:
-    match = re.search(
-        rf"(?i)\b{re.escape(name)}\s*=\s*(\d[\d _]*)",
-        str(task or ""),
-    )
-    if not match:
-        return None
-    return int(match.group(1).replace(" ", "").replace("_", ""))
-
-
-def _document_validation_policy(
-    task: str, outputs: List[str], primary: str
-) -> Dict[str, Any]:
-    inventory = _source_inventory(task, outputs)
-    constraints: Dict[str, Any] = {}
-    headings = _required_document_headings(task)
-    identifiers = _expanded_identifier_ranges(task)
-    if headings:
-        constraints["required_headings"] = headings
-    section_words = _named_integer(task, "min_section_words")
-    if section_words is not None:
-        constraints["min_section_words"] = section_words
-    if identifiers:
-        constraints["required_requirement_ids"] = identifiers
-        if "required_traceability_ids" in str(task):
-            constraints["required_traceability_ids"] = identifiers
-    if inventory:
-        constraints["required_source_files"] = list(inventory)
-        constraints["source_inventory"] = inventory
-    for name in (
-        "require_local_references", "require_bounded_references",
-        "require_claim_references", "forbid_external_links", "forbid_placeholders",
-    ):
-        if re.search(rf"(?i)\b{re.escape(name)}\s*=\s*true\b", str(task or "")):
-            constraints[name] = True
-    for name in (
-        "claim_min_words", "duplicate_min_words", "max_duplicate_paragraphs",
-    ):
-        value = _named_integer(task, name)
-        if value is not None:
-            constraints[name] = value
-    minimums: Dict[str, int] = {}
-    minimum_match = re.search(r"(?is)\bminimums\b(.{0,160})", str(task or ""))
-    if minimum_match:
-        for metric in ("words", "local_references", "cited_sources", "headings"):
-            match = re.search(
-                rf"(?i)\b{metric}\s*=\s*(\d[\d _]*)", minimum_match.group(1)
-            )
-            if match:
-                minimums[metric] = int(
-                    match.group(1).replace(" ", "").replace("_", "")
-                )
-    if minimums:
-        constraints["minimums"] = minimums
-    return {
-        "path": primary,
-        "validator": "document",
-        "required": True,
-        "constraints": constraints,
-    }
-
-
-def _supporting_document_validation_policies(
-    task: str, steps: List[Dict[str, Any]], primary: str
-) -> List[Dict[str, Any]]:
-    """Give every reusable document artifact a deterministic acceptance floor."""
-    inventory = _source_inventory(task, [
-        str(path)
-        for step in steps
-        for path in step.get("required_artifacts", [])
-    ])
-    identifiers = _expanded_identifier_ranges(task)
-    forbid_external = bool(
-        re.search(r"(?i)\bforbid_external_links\s*=\s*true\b", task)
-        or re.search(r"(?i)\b(?:aucun|sans)\s+(?:lien|url).*internet", task)
-    )
-    policies: List[Dict[str, Any]] = []
-    seen = {primary.replace("\\", "/")}
-    for step in steps:
-        for raw_path in step.get("required_artifacts", []):
-            path = str(raw_path).replace("\\", "/")
-            if path in seen:
-                continue
-            seen.add(path)
-            suffix = os.path.splitext(path)[1].lower()
-            if suffix == ".json":
-                policies.append({
-                    "path": path,
-                    "validator": "json",
-                    "required": True,
-                    "constraints": {"min_size_bytes": 20},
-                })
-                continue
-            if suffix not in {".md", ".txt", ".html"}:
-                continue
-            lower = path.casefold()
-            source_grounded = (
-                lower.startswith("analysis/")
-                and not any(marker in lower for marker in ("quality", "audit"))
-            ) or any(marker in lower for marker in (
-                "requirement", "exigence", "evidence", "preuve", "decision", "adr",
-            ))
-            complete_source_coverage = any(marker in lower for marker in (
-                "corpus-inventory", "requirement", "exigence", "evidence", "preuve",
-            ))
-            minimum_words = 300 if source_grounded else 120
-            constraints: Dict[str, Any] = {
-                "forbid_placeholders": True,
-                "minimums": {"words": minimum_words},
-            }
-            if forbid_external:
-                constraints["forbid_external_links"] = True
-            if source_grounded:
-                constraints["require_local_references"] = True
-                constraints["minimums"]["local_references"] = 3
-                if inventory:
-                    constraints["source_inventory"] = inventory
-                    constraints["require_bounded_references"] = True
-            if complete_source_coverage and inventory:
-                constraints["required_source_files"] = list(inventory)
-                constraints["minimums"]["local_references"] = max(
-                    4, len(inventory)
-                )
-                if "corpus-inventory" in lower:
-                    constraints["require_source_coverage"] = True
-            if identifiers and any(marker in lower for marker in (
-                "requirement", "exigence", "evidence", "preuve",
-            )):
-                constraints["required_requirement_ids"] = identifiers
-                constraints["required_traceability_ids"] = identifiers
-            policies.append({
-                "path": path,
-                "validator": "document",
-                "required": True,
-                "constraints": constraints,
-            })
-    return policies
-
-
-def _assign_document_requirements(
-    task: str, steps: List[Dict[str, Any]]
-) -> List[Dict[str, Any]]:
-    """Map document requirements to bounded owners instead of lexical accidents."""
-    requirements = extract_requirements(task)
-    by_id = {int(step["id"]): step for step in steps}
-    producer_ids = [int(step["id"]) for step in steps if step.get("role") in {"architect", "security", "writer"}]
-    coordinator_ids = [int(step["id"]) for step in steps if step.get("role") == "coordinator"]
-    final_coordinator = coordinator_ids[-1] if coordinator_ids else int(steps[-1]["id"])
-    specialist_ids = {
-        str(step.get("specialist", "")).casefold(): int(step["id"])
-        for step in steps
-    }
-    for step in steps:
-        step["requirement_ids"] = []
-    for requirement in requirements:
-        statement = str(requirement["statement"]).casefold()
-        targets: List[int]
-        if "crée dans le projet les huit fichiers" in statement or "cree dans le projet les huit fichiers" in statement:
-            targets = [1, 2, 7, 10]
-        elif any(marker in statement for marker in (
-            "requirements-matrix", "evidence-matrix", "matrice", "toutes les exigences",
-        )):
-            targets = [1]
-        elif any(marker in statement for marker in (
-            "decisions-register", "contradiction", "paliers chiffr", "autorité compétente",
-        )):
-            targets = [2]
-        elif any(marker in statement for marker in (
-            "quality-policy", "quality-report", "review-report", "validateur document",
-            "delivery_assurance", "auditeur final",
-        )):
-            targets = [10]
-        elif any(marker in statement for marker in (
-            "inventorier intégralement", "inventorier integralement",
-            "capability documents", "documents.inventory", "recherche puis lis",
-            "pièces jointes locales", "pieces jointes locales",
-        )):
-            targets = [0]
-        elif any(marker in statement for marker in (
-            "sécurité", "securite", "sec-001", "identité", "identite",
-        )):
-            targets = [4]
-        elif any(marker in statement for marker in (
-            "rto", "rpo", "capacité", "capacite", "déploiement", "deploiement",
-            "résilience", "resilience", "observabilité", "observabilite",
-        )):
-            targets = [5]
-        elif any(marker in statement for marker in (
-            "migration", "coexistence", "feuille de route",
-        )):
-            targets = [6]
-        elif "chaque auteur doit relire" in statement:
-            targets = producer_ids
-        elif any(marker in statement for marker in (
-            "fichiers locaux comme sources", "aucune recherche web", "numéros doivent être réels",
-            "numeros doivent etre reels", "aucun placeholder", "aucune url externe",
-        )):
-            targets = [0, 1, 2, 3, 4, 5, 6, 7, 10]
-        else:
-            targets = [7]
-        # The adaptive planner can remove optional stages, so the historical
-        # numeric ownership map is only a preference.  Fall back to the
-        # closest surviving specialist instead of dropping the requirement.
-        targets = [target for target in targets if target in by_id]
-        if not targets:
-            if any(marker in statement for marker in ("inventor", "documents.inventory", "pièces jointes", "pieces jointes")):
-                targets = [specialist_ids.get(name, producer_ids[0]) for name in specialist_ids if "corpus" in name][:1] or [producer_ids[0]]
-            elif any(marker in statement for marker in ("quality", "review", "audit", "rapport")):
-                targets = [specialist_ids.get(name, producer_ids[-1]) for name in specialist_ids if "quality evidence" in name or "deterministic" in name][:1] or [producer_ids[-1]]
-            else:
-                targets = [producer_ids[-1] if producer_ids else final_coordinator]
-        for target in targets:
-            if target in by_id:
-                by_id[target]["requirement_ids"].append(requirement["id"])
-        # The final independent reviewer validates every user requirement.
-        by_id[final_coordinator]["requirement_ids"].append(requirement["id"])
-        if 11 in by_id and 11 != final_coordinator:
-            by_id[11]["requirement_ids"].append(requirement["id"])
-    return requirements
-
-
-def _step(step_id: int, role: str, specialist: str, description: str,
-          dependencies: List[int], expertise: List[str], required_artifacts: List[str],
-          acceptance_criteria: List[str], verification_commands: List[str] | None = None) -> Dict[str, Any]:
-    return {"id": step_id, "role": role, "specialist": specialist, "description": description,
-            "dependencies": dependencies, "expertise": expertise,
-            "required_artifacts": required_artifacts, "acceptance_criteria": acceptance_criteria,
-            "verification_commands": verification_commands or [], "requirement_ids": [],
-            "owned_paths": list(required_artifacts), "status": "pending"}
-
+logger = logging.getLogger("gptmoss.planners.simple")
 
 class SimplePlanner(PlannerProvider):
     """Generate an adaptive specialist DAG and reject undersized plans."""
@@ -643,22 +283,31 @@ class SimplePlanner(PlannerProvider):
         if analysis["level"] in {"high", "very_high"} and len(domains) >= 3:
             return SimplePlanner._cross_domain_fallback(task, analysis)
         if "software-engineering" in domains:
+            if analysis["level"] in {"high", "very_high"}:
+                steps = [
+                    _step(0, "architect", "Requirements & Feasibility Analyst", "Analyze requirements, constraints, assumptions, risks, and acceptance criteria.", [], ["requirements engineering"], ["specs/requirements.md"], ["Requested outcomes are testable."]),
+                    _step(1, "architect", "Solution Architect", "Design modules, interfaces, data flow, dependencies, and delivery strategy.", [0], ["software architecture", *sorted(domains)], ["specs/architecture.md"], ["Architecture covers every requirement."]),
+                    _step(2, "security", "Security & Privacy Reviewer", "Review the design and specify concrete security and privacy mitigations.", [0, 1], ["threat modeling", "privacy"], ["specs/security.md"], ["Risks have actionable controls."]),
+                    _step(3, "developer", "Domain Model & Persistence Engineer", "Implement complete validated domain models, persistence boundaries, recovery behavior, and core invariants.", [1, 2], ["domain modeling", "persistence", *sorted(domains)], [], ["State and domain behavior satisfy validated invariants."]),
+                    _step(4, "developer", "Core Workflow Engineer", "Implement the complete runnable business workflows from specifications, reusing the domain contracts.", [1, 2, 3], ["implementation", "workflow engineering", *sorted(domains)], [], ["Core workflows execute real behavior without mock substitution."]),
+                    _step(5, "developer", "Interface & Automation Engineer", "Expose the requested CLI, API, UI, import/export, and automation entry points that apply to the request.", [1, 4], ["API design", "CLI design", "user journeys"], [], ["Every requested user-facing workflow has a runnable entry point."]),
+                    _step(6, "developer", "Cross-Component Integration Engineer", "Integrate components, verify producer/consumer signatures and data shapes, and remove duplicate or disconnected implementations.", [3, 4, 5], ["systems integration", "interface contracts"], [], ["Requested workflows use one coherent implementation end to end."]),
+                    _step(7, "qa", "Independent Contract Test Engineer", "Create independent unit, boundary, import, and interface contract tests against actual public modules, then collect them without changing implementation.", [3, 4, 5], ["test engineering", "contract testing"], ["tests/test_acceptance.py"], ["Tests import and exercise real public modules."], ["python -m pytest --collect-only -q"]),
+                    _step(8, "debugger", "Autonomous Unit & Integration Repair Engineer", "Run the complete suite, inspect concrete failures, repair root causes across integrated components, and rerun until green.", [6, 7], ["debugging", "root-cause analysis"], [], ["Complete unit and integration suite exits with code 0."], ["python -m pytest -q"]),
+                    _step(9, "qa", "Clean-Process End-to-End Acceptance Engineer", "Create and run complete representative CLI/API/UI acceptance journeys from a fresh process with local fixtures; verify outputs instead of mocked replicas.", [8], ["end-to-end testing", "process isolation", "artifact validation"], ["tests/test_end_to_end.py"], ["Requested user journeys run through public entry points."], ["python -m pytest -q"]),
+                    _step(10, "debugger", "Final Autonomous Acceptance Repair Engineer", "Repair only defects exposed by end-to-end acceptance and rerun all validations without repeating completed feature work.", [9], ["acceptance debugging", "regression repair"], [], ["Complete suite exits with code 0 after final repair."], ["python -m pytest -q"]),
+                    _step(11, "writer", "Technical Documentation & Operations Writer", "Document installation, offline operation, launch commands, use, architecture, tests, recovery, limitations, and maintenance from actual evidence.", [5, 9], ["technical writing", "operations"], ["README.md"], ["Documentation matches runnable behavior and exact limitations."]),
+                    _step(12, "coordinator", "Final Requirement Traceability Auditor", "Audit every mandatory requirement against implementation artifacts, independent validation, launch evidence, limitations, and approved scope changes.", [10, 11], ["delivery audit", "traceability"], [], ["No unsupported completion claim and no unmapped mandatory requirement."]),
+                ]
+                return {"analysis": analysis, "steps": steps, "rationale": "Adaptive deterministic software fallback."}
             steps = [
-                _step(0, "architect", "Requirements & Feasibility Analyst", "Analyze requirements, constraints, assumptions, risks, and acceptance criteria.", [], ["requirements engineering"], ["specs/requirements.md"], ["Requested outcomes are testable."]),
-                _step(1, "architect", "Solution Architect", "Design modules, interfaces, data flow, dependencies, and delivery strategy.", [0], ["software architecture", *sorted(domains)], ["specs/architecture.md"], ["Architecture covers every requirement."]),
-                _step(2, "security", "Security & Privacy Reviewer", "Review the design and specify concrete security and privacy mitigations.", [0, 1], ["threat modeling", "privacy"], ["specs/security.md"], ["Risks have actionable controls."]),
-                _step(3, "developer", "Domain Model & Persistence Engineer", "Implement complete validated domain models, persistence boundaries, recovery behavior, and core invariants.", [1, 2], ["domain modeling", "persistence", *sorted(domains)], [], ["State and domain behavior satisfy validated invariants."]),
-                _step(4, "developer", "Core Workflow Engineer", "Implement the complete runnable business workflows from specifications, reusing the domain contracts.", [1, 2, 3], ["implementation", "workflow engineering", *sorted(domains)], [], ["Core workflows execute real behavior without mock substitution."]),
-                _step(5, "developer", "Interface & Automation Engineer", "Expose the requested CLI, API, UI, import/export, and automation entry points that apply to the request.", [1, 4], ["API design", "CLI design", "user journeys"], [], ["Every requested user-facing workflow has a runnable entry point."]),
-                _step(6, "developer", "Cross-Component Integration Engineer", "Integrate components, verify producer/consumer signatures and data shapes, and remove duplicate or disconnected implementations.", [3, 4, 5], ["systems integration", "interface contracts"], [], ["Requested workflows use one coherent implementation end to end."]),
-                _step(7, "qa", "Independent Contract Test Engineer", "Create independent unit, boundary, import, and interface contract tests against actual public modules, then collect them without changing implementation.", [3, 4, 5], ["test engineering", "contract testing"], ["tests/test_acceptance.py"], ["Tests import and exercise real public modules."], ["python -m pytest --collect-only -q"]),
-                _step(8, "debugger", "Autonomous Unit & Integration Repair Engineer", "Run the complete suite, inspect concrete failures, repair root causes across integrated components, and rerun until green.", [6, 7], ["debugging", "root-cause analysis"], [], ["Complete unit and integration suite exits with code 0."], ["python -m pytest -q"]),
-                _step(9, "qa", "Clean-Process End-to-End Acceptance Engineer", "Create and run complete representative CLI/API/UI acceptance journeys from a fresh process with local fixtures; verify outputs instead of mocked replicas.", [8], ["end-to-end testing", "process isolation", "artifact validation"], ["tests/test_end_to_end.py"], ["Requested user journeys run through public entry points."], ["python -m pytest -q"]),
-                _step(10, "debugger", "Final Autonomous Acceptance Repair Engineer", "Repair only defects exposed by end-to-end acceptance and rerun all validations without repeating completed feature work.", [9], ["acceptance debugging", "regression repair"], [], ["Complete suite exits with code 0 after final repair."], ["python -m pytest -q"]),
-                _step(11, "writer", "Technical Documentation & Operations Writer", "Document installation, offline operation, launch commands, use, architecture, tests, recovery, limitations, and maintenance from actual evidence.", [5, 9], ["technical writing", "operations"], ["README.md"], ["Documentation matches runnable behavior and exact limitations."]),
-                _step(12, "coordinator", "Final Requirement Traceability Auditor", "Audit every mandatory requirement against implementation artifacts, independent validation, launch evidence, limitations, and approved scope changes.", [10, 11], ["delivery audit", "traceability"], [], ["No unsupported completion claim and no unmapped mandatory requirement."]),
+                _step(0, "architect", "Requirements & Feasibility Analyst", "Analyze the requested change, constraints, and acceptance criteria.", [], ["requirements engineering"], ["specs/requirements.md"], ["The requested outcome is testable."]),
+                _step(1, "developer", "Implementation Engineer", "Implement the requested software change against the existing project contracts.", [0], ["implementation", *sorted(domains)], [], ["The change is runnable and does not substitute mocks for required behavior."]),
+                _step(2, "qa", "Independent Test Engineer", "Add or update focused tests that exercise the public behavior requested.", [1], ["test engineering"], ["tests/test_acceptance.py"], ["Tests import real modules and cover the change."], ["python -m pytest --collect-only -q"]),
+                _step(3, "debugger", "Autonomous Repair Engineer", "Run the relevant suite, repair root causes, and rerun until green.", [2], ["debugging"], [], ["The verification command exits with code 0."], ["python -m pytest -q"]),
+                _step(4, "coordinator", "Final Requirement Traceability Auditor", "Audit the requested outcome against files, tests, and residual risk.", [3], ["delivery audit"], [], ["No unsupported completion claim remains."]),
             ]
-            return {"analysis": analysis, "steps": steps, "rationale": "Adaptive deterministic software fallback."}
+            return {"analysis": analysis, "steps": steps, "rationale": "Compact software fallback sized to the task."}
         return {"analysis": analysis,
                 "steps": [_step(0, "coordinator", "Task Specialist", f"Perform the user task: {task}", [], list(domains) or ["general"], [], ["The requested outcome is delivered."])],
                 "rationale": "Deterministic direct-task fallback."}

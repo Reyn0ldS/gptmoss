@@ -41,7 +41,7 @@ pas un ordonnanceur distribué ni une implémentation de cron.
 | Contrôle du processus | `scripts/server_supervisor.py` | Conserve un point de contrôle local lorsque l'application est arrêtée ; vérifie port, santé et jeton éphémère. |
 | Interface | `gptmoss/api/gui.html` | Composition des tâches, suivi temps réel, bibliothèque, mémoire, skills, réglages, livraisons et contrôle serveur. |
 | API | `gptmoss/api/server.py` | Contrats HTTP/WebSocket, validation Pydantic, cycle de vie, réglages, diagnostics et téléchargements bornés. |
-| Orchestration | `core/kernel.py`, `core/execution.py`, `core/scheduler.py`, `planners/simple.py` | Création/exécution planifiée, plan adaptatif, dépendances, spécialistes, reprises, approbations et convergence. |
+| Orchestration | `core/kernel.py`, `core/execution.py`, `core/execution_plan.py`, `core/execution_progress.py`, `core/execution_rescue.py`, `core/scheduler.py`, `planners/simple.py`, `planners/complexity.py`, `planners/fallbacks.py` | Création/exécution planifiée, plan adaptatif, dépendances, spécialistes, reprises, approbations et convergence. |
 | Domaines projet | `core/domains.py` | Catégories génériques et extensions de marqueurs propres à chaque projet, sans hypothèse métier globale. |
 | Contexte et mémoire | `core/context.py`, `memory/json_store.py`, `capabilities/memory.py` | Contexte borné et mémoire gouvernée par projet, validation, provenance, TTL, déduplication et supersession. |
 | Capacités | `capabilities/*` | Actions outillées exposées au modèle et contrôlées par la politique. |

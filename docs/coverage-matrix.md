@@ -10,8 +10,8 @@ modules et tests est dans `application-map.json` ; le présent document apporte 
 | Supervision serveur | `server_supervisor.py` | centre Serveur, `/api/runtime-control`, API :8765 | ports CLI/environnement | `test_server_supervisor`, `test_functional_coverage_contract` |
 | Soumission/projets | kernel, API, filesystem, domains | compositeur, `/executions`, `/projects` | `projects`, domaines projet, `workspace_path` | `test_api`, `test_end_to_end_workflow`, `test_adaptive_autonomy` |
 | Planification temporelle | scheduler, kernel, reprise fournisseur | `delay_seconds`, `run_at`, statuts | échéance persistée | `test_scheduler_and_legacy_state`, `test_api`, `test_lifecycle_chronology` |
-| Planification fonctionnelle | `planners/simple.py`, domains, execution | plan et statuts | contexte, autonomie, délégation | `test_planning_modes`, `test_lifecycle_chronology` |
-| Exécution/outils | `core/execution.py`, capacités | timeline, feed, WebSocket | budgets, skills, permissions | `test_execution`, `test_adaptive_autonomy` |
+| Planification fonctionnelle | `planners/simple.py`, `planners/complexity.py`, `planners/fallbacks.py`, domains, execution | plan et statuts | contexte, autonomie, délégation | `test_planning_modes`, `test_lifecycle_chronology` |
+| Exécution/outils | `core/execution.py`, `core/execution_plan.py`, `core/execution_progress.py`, `core/execution_rescue.py`, capacités | timeline, feed, WebSocket | budgets, skills, permissions | `test_execution`, `test_adaptive_autonomy` |
 | Politique/shell | policy, shell/filesystem | approbation, pause/reprise | denied/approval, safe shell, autonomie | `test_policy`, `test_runtime_improvements` |
 | Sous-agents | agent, devteam, kernel | bibliothèque et endpoints subagents | profondeur/délégation | `test_agent_and_memory`, `test_devteam` |
 | Pièces jointes | artifacts, documents | upload, liste, recherche, aperçu | limites upload/texte | `test_documents`, `test_document_capability`, `test_skills_and_artifacts` |

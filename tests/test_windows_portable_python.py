@@ -127,6 +127,7 @@ def test_offline_builder_double_click_wrapper_can_verify_bundled_runtime():
 def test_main_anchors_default_runtime_files_to_project_root():
     main_source = (PROJECT_ROOT / "main.py").read_text(encoding="utf-8")
 
-    assert 'os.path.join(PROJECT_ROOT, "app.log")' in main_source
+    assert "_attach_workspace_log" in main_source
+    assert 'os.path.join(os.path.abspath(workspace_root), "app.log")' in main_source
     assert 'load_dotenv(os.path.join(PROJECT_ROOT, ".env"))' in main_source
     assert 'default=os.path.join(PROJECT_ROOT, "workspace")' in main_source

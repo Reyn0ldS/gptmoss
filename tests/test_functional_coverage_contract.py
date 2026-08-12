@@ -38,6 +38,7 @@ FEATURE_CONTRACTS = {
                    ("DELETE", "/executions/{execution_id}"),
                    ("POST", "/executions/clear-all")},
         "tests": {"test_execution_control_api_preserves_transition_chronology",
+                  "test_api_delete_and_clear_all_refuse_active_executions",
                   "test_approval_endpoints_record_ordered_scope_decisions",
                   "test_delivery_package_contains_docx_manifest_assurance_and_sources",
                   "test_docx_contains_real_table_and_embedded_svg",
@@ -67,6 +68,7 @@ FEATURE_CONTRACTS = {
         "routes": {("GET", "/executions/{execution_id}/subagents"),
                    ("POST", "/executions/{execution_id}/subagents")},
         "tests": {"test_agent_status_and_execute_subtask_cover_terminal_modes",
+                  "test_api_subagent_inherits_parent_project_context",
                   "test_complete_project_workflow_assigns_once_and_aggregates"},
     },
     "settings": {

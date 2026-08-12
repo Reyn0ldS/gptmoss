@@ -35,16 +35,18 @@ def test_planner_modes_produce_valid_causal_dependency_graphs(mode, task):
 
     if mode == "direct":
         assert len(steps) == 1 and steps[0]["role"] == "coordinator"
+    elif mode == "software":
+        assert 3 <= len(steps) <= 5
+        assert steps[-1]["role"] == "coordinator"
+        assert any(step["role"] == "developer" for step in steps)
+        assert any(step["role"] in {"qa", "debugger"} for step in steps)
     else:
         assert len(steps) >= analysis["suggested_min_steps"]
         assert steps[-1]["role"] == "coordinator"
         assert any(step["role"] == "qa" for step in steps)
         assert any(step["role"] == "debugger" for step in steps)
 
-    if mode == "software":
-        assert [step["role"] for step in steps[:3]] == ["architect", "architect", "security"]
-        assert steps[-1]["dependencies"] == [10, 11]
-    elif mode == "complex-cross-domain":
+    if mode == "complex-cross-domain":
         assert steps[2]["specialist"] == "External Tool Contract Engineer"
         assert "execution_routines" in steps[2]["description"]
     elif mode == "local-document":

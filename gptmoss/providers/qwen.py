@@ -28,6 +28,8 @@ class QwenProvider(LLMProvider):
         # DashScope OpenAI-compatible endpoint or local host
         self.base_url = base_url or os.getenv("OPENAI_BASE_URL") or "https://dashscope.aliyuncs.com/compatible-mode/v1"
         self.default_model = default_model
+        self.ssl_verify = bool(ssl_verify)
+        self.ssl_cert_path = ssl_cert_path or ""
         self.vision_mode = "auto"
         self.supports_vision = self._infer_vision(default_model)
         self._native_tools_supported: Optional[bool] = None
@@ -109,6 +111,8 @@ class QwenProvider(LLMProvider):
         self.api_key = api_key
         self.base_url = base_url
         self.default_model = model_name
+        self.ssl_verify = bool(ssl_verify)
+        self.ssl_cert_path = ssl_cert_path or ""
         self.supports_vision = (
             self._infer_vision(model_name)
             if self.vision_mode == "auto" else self.vision_mode == "enabled"
@@ -449,7 +453,7 @@ class QwenProvider(LLMProvider):
             raise e
 
     async def tokenize(self, text: str, **kwargs) -> List[int]:
-        # Simple placeholder tokenization for Phase 1
+        """Interface placeholder: character ordinals, not a model tokenizer."""
         return [ord(c) for c in text]
 
     async def models(self) -> List[str]:
