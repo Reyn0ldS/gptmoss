@@ -984,6 +984,8 @@ def test_gui_contains_complete_management_controls():
         'id="library-evolution"', "/agent-profiles", "/evolution",
         "uploadedTaskAttachments", "resetTaskAttachmentUploads",
         "resumableFailure", "Authentification LLM refusée",
+        'id="task-planning-mode"', "appendLlmStream", "clearLlmStream",
+        "planning_mode", "task_title",
     ):
         assert marker in gui
 
