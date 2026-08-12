@@ -56,6 +56,13 @@ class RuntimeSettings(BaseModel):
     shell_timeout_seconds: int = Field(default=0, ge=0)
     shell_max_output_chars: int = Field(default=12_000, ge=1)
     default_skills: list[str] = Field(default_factory=list)
+    # Long-form delivery controls.  These orchestrate the active provider; no
+    # additional model or downloaded weights are implied.
+    document_engine_enabled: bool = True
+    document_checkpoint_enabled: bool = True
+    document_target_section_words: int = Field(default=450, ge=80, le=20_000)
+    diagram_rendering: bool = True
+    docx_embed_diagrams: bool = True
 
     def normalized(self) -> "RuntimeSettings":
         self.default_skills = [str(item).lower() for item in self.default_skills]

@@ -23,6 +23,8 @@ sont vérifiés par `python scripts/validate_application_map.py`. Avant une évo
 
 ## Sommaire
 
+- [Moteur de documents longs et diagrammes](#moteur-de-documents-longs-et-diagrammes)
+
 - [Démarrage rapide](#démarrage-rapide)
 - [Configuration complète](#configuration-complète)
 - [Utiliser l'interface Web](#utiliser-linterface-web)
@@ -164,6 +166,11 @@ La configuration active est `workspace/config.json`. Au démarrage, GPTMOSS la n
   "shell_timeout_seconds": 0,
   "shell_max_output_chars": 12000,
   "default_skills": [],
+  "document_engine_enabled": true,
+  "document_checkpoint_enabled": true,
+  "document_target_section_words": 450,
+  "diagram_rendering": true,
+  "docx_embed_diagrams": true,
   "projects": [
     { "id": "proj-default", "name": "Projet par défaut" }
   ]
@@ -206,6 +213,25 @@ La configuration active est `workspace/config.json`. Au démarrage, GPTMOSS la n
 | `default_skills` | Skills appliqués par défaut. | `[]` pour la sélection automatique. |
 
 Les variables d'environnement `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `OPENAI_MODEL_NAME` et `DASHSCOPE_API_KEY` servent de valeurs de secours quand le champ équivalent n'est pas renseigné. `main.py` charge `.env` au démarrage.
+
+## Moteur de documents longs et diagrammes
+
+GPTMOSS n'ajoute aucun modÃ¨le IA pour les documents volumineux : Qwen reste le
+seul rÃ©dacteur. Le moteur interne dÃ©coupe la mission en contrats de sections,
+conserve la mÃ©moire de terminologie et de dÃ©cisions, puis consolide les sections
+validÃ©es. Le nombre d'Ã©tapes est estimÃ© selon les sources, livrables, objectifs
+de mots, exigences de preuve et diagrammes.
+
+Les checkpoints JSON atomiques sont placÃ©s sous
+`.gptmoss/document-state/<execution>.document.json`. L'endpoint
+`GET /executions/{execution_id}/document` et le panneau **Document long format**
+affichent l'avancement et permettent la reprise. Les tableaux Markdown deviennent
+de vrais tableaux DOCX ; les blocs `mermaid` ou `diagram` valides sont rendus en
+SVG et intÃ©grÃ©s dans `word/media/`. Une figure invalide est explicitement
+signalÃ©e, jamais remplacÃ©e par une image trompeuse.
+
+Options dédiées : `document_engine_enabled`, `document_checkpoint_enabled`,
+`document_target_section_words`, `diagram_rendering` et `docx_embed_diagrams`.
 
 ### Projets et dossiers de travail
 

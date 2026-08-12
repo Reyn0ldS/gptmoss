@@ -29,13 +29,19 @@
     "gptmoss/core/delivery_coordinator.py": "assurance",
     "gptmoss/core/delivery_package.py": "delivery",
     "gptmoss/core/document_quality.py": "assurance",
+    "gptmoss/core/document_model.py": "documents",
+    "gptmoss/core/document_planning.py": "planning",
     "gptmoss/core/documents.py": "documents",
+    "gptmoss/core/diagrams/model.py": "delivery",
+    "gptmoss/core/diagrams/renderer.py": "delivery",
+    "gptmoss/core/diagrams/validator.py": "assurance",
     "gptmoss/core/domains.py": "planning",
     "gptmoss/core/durable_io.py": "persistence",
     "gptmoss/core/event_bus.py": "runtime",
     "gptmoss/core/evolution.py": "skills",
     "gptmoss/core/execution.py": "runtime",
     "gptmoss/core/kernel.py": "runtime",
+    "gptmoss/core/long_document_engine.py": "documents",
     "gptmoss/core/observability.py": "observability",
     "gptmoss/core/professional_delivery.py": "delivery",
     "gptmoss/core/provider_recovery.py": "runtime",
@@ -125,6 +131,7 @@
     ["GET", "/executions", "list_executions"],
     ["GET", "/executions/{execution_id}", "get_execution"],
     ["GET", "/executions/{execution_id}/delivery", "get_execution_delivery"],
+    ["GET", "/executions/{execution_id}/document", "get_execution_document_state"],
     ["GET", "/executions/{execution_id}/subagents", "list_subagents"],
     ["POST", "/executions/{execution_id}/subagents", "create_subagent"],
     ["GET", "/api/diagnostics", "get_diagnostics"],
@@ -227,6 +234,11 @@
     "shell_max_output_chars",
     "default_skills",
     "projects"
+    ,"document_engine_enabled"
+    ,"document_checkpoint_enabled"
+    ,"document_target_section_words"
+    ,"diagram_rendering"
+    ,"docx_embed_diagrams"
   ],
   "gui_surfaces": [
     {
@@ -239,7 +251,7 @@
     },
     {
       "id": "execution-observation",
-      "evidence": ["setupWebSocket", "/ws/events", "/unified-feed", "fetchExecutionDetails"]
+      "evidence": ["setupWebSocket", "/ws/events", "/unified-feed", "fetchExecutionDetails", "/document"]
     },
     {
       "id": "library",
@@ -294,7 +306,7 @@
     },
     {
       "id": "document-quality-delivery",
-      "tests": ["tests/test_document_quality.py", "tests/test_document_planner_fallback.py", "tests/test_professional_delivery.py", "tests/test_delivery_assurance.py", "tests/test_delivery_benchmarks.py", "tests/test_quality_benchmarks.py", "tests/test_corpus.py"]
+      "tests": ["tests/test_document_quality.py", "tests/test_document_planner_fallback.py", "tests/test_professional_delivery.py", "tests/test_delivery_assurance.py", "tests/test_delivery_benchmarks.py", "tests/test_quality_benchmarks.py", "tests/test_corpus.py", "tests/test_long_document_engine.py", "tests/test_diagrams_and_docx.py"]
     },
     {
       "id": "skills-evolution",

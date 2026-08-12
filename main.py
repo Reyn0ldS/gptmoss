@@ -177,6 +177,11 @@ def bootstrap_runtime(workspace_root: str):
         strict_skill_capabilities=strict_skill_capabilities,
         allow_nested_delegation=allow_nested_delegation,
         max_delegation_depth=max_delegation_depth,
+        document_engine_enabled=settings.document_engine_enabled,
+        document_checkpoint_enabled=settings.document_checkpoint_enabled,
+        document_target_section_words=settings.document_target_section_words,
+        diagram_rendering=settings.diagram_rendering,
+        docx_embed_diagrams=settings.docx_embed_diagrams,
     )
 
     # Register capabilities

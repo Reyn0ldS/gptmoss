@@ -36,6 +36,13 @@ Le graphe inventorie :
 - fonctions de test qui appellent les symboles de production ;
 - domaine architectural et fonctionnalité de couverture provenant de la carte principale.
 
+Les relations documentaires relient `LongDocumentEngine` à `DocumentModelStore`,
+`DocumentSection` et `SectionContract` pour les checkpoints, la mémoire et la
+consolidation. Le sous-graphe `gptmoss.core.diagrams` relie `DiagramSpec` à
+`validate_diagram`, `render_svg` et au rendu DOCX ; toute évolution du format d'une
+figure doit donc mettre à jour le modèle, les validateurs, le renderer, le paquet
+Office et les tests associés.
+
 Les variables locales temporaires ne sont pas inventoriées. Elles rendraient le graphe
 bruyant sans améliorer l'organisation d'une évolution. Les données conservées sont celles
 qui franchissent une frontière de méthode, de module, d'exécution, de configuration ou de

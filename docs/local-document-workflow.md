@@ -136,7 +136,18 @@ fichier local
   -> livrable Markdown et assurance finale
 ```
 
-Le fallback professionnel utilise treize étapes bornées. La production de la politique et des rapports qualité appartient à un rédacteur de preuves après réparation ; un QA distinct crée ensuite `analysis/final-delivery-audit.md` sans modifier les sorties des auteurs, puis le coordinateur contrôle toute la traçabilité. Les exigences complètes transmises à un spécialiste restent limitées à sa nature de travail et ne l'autorisent jamais à écrire les livrables des étapes sœurs.
+Le fallback professionnel estime désormais un budget d'étapes selon la taille réelle du corpus et du livrable. Une note courte reçoit un chemin compact ; un dossier à nombreuses sources, exigences, rapports ou diagrammes conserve les étapes d'analyse, rédaction, réparation et assurance indépendante. La production de la politique et des rapports qualité appartient à un rédacteur de preuves après réparation ; un QA distinct crée ensuite `analysis/final-delivery-audit.md` sans modifier les sorties des auteurs, puis le coordinateur contrôle toute la traçabilité. Les exigences complètes transmises à un spécialiste restent limitées à sa nature de travail et ne l'autorisent jamais à écrire les livrables des étapes sœurs.
+
+Pour un document long, le moteur sectionnel crée un contrat stable par titre (objectif,
+volume cible, exigences, preuves et dépendances), sauvegarde chaque révision dans
+`.gptmoss/document-state` et réassemble le Markdown uniquement à partir des sections
+validées. Cette mémoire réduit les répétitions et permet de reprendre après une
+interruption fournisseur sans recommencer les sections terminées.
+
+Les blocs `mermaid` ou `diagram` sont convertis par le modèle canonique de diagramme,
+contrôlés (nœuds, arêtes, zones de confiance, densité, métadonnées), puis rendus en
+SVG déterministe. Le paquet DOCX conserve la figure dans `word/media/` et relie son
+`rId` dans `document.xml`; une erreur sémantique n'est jamais masquée par un dessin vide.
 
 L'index est lexical, accent-insensible et sans modèle à télécharger. Il est enregistré dans `workspace/uploads/document-index.json`, rechargé au redémarrage et reconstruit automatiquement si son état ne correspond plus aux documents. La représentation normalisée de chaque fichier évite de reparcourir l'archive à chaque lecture.
 

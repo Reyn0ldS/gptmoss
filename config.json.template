@@ -34,6 +34,11 @@
   "shell_timeout_seconds": 0,
   "shell_max_output_chars": 12000,
   "default_skills": [],
+  "document_engine_enabled": true,
+  "document_checkpoint_enabled": true,
+  "document_target_section_words": 450,
+  "diagram_rendering": true,
+  "docx_embed_diagrams": true,
   "projects": [
     {
       "id": "proj-default",

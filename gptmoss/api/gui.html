@@ -1398,6 +1398,8 @@
                     <div class="plan-steps" id="plan-steps">
                         <!-- Steps checklist injected here -->
                     </div>
+                    <div class="plan-title" style="margin-top:16px;">Document long format</div>
+                    <div id="document-progress" class="terminal-box" style="font-size:12px; white-space:pre-wrap;">Aucun état documentaire.</div>
                 </div>
             </div>
 
@@ -2125,6 +2127,25 @@
                     });
                 } else {
                     planSteps.innerHTML = `<div style="color: var(--text-muted); font-size: 13px;">Planification en cours...</div>`;
+                }
+
+                const documentProgress = document.getElementById("document-progress");
+                if (documentProgress) {
+                    try {
+                        const documentRes = await fetch(`/executions/${id}/document`);
+                        if (documentRes.ok) {
+                            const documentState = await documentRes.json();
+                            const percent = Math.round((documentState.progress || 0) * 100);
+                            const sectionLines = (documentState.sections || []).map(section =>
+                                `${section.status === "complete" ? "✓" : "·"} ${section.heading || section.section_id} (${section.word_count || 0} mots)`
+                            );
+                            documentProgress.textContent = `État : ${documentState.status || "-"} — ${percent}%\n` + (sectionLines.join("\n") || "Planification en cours…");
+                        } else {
+                            documentProgress.textContent = "Aucun document long initialisé.";
+                        }
+                    } catch (documentError) {
+                        documentProgress.textContent = "État documentaire indisponible.";
+                    }
                 }
 
             } catch (err) {
