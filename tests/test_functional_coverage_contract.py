@@ -27,6 +27,7 @@ FEATURE_CONTRACTS = {
         "routes": {("POST", "/executions"), ("GET", "/executions"),
                    ("GET", "/executions/{execution_id}"),
                    ("GET", "/executions/{execution_id}/delivery"),
+                   ("GET", "/executions/{execution_id}/document"),
                    ("GET", "/executions/{execution_id}/metrics"),
                    ("GET", "/executions/{execution_id}/unified-feed"),
                    ("POST", "/executions/{execution_id}/approve"),
@@ -39,6 +40,7 @@ FEATURE_CONTRACTS = {
         "tests": {"test_execution_control_api_preserves_transition_chronology",
                   "test_approval_endpoints_record_ordered_scope_decisions",
                   "test_delivery_package_contains_docx_manifest_assurance_and_sources",
+                  "test_docx_contains_real_table_and_embedded_svg",
                   "test_professional_delivery_download_route_is_scoped_to_execution"},
     },
     "projects_and_documents": {
@@ -107,6 +109,11 @@ CONFIGURATION_OWNERS = {
     "max_step_retries": "execution", "safe_shell_mode": "shell",
     "shell_timeout_seconds": "shell", "shell_max_output_chars": "shell",
     "default_skills": "execution", "projects": "api",
+    "document_engine_enabled": "execution+documents",
+    "document_checkpoint_enabled": "execution+persistence",
+    "document_target_section_words": "documents",
+    "diagram_rendering": "documents+delivery",
+    "docx_embed_diagrams": "delivery",
 }
 
 

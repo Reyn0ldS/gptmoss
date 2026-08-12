@@ -9,6 +9,7 @@ import os
 import re
 import shlex
 import sys
+from pathlib import Path
 from typing import Dict, Any, List, Optional
 from gptmoss.core.event_bus import Event, EventBus
 from gptmoss.core.state import StateEngine
@@ -39,6 +40,7 @@ from gptmoss.core.provider_recovery import (
     ProviderUnavailableError as RecoveryProviderUnavailableError,
 )
 from gptmoss.core.scheduler import Scheduler
+from gptmoss.core.long_document_engine import LongDocumentEngine
 
 ROLE_DISPLAY_NAMES = {
     "architect": "Architecte",
@@ -309,6 +311,11 @@ class ExecutionEngine:
         allow_nested_delegation: bool = True,
         max_delegation_depth: int = 0,
         scheduler: Optional[Scheduler] = None,
+        document_engine_enabled: bool = True,
+        document_checkpoint_enabled: bool = True,
+        document_target_section_words: int = 450,
+        diagram_rendering: bool = True,
+        docx_embed_diagrams: bool = True,
     ):
         self.event_bus = event_bus
         self.state_engine = state_engine
@@ -327,6 +334,11 @@ class ExecutionEngine:
         self.strict_skill_capabilities = bool(strict_skill_capabilities)
         self.allow_nested_delegation = bool(allow_nested_delegation)
         self.max_delegation_depth = max(0, int(max_delegation_depth))
+        self.document_engine_enabled = bool(document_engine_enabled)
+        self.document_checkpoint_enabled = bool(document_checkpoint_enabled)
+        self.document_target_section_words = max(80, int(document_target_section_words))
+        self.diagram_rendering = bool(diagram_rendering)
+        self.docx_embed_diagrams = bool(docx_embed_diagrams)
         self.runtime_policy = AdaptiveRuntimePolicy(
             baseline_stagnation_iterations=self.max_step_iterations,
             baseline_retries=self.max_step_retries,
@@ -1443,6 +1455,87 @@ class ExecutionEngine:
     def _delivery_workspace(self, execution_id: str) -> Optional[str]:
         return self.delivery_coordinator.workspace(execution_id)
 
+    def _initialize_document_state(self, execution_id: str, task: str, plan: Dict[str, Any], state) -> None:
+        """Create/resume the provider-neutral long-document checkpoint."""
+        if not self.document_engine_enabled or not self.document_checkpoint_enabled:
+            return
+        if not any(marker in str(task).casefold() for marker in (
+            "dossier", "rapport", "livrable", "long-form", "document-analysis",
+            "rédige", "redige", "write a document", "professional document",
+        )):
+            return
+        workspace = self._delivery_workspace(execution_id)
+        if not workspace:
+            return
+        checkpoint_root = os.path.join(workspace, ".gptmoss", "document-state")
+        engine = LongDocumentEngine(checkpoint_root)
+        model = engine.resume(execution_id)
+        if model is None:
+            primary = str(plan.get("primary_artifact") or "deliverable.md")
+            model = engine.create_model(execution_id, task, os.path.join(workspace, primary), plan.get("requirements", []))
+            headings: list[str] = []
+            for policy in plan.get("artifact_validations", []):
+                if policy.get("path") == primary:
+                    headings = [str(item) for item in policy.get("constraints", {}).get("required_headings", [])]
+                    break
+            if not headings:
+                headings = [
+                    str(step.get("specialist") or f"Section {index}")
+                    for index, step in enumerate(plan.get("steps", []), 1)
+                    if step.get("role") in {"architect", "security", "writer"}
+                ]
+            engine.plan_sections(
+                model,
+                headings or ["Executive Summary", "Architecture", "Conclusion"],
+                requirements=plan.get("requirements", []),
+                target_words=self.document_target_section_words,
+            )
+        state.variables["document_model_checkpoint"] = str(engine.store.path_for(execution_id))
+        state.variables["document_sections"] = [
+            {
+                "section_id": section.contract.section_id,
+                "heading": section.contract.heading,
+                "status": section.contract.status,
+                "word_count": section.word_count,
+            }
+            for section in model.sections
+        ]
+        state.variables["document_memory"] = engine.memory(model).as_prompt()
+
+    def _sync_document_checkpoint(self, execution_id: str, state) -> None:
+        """Reconcile written Markdown into section checkpoints after each step."""
+        checkpoint = state.variables.get("document_model_checkpoint")
+        if not checkpoint:
+            return
+        try:
+            checkpoint_path = Path(str(checkpoint)).resolve()
+            engine = LongDocumentEngine(checkpoint_path.parent)
+            model = engine.resume(execution_id)
+            if model is None:
+                return
+            output = Path(model.output_path)
+            if not output.is_file():
+                return
+            markdown = output.read_text(encoding="utf-8")
+            matches = list(re.finditer(r"(?m)^##\s+(.+?)\s*$", markdown))
+            for index, match in enumerate(matches):
+                heading = match.group(1).strip()
+                end = matches[index + 1].start() if index + 1 < len(matches) else len(markdown)
+                section = next((item for item in model.sections if item.contract.heading.casefold() == heading.casefold()), None)
+                if section is not None:
+                    section.record(markdown[match.end():end].strip())
+            model.status = "complete" if model.sections and all(item.content for item in model.sections) else "writing"
+            model.revision += 1
+            engine.store.save(model)
+            state.variables["document_sections"] = [
+                {"section_id": item.contract.section_id, "heading": item.contract.heading,
+                 "status": item.contract.status, "word_count": item.word_count}
+                for item in model.sections
+            ]
+            state.variables["document_memory"] = engine.memory(model).as_prompt()
+        except (OSError, ValueError, UnicodeError):
+            logger.debug("Unable to synchronize document checkpoint", exc_info=True)
+
     def _independent_delivery_report(self, execution_id: str, steps: List[Dict[str, Any]]) -> Dict[str, Any]:
         return self.delivery_coordinator.assurance(execution_id, steps)
 
@@ -1644,6 +1737,7 @@ class ExecutionEngine:
             )
             self.telemetry.record("plan_generated", execution_id, duration_ms=round((time.perf_counter() - planning_started) * 1000, 2), steps=len(plan_result.get("steps", [])))
             state.current_plan = plan_result
+            self._initialize_document_state(execution_id, task, plan_result, state)
             state.variables["delivery_contract"] = build_delivery_contract(
                 state.current_plan, task
             )
@@ -1654,6 +1748,8 @@ class ExecutionEngine:
             ))
 
         state.current_plan = normalize_plan(state.current_plan)
+        if "document_model_checkpoint" not in state.variables:
+            self._initialize_document_state(execution_id, task, state.current_plan, state)
         if not isinstance(state.variables.get("delivery_contract"), dict):
             state.variables["delivery_contract"] = build_delivery_contract(
                 state.current_plan, task
@@ -2185,6 +2281,7 @@ class ExecutionEngine:
 
             step["status"] = "completed"
             step["result"] = result
+            self._sync_document_checkpoint(execution_id, state)
             if not sub_id:
                 self._record_specialization_outcome(execution_id, step, True, str(result))
             step_record = {
@@ -2848,7 +2945,11 @@ class ExecutionEngine:
             elif role_key == "writer":
                 specialized_prompt = (
                     "You are the Specialized Technical Writer.\n"
-                    "Your role is to write detailed project documentation, README.md files, and help guides for users."
+                    "Your role is to write detailed project documentation, README.md files, and help guides for users. "
+                    "For long documents, work section-by-section from the declared section contracts: meet each target "
+                    "word count, cite bounded local evidence near factual claims, preserve terminology and requirement IDs, "
+                    "and avoid repeating prerequisite sections. Treat the checkpoint and previous-section memory as the "
+                    "canonical source of continuity. Never invent a source, citation locator, diagram, metric, or validation result."
                 )
             else:
                 specialized_prompt = "Coordinate the current step and synthesize prerequisite results without repeating completed work."
@@ -2868,6 +2969,9 @@ class ExecutionEngine:
                 f"\nExternal tool declarations: {json.dumps((state.current_plan or {}).get('external_tools', []), ensure_ascii=False)}."
                 f"\nExecution routines: {json.dumps((state.current_plan or {}).get('execution_routines', []), ensure_ascii=False)}."
                 f"\nArtifact validation specifications: {json.dumps((state.current_plan or {}).get('artifact_validations', []), ensure_ascii=False)}."
+                f"\nLong-document checkpoint: {json.dumps(state.variables.get('document_model_checkpoint', ''), ensure_ascii=False)}."
+                f"\nSection progress: {json.dumps(state.variables.get('document_sections', []), ensure_ascii=False)}."
+                f"\nDocument continuity memory: {state.variables.get('document_memory', 'none')}."
                 "\nAct autonomously inside the project workspace: inspect existing prerequisite artifacts, implement the assignment, "
                 "run relevant checks, diagnose failures, fix root causes, and rerun checks before finishing. Do not merely describe "
                 "what should be done. Do not redo validated dependency work. Never claim an artifact or successful test that you did not create or execute."

@@ -32,6 +32,10 @@ from gptmoss.core.documents import (
     parse_document,
 )
 from gptmoss.core.evolution import AgentProfileRegistry, AutonomousSkillLifecycle
+from gptmoss.core.document_model import DocumentModel, DocumentModelStore, DocumentSection, EvidenceReference, SectionContract
+from gptmoss.core.long_document_engine import LongDocumentEngine, SectionMemory
+from gptmoss.core.document_planning import DocumentWorkEstimate, estimate_document_work
+from gptmoss.core.diagrams import DiagramEdge, DiagramNode, DiagramSpec, parse_mermaid, render_svg, validate_diagram
 
 __all__ = [
     "Event",
@@ -69,4 +73,19 @@ __all__ = [
     "parse_document",
     "AgentProfileRegistry",
     "AutonomousSkillLifecycle",
+    "DocumentModel",
+    "DocumentModelStore",
+    "DocumentSection",
+    "EvidenceReference",
+    "SectionContract",
+    "LongDocumentEngine",
+    "SectionMemory",
+    "DocumentWorkEstimate",
+    "estimate_document_work",
+    "DiagramEdge",
+    "DiagramNode",
+    "DiagramSpec",
+    "parse_mermaid",
+    "render_svg",
+    "validate_diagram",
 ]

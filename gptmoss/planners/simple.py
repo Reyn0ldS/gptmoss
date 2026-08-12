@@ -10,6 +10,7 @@ from gptmoss.interfaces.llm import LLMProvider
 from gptmoss.interfaces.planner import PlannerProvider
 from gptmoss.core.delivery import extract_requirements
 from gptmoss.core.domains import DEFAULT_DOMAIN_REGISTRY, ProjectDomainRegistry
+from gptmoss.core.document_planning import adapt_document_steps, estimate_document_work
 
 logger = logging.getLogger("gptmoss.planners.simple")
 
@@ -295,7 +296,13 @@ def _assign_document_requirements(
     """Map document requirements to bounded owners instead of lexical accidents."""
     requirements = extract_requirements(task)
     by_id = {int(step["id"]): step for step in steps}
-    producer_ids = [0, 1, 2, 3, 4, 5, 6, 7, 10]
+    producer_ids = [int(step["id"]) for step in steps if step.get("role") in {"architect", "security", "writer"}]
+    coordinator_ids = [int(step["id"]) for step in steps if step.get("role") == "coordinator"]
+    final_coordinator = coordinator_ids[-1] if coordinator_ids else int(steps[-1]["id"])
+    specialist_ids = {
+        str(step.get("specialist", "")).casefold(): int(step["id"])
+        for step in steps
+    }
     for step in steps:
         step["requirement_ids"] = []
     for requirement in requirements:
@@ -344,11 +351,23 @@ def _assign_document_requirements(
             targets = [0, 1, 2, 3, 4, 5, 6, 7, 10]
         else:
             targets = [7]
+        # The adaptive planner can remove optional stages, so the historical
+        # numeric ownership map is only a preference.  Fall back to the
+        # closest surviving specialist instead of dropping the requirement.
+        targets = [target for target in targets if target in by_id]
+        if not targets:
+            if any(marker in statement for marker in ("inventor", "documents.inventory", "pièces jointes", "pieces jointes")):
+                targets = [specialist_ids.get(name, producer_ids[0]) for name in specialist_ids if "corpus" in name][:1] or [producer_ids[0]]
+            elif any(marker in statement for marker in ("quality", "review", "audit", "rapport")):
+                targets = [specialist_ids.get(name, producer_ids[-1]) for name in specialist_ids if "quality evidence" in name or "deterministic" in name][:1] or [producer_ids[-1]]
+            else:
+                targets = [producer_ids[-1] if producer_ids else final_coordinator]
         for target in targets:
             if target in by_id:
                 by_id[target]["requirement_ids"].append(requirement["id"])
         # The final independent reviewer validates every user requirement.
-        if 11 in by_id:
+        by_id[final_coordinator]["requirement_ids"].append(requirement["id"])
+        if 11 in by_id and 11 != final_coordinator:
             by_id[11]["requirement_ids"].append(requirement["id"])
     return requirements
 
@@ -586,6 +605,7 @@ class SimplePlanner(PlannerProvider):
                 [], ["Every mandatory requirement has final implementation and independent validation evidence."],
             ),
         ]
+        steps, estimate = adapt_document_steps(task, analysis, steps)
         requirements = _assign_document_requirements(task, steps)
         return {
             "delivery_profile": "professional-local",
@@ -593,7 +613,12 @@ class SimplePlanner(PlannerProvider):
             "analysis": {
                 **analysis,
                 "workstreams": [step["specialist"] for step in steps],
-                "mvp_boundary": "Complete source-grounded document delivery; rich Office/PDF rendering is not inferred.",
+                "document_work_estimate": {
+                    "complexity": estimate.complexity,
+                    "stage_budget": estimate.stage_budget,
+                    "reasons": list(estimate.reasons),
+                },
+                "mvp_boundary": "Complete source-grounded document delivery with adaptive section planning; rich Office/PDF rendering is validated by the renderer when requested.",
             },
             "scope_changes": [],
             "interfaces": [],

@@ -742,6 +742,52 @@ async def get_execution_delivery(execution_id: str, download: bool = False):
         if key not in {"docx_path", "manifest_path", "archive_path"}
     } | {"download_url": f"/executions/{execution_id}/delivery?download=true"}
 
+
+@app.get("/executions/{execution_id}/document")
+async def get_execution_document_state(execution_id: str):
+    """Return restartable long-document progress for the GUI and integrations."""
+    if not app_state.state_engine or execution_id not in app_state.state_engine.executions:
+        raise HTTPException(status_code=404, detail="Execution not found")
+    state = app_state.state_engine.get_execution(execution_id)
+    checkpoint = state.variables.get("document_model_checkpoint")
+    model = None
+    if checkpoint:
+        path = Path(str(checkpoint)).resolve()
+        if path.is_file():
+            try:
+                model = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                model = None
+    if model is None:
+        model = {
+            "status": "not_initialized",
+            "execution_id": execution_id,
+            "sections": state.variables.get("document_sections", []),
+        }
+    sections = model.get("sections", []) if isinstance(model, dict) else []
+    completed = sum(
+        1 for item in sections
+        if isinstance(item, dict) and (item.get("content") or item.get("status") == "complete")
+    )
+    return {
+        "execution_id": execution_id,
+        "status": model.get("status", "unknown"),
+        "checkpoint": str(checkpoint or ""),
+        "revision": model.get("revision", 0),
+        "section_count": len(sections),
+        "completed_sections": completed,
+        "progress": round(completed / len(sections), 3) if sections else 0.0,
+        "sections": [
+            {
+                "section_id": item.get("contract", {}).get("section_id", item.get("section_id", "")),
+                "heading": item.get("contract", {}).get("heading", item.get("heading", "")),
+                "status": item.get("contract", {}).get("status", item.get("status", "pending")),
+                "word_count": item.get("word_count", 0),
+            }
+            for item in sections if isinstance(item, dict)
+        ],
+    }
+
 @app.get("/executions/{execution_id}/subagents")
 async def list_subagents(execution_id: str):
     if not app_state.state_engine or execution_id not in app_state.state_engine.executions:
