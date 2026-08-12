@@ -249,7 +249,7 @@
   "gui_surfaces": [
     {
       "id": "task-composer",
-      "evidence": ["submitNewTask", "/executions", "/projects", "/artifacts", "task-planning-mode"]
+      "evidence": ["submitNewTask", "/executions", "/projects", "/artifacts", "task-planning-mode", "runGPTMOSSButtonAudit"]
     },
     {
       "id": "execution-control",
@@ -290,7 +290,7 @@
   "features": [
     {
       "id": "runtime-api-gui",
-      "tests": ["tests/test_api.py", "tests/test_browser_layout_audit.py", "tests/test_end_to_end_workflow.py", "tests/test_functional_coverage_contract.py", "tests/test_gui_browser_smoke.py"]
+      "tests": ["tests/test_api.py", "tests/test_browser_layout_audit.py", "tests/test_end_to_end_workflow.py", "tests/test_functional_coverage_contract.py", "tests/test_gui_browser_smoke.py", "tests/test_gui_all_buttons.py"]
     },
     {
       "id": "planning-execution-lifecycle",

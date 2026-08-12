@@ -3124,6 +3124,144 @@
       </div>
     </div>
     <script>
+        async function runGPTMOSSButtonAudit() {
+            const clicked = [];
+            const failures = [];
+            const rejections = [];
+            const seen = new Set();
+            window.addEventListener("unhandledrejection", event => {
+                const text = String(event.reason && event.reason.message || event.reason || "unhandledrejection");
+                event.preventDefault();
+                if (/TypeError|ReferenceError|SyntaxError|is not defined|is not a function/.test(text)) {
+                    rejections.push(text);
+                }
+            });
+            window.confirm = () => true;
+            window.alert = () => {};
+            window.prompt = (message, fallback) => {
+                const text = String(message || "");
+                if (text.includes("CONFIRMER")) return "CONFIRMER";
+                if (text.includes("chemin")) return "";
+                if (text.includes("nom du nouveau")) return "Projet audit rapide";
+                if (text.includes("nouveau nom")) return String(fallback || "Projet") + " renomme";
+                return String(fallback || "audit");
+            };
+            downloadActiveDelivery = function patchedDownload() {
+                window.__deliveryAssigns = window.__deliveryAssigns || [];
+                if (activeExecutionId) window.__deliveryAssigns.push(activeExecutionId);
+            };
+
+            const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+            const labelOf = button => (button.textContent || "").replace(/\s+/g, " ").trim().slice(0, 80);
+            const keyOf = button => [
+                button.getAttribute("onclick") || "",
+                button.id || "",
+                labelOf(button),
+            ].join("|");
+
+            async function clickButton(button, phase) {
+                const key = keyOf(button);
+                if (seen.has(key)) return;
+                seen.add(key);
+                const entry = {
+                    phase,
+                    id: button.id || "",
+                    onclick: button.getAttribute("onclick") || "",
+                    label: labelOf(button),
+                    ok: true,
+                };
+                try {
+                    button.disabled = false;
+                    button.click();
+                } catch (error) {
+                    entry.ok = false;
+                    entry.error = String(error);
+                    failures.push(entry);
+                }
+                clicked.push(entry);
+                await sleep(40);
+            }
+
+            async function clickWhere(predicate, phase) {
+                for (const button of Array.from(document.querySelectorAll("button"))) {
+                    if (predicate(button)) await clickButton(button, phase);
+                }
+            }
+
+            const deferred = onclick => /clearAllExecutions|deleteActiveExecution/.test(onclick || "");
+
+            await sleep(500);
+            const taskInput = document.getElementById("task-input");
+            if (taskInput) taskInput.value = "Audit soumission GUI";
+            await clickWhere(button => button.id === "task-submit-btn", "submit");
+            await sleep(250);
+            document.querySelector(".execution-card")?.click();
+            await sleep(200);
+            for (const id of [
+                "tab-unified-feed", "tab-active-agent", "btn-pause", "btn-resume",
+                "approval-allow", "approval-reject", "btn-cancel", "btn-delivery",
+            ]) {
+                const button = document.getElementById(id);
+                if (button) await clickButton(button, "detail");
+            }
+
+            await clickWhere(button => (button.getAttribute("onclick") || "").includes("openLibraryModal"), "open-library");
+            await sleep(250);
+            const skillName = document.getElementById("library-skill-name");
+            const skillInstructions = document.getElementById("library-skill-instructions");
+            const memoryValue = document.getElementById("library-memory-value");
+            const subagentTask = document.getElementById("subagent-task");
+            if (skillName) skillName.value = "audit-skill";
+            if (skillInstructions) skillInstructions.value = "Instructions d'audit GUI.";
+            if (memoryValue) memoryValue.value = "Fait d'audit GUI";
+            if (subagentTask) subagentTask.value = "Inspecter le parent";
+            await clickWhere(button => document.getElementById("library-modal")?.contains(button), "library");
+
+            await clickWhere(button => (button.getAttribute("onclick") || "").includes("openSettingsModal"), "open-settings");
+            await sleep(250);
+            const newProject = document.getElementById("settings-new-project-name");
+            const modelName = document.getElementById("settings-model-name");
+            if (newProject) newProject.value = "Projet audit boutons";
+            if (modelName) modelName.value = (modelName.value || "qwen-turbo") + "-audit";
+            await clickWhere(button => document.getElementById("settings-modal")?.contains(button), "settings");
+
+            await clickWhere(button => (button.getAttribute("onclick") || "").includes("openServerModal"), "open-server");
+            await sleep(150);
+            await clickWhere(button => document.getElementById("server-modal")?.contains(button), "server");
+
+            await clickWhere(button => (button.getAttribute("onclick") || "").includes("createNewProjectQuick"), "landing");
+            await clickWhere(button => (button.getAttribute("onclick") || "").includes("showLandingView"), "landing");
+            document.querySelector(".toggle-arrow")?.dispatchEvent(new MouseEvent("click", {bubbles: true}));
+
+            await clickWhere(button => !deferred(button.getAttribute("onclick")) && !seen.has(keyOf(button)), "sweep");
+            await clickWhere(button => deferred(button.getAttribute("onclick")), "cleanup");
+            await sleep(800);
+
+            const report = {
+                clicked,
+                failures,
+                rejections,
+                deliveryAssigns: window.__deliveryAssigns || [],
+                counts: {
+                    clicked: clicked.length,
+                    failed: failures.length,
+                    rejected: rejections.length,
+                },
+            };
+            let box = document.getElementById("gptmoss-button-audit-report");
+            if (!box) {
+                box = document.createElement("pre");
+                box.id = "gptmoss-button-audit-report";
+                document.body.appendChild(box);
+            }
+            box.textContent = JSON.stringify(report);
+            document.body.dataset.buttonAuditClicked = String(report.counts.clicked);
+            document.body.dataset.buttonAuditFailed = String(report.counts.failed);
+            document.body.dataset.buttonAuditRejected = String(report.counts.rejected);
+            window.__gptmossButtonAudit = report;
+            return report;
+        }
+
         function applyGPTMOSSLayoutAuditFixture() {
             const mode = new URLSearchParams(location.search).get("layout_audit");
             if (!mode) return;
@@ -3220,6 +3358,11 @@
             applyGPTMOSSLayoutAuditFixture();
             scheduleLayoutAudit();
         }, 1_200);
+        if (new URLSearchParams(location.search).get("button_audit") === "1") {
+            window.addEventListener("load", () => {
+                setTimeout(() => { runGPTMOSSButtonAudit(); }, 200);
+            });
+        }
     </script>
 </body>
 </html>
