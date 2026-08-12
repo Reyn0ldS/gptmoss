@@ -13,7 +13,7 @@ sys.path.insert(0, PROJECT_ROOT)
 
 from gptmoss.core import (EventBus, StateEngine, ContextEngine, ExecutionEngine, RuntimeKernel, Event,
                           DEFAULT_SYSTEM_PROMPT, TraceRecorder, SkillRegistry, ArtifactStore,
-                          AgentProfileRegistry, AutonomousSkillLifecycle)
+                          AgentProfileRegistry, AutonomousSkillLifecycle, RuntimeSettings)
 from gptmoss.providers import QwenProvider
 from gptmoss.memory import JSONMemoryProvider
 from gptmoss.capabilities import (
@@ -73,116 +73,54 @@ def bootstrap_runtime(workspace_root: str):
     else:
         config_data = {}
 
-    api_key = config_data.get("api_key") or os.getenv("OPENAI_API_KEY") or os.getenv("DASHSCOPE_API_KEY") or "mock-key"
-    base_url = config_data.get("base_url") or os.getenv("OPENAI_BASE_URL") or "https://dashscope.aliyuncs.com/compatible-mode/v1"
-    model_name = config_data.get("model_name") or os.getenv("OPENAI_MODEL_NAME") or "qwen-turbo"
-    vision_mode = str(config_data.get("vision_mode", "auto"))
-    ssl_verify = config_data.get("ssl_verify", True)
-    ssl_cert_path = config_data.get("ssl_cert_path", "")
-    denied_capabilities = config_data.get("denied_capabilities", [])
-    approval_required = config_data.get("approval_required_capabilities", ["shell", "devteam.approve_quality_gate"])
-    workspace_full_autonomy = bool(config_data.get("workspace_full_autonomy", False))
-    continue_while_progress = bool(config_data.get("continue_while_progress", True))
-    adaptive_resource_management = bool(config_data.get("adaptive_resource_management", True))
-    strict_skill_capabilities = bool(config_data.get("strict_skill_capabilities", False))
-    allow_nested_delegation = bool(config_data.get("allow_nested_delegation", True))
-    try:
-        max_delegation_depth = max(0, int(config_data.get("max_delegation_depth", 0)))
-    except (TypeError, ValueError):
-        max_delegation_depth = 0
-    autonomous_specialization = bool(config_data.get("autonomous_specialization", True))
-    autonomous_skill_creation = bool(config_data.get("autonomous_skill_creation", True))
-    autonomous_skill_improvement = bool(config_data.get("autonomous_skill_improvement", True))
-    workspace_path = config_data.get("workspace_path") or os.path.abspath(workspace_root)
-    restrict_to_workspace = config_data.get("restrict_to_workspace", True)
-    allow_subfolders = config_data.get("allow_subfolders", True)
-    try:
-        max_context_chars = int(config_data.get("max_context_chars", 12_000))
-    except (TypeError, ValueError):
-        max_context_chars = 12_000
-    max_context_chars = max(1, max_context_chars)
-    try:
-        max_upload_bytes = max(0, int(config_data.get("max_upload_bytes", 0)))
-    except (TypeError, ValueError):
-        max_upload_bytes = 0
-    try:
-        max_attachment_text_chars = max(0, int(config_data.get("max_attachment_text_chars", 0)))
-    except (TypeError, ValueError):
-        max_attachment_text_chars = 0
+    config_data.setdefault(
+        "api_key", os.getenv("OPENAI_API_KEY") or os.getenv("DASHSCOPE_API_KEY") or "mock-key"
+    )
+    config_data.setdefault("base_url", os.getenv("OPENAI_BASE_URL") or RuntimeSettings().base_url)
+    config_data.setdefault("model_name", os.getenv("OPENAI_MODEL_NAME") or "qwen-turbo")
+    config_data.setdefault("workspace_path", os.path.abspath(workspace_root))
+    settings = RuntimeSettings.model_validate(config_data).normalized()
+    api_key = settings.api_key
+    base_url = settings.base_url
+    model_name = settings.model_name
+    vision_mode = settings.vision_mode
+    ssl_verify = settings.ssl_verify
+    ssl_cert_path = settings.ssl_cert_path
+    denied_capabilities = settings.denied_capabilities
+    approval_required = settings.approval_required_capabilities
+    workspace_full_autonomy = settings.workspace_full_autonomy
+    continue_while_progress = settings.continue_while_progress
+    adaptive_resource_management = settings.adaptive_resource_management
+    strict_skill_capabilities = settings.strict_skill_capabilities
+    allow_nested_delegation = settings.allow_nested_delegation
+    max_delegation_depth = settings.max_delegation_depth
+    autonomous_specialization = settings.autonomous_specialization
+    autonomous_skill_creation = settings.autonomous_skill_creation
+    autonomous_skill_improvement = settings.autonomous_skill_improvement
+    workspace_path = settings.workspace_path
+    restrict_to_workspace = settings.restrict_to_workspace
+    allow_subfolders = settings.allow_subfolders
+    max_context_chars = settings.max_context_chars
+    max_upload_bytes = settings.max_upload_bytes
+    max_attachment_text_chars = settings.max_attachment_text_chars
     artifact_store = ArtifactStore(
         workspace_path,
         max_bytes=max_upload_bytes,
         max_text_chars=max_attachment_text_chars,
     )
-    try:
-        max_step_iterations = int(config_data.get("max_step_iterations", 30))
-    except (TypeError, ValueError):
-        max_step_iterations = 30
-    max_step_iterations = max(1, max_step_iterations)
-    try:
-        max_step_retries = int(config_data.get("max_step_retries", 2))
-    except (TypeError, ValueError):
-        max_step_retries = 2
-    max_step_retries = max(0, max_step_retries)
-    try:
-        skill_coverage_threshold = int(config_data.get("skill_coverage_threshold", 4))
-    except (TypeError, ValueError):
-        skill_coverage_threshold = 4
-    skill_coverage_threshold = max(1, skill_coverage_threshold)
-    try:
-        max_autonomous_skills_per_execution = int(config_data.get("max_autonomous_skills_per_execution", 0))
-    except (TypeError, ValueError):
-        max_autonomous_skills_per_execution = 0
-    max_autonomous_skills_per_execution = max(0, max_autonomous_skills_per_execution)
-    safe_shell_mode = bool(config_data.get("safe_shell_mode", True))
-    try:
-        shell_timeout_seconds = int(config_data.get("shell_timeout_seconds", 0))
-    except (TypeError, ValueError):
-        shell_timeout_seconds = 0
-    shell_timeout_seconds = max(0, shell_timeout_seconds)
-    try:
-        shell_max_output_chars = int(config_data.get("shell_max_output_chars", 12_000))
-    except (TypeError, ValueError):
-        shell_max_output_chars = 12_000
-    shell_max_output_chars = max(0, shell_max_output_chars)
-    default_skills = [str(skill).lower() for skill in config_data.get("default_skills", []) if isinstance(skill, str)]
-    projects = config_data.get("projects") or [{"id": "proj-default", "name": "Projet Par Défaut"}]
+    max_step_iterations = settings.max_step_iterations
+    max_step_retries = settings.max_step_retries
+    skill_coverage_threshold = settings.skill_coverage_threshold
+    max_autonomous_skills_per_execution = settings.max_autonomous_skills_per_execution
+    safe_shell_mode = settings.safe_shell_mode
+    shell_timeout_seconds = settings.shell_timeout_seconds
+    shell_max_output_chars = settings.shell_max_output_chars
+    default_skills = settings.default_skills
+    projects = settings.projects
+    state_engine.max_transitions_per_execution = settings.max_transitions_per_execution
     context_engine.max_history_chars = max_context_chars
 
-    config_data = {
-        "api_key": api_key,
-        "base_url": base_url,
-        "model_name": model_name,
-        "vision_mode": vision_mode,
-        "ssl_verify": ssl_verify,
-        "ssl_cert_path": ssl_cert_path,
-        "denied_capabilities": denied_capabilities,
-        "approval_required_capabilities": approval_required,
-        "workspace_full_autonomy": workspace_full_autonomy,
-        "continue_while_progress": continue_while_progress,
-        "adaptive_resource_management": adaptive_resource_management,
-        "strict_skill_capabilities": strict_skill_capabilities,
-        "allow_nested_delegation": allow_nested_delegation,
-        "max_delegation_depth": max_delegation_depth,
-        "autonomous_specialization": autonomous_specialization,
-        "autonomous_skill_creation": autonomous_skill_creation,
-        "autonomous_skill_improvement": autonomous_skill_improvement,
-        "skill_coverage_threshold": skill_coverage_threshold,
-        "max_autonomous_skills_per_execution": max_autonomous_skills_per_execution,
-        "workspace_path": workspace_path,
-        "restrict_to_workspace": restrict_to_workspace,
-        "allow_subfolders": allow_subfolders,
-        "max_context_chars": max_context_chars,
-        "max_upload_bytes": max_upload_bytes,
-        "max_attachment_text_chars": max_attachment_text_chars,
-        "max_step_iterations": max_step_iterations,
-        "max_step_retries": max_step_retries,
-        "safe_shell_mode": safe_shell_mode,
-        "shell_timeout_seconds": shell_timeout_seconds,
-        "shell_max_output_chars": shell_max_output_chars,
-        "default_skills": default_skills,
-        "projects": projects
-    }
+    config_data = settings.model_dump()
     
     try:
         with open(config_path, "w", encoding="utf-8") as f:
@@ -194,9 +132,10 @@ def bootstrap_runtime(workspace_root: str):
     llm_provider = QwenProvider(
         api_key=api_key,
         base_url=base_url,
-        default_model=model_name
+        default_model=model_name,
+        ssl_verify=ssl_verify,
+        ssl_cert_path=ssl_cert_path,
     )
-    llm_provider.update_config(api_key, base_url, ssl_verify, ssl_cert_path, model_name)
     llm_provider.set_vision_mode(vision_mode)
 
     # 4. Planners and Policies

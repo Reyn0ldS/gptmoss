@@ -3,6 +3,7 @@ import json
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 import pytest
 
@@ -46,9 +47,32 @@ def test_corrupt_state_fails_closed_and_can_be_replaced(tmp_path, caplog):
     state = StateEngine(str(path))
     assert state.executions == {}
     assert "Failed to load state from disk" in caplog.text
+    assert state.corrupt_backup_path
+    assert Path(state.corrupt_backup_path).read_text(encoding="utf-8") == "{not valid json"
     state.get_execution("recovered").results["ok"] = True
     assert state.save_to_disk()
     assert StateEngine(str(path)).get_execution("recovered").results["ok"] is True
+
+
+def test_future_state_schema_is_quarantined_instead_of_silently_downgraded(tmp_path):
+    path = tmp_path / "future.json"
+    path.write_text(json.dumps({"schema_version": 999, "executions": {}}), encoding="utf-8")
+
+    state = StateEngine(str(path))
+
+    assert state.executions == {}
+    assert state.corrupt_backup_path
+    assert not path.exists()
+
+
+def test_transition_history_is_bounded():
+    engine = StateEngine(max_transitions_per_execution=100)
+    state = engine.get_execution("bounded")
+    for index in range(150):
+        engine.transition_execution(state, "running" if index % 2 == 0 else "pending")
+
+    assert len(state.transitions) == 100
+    assert state.transitions[0].timestamp <= state.transitions[-1].timestamp
 
 
 def test_concurrent_saves_are_serialized(tmp_path, monkeypatch):

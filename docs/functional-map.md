@@ -30,7 +30,9 @@ superviseur avec son jeton. Un port occupé est signalé avant de démarrer l'en
 2. L'API vérifie projet et artefacts, constitue les variables et appelle
    `RuntimeKernel.submit_task`.
 3. Le noyau crée l'identifiant, refuse les cycles de délégation, initialise l'état
-   `pending`, publie `TaskCreated` et lance le moteur en arrière-plan.
+   `pending`, persiste `scheduled_for`, publie `TaskCreated`/`TaskScheduled` et inscrit
+   l'exécution dans le `Scheduler` partagé. `delay_seconds` ou `run_at` permettent une
+   échéance future ; sans délai, le même service la lance immédiatement.
 4. Le moteur verrouille l'exécution, sélectionne les skills, calcule les capacités et
    passe à `running` avec `ExecutionStarted`.
 5. Le contexte rassemble conversation, état, mémoire validée du projet, schémas d'outils
@@ -74,13 +76,15 @@ sous-agents compatibles.
 ## Fournisseur indisponible et reprise
 
 Une erreur transitoire passe l'état à `waiting_provider`, préserve plan, conversation et
-résultats, publie `ExecutionWaitingProvider` et programme une nouvelle tentative. Une
+résultats, publie `ExecutionWaitingProvider` et programme une nouvelle tentative dans le
+`Scheduler` partagé. Les backoffs internes utilisent eux aussi ce service plutôt que des
+temporisations indépendantes. Une
 erreur d'authentification ou de configuration permanente devient `failed` avec un
 diagnostic exploitable : elle ne doit pas boucler comme une panne réseau.
 
-Au redémarrage, les exécutions interrompues et celles en attente fournisseur sont
-normalisées puis reprises sans dupliquer la tâche initiale. Le verrou par exécution
-empêche deux boucles simultanées.
+Au redémarrage, les exécutions interrompues, planifiées et celles en attente fournisseur
+sont normalisées puis réinscrites sans dupliquer la tâche initiale. Le verrou par
+exécution empêche deux boucles simultanées.
 
 ## Documents et corpus local
 

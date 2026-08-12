@@ -3,7 +3,9 @@ __pycache__/
 *.pyc
 *.pyo
 .pytest_cache/
+.ruff_cache/
 .coverage
+coverage-*.json
 htmlcov/
 
 # Local environments and editor settings

@@ -1,6 +1,7 @@
 import uuid
 import asyncio
 import logging
+import time
 from typing import Dict, Any
 from gptmoss.core.event_bus import EventBus, Event
 from gptmoss.core.state import StateEngine
@@ -23,7 +24,8 @@ class RuntimeKernel:
         self.state_engine = state_engine
         self.execution_engine = execution_engine
 
-    async def submit_task(self, task: str, agent_config: Dict[str, Any]) -> str:
+    async def submit_task(self, task: str, agent_config: Dict[str, Any], *,
+                          delay_seconds: float = 0, run_at: float | None = None) -> str:
         """
         Receives task, loads config, and initializes the execution.
         
@@ -77,6 +79,8 @@ class RuntimeKernel:
             exec_state, "pending", reason="task submitted", actor="kernel"
         )
         exec_state.variables["task"] = task
+        scheduled_for = float(run_at) if run_at is not None else time.time() + max(0.0, float(delay_seconds))
+        exec_state.variables["scheduled_for"] = scheduled_for
         exec_state.variables["delegation_depth"] = delegation_depth
         exec_state.variables["delegation_lineage"] = delegation_lineage
         exec_state.variables["agent_config"] = {
@@ -101,8 +105,12 @@ class RuntimeKernel:
                 "agent_id": "default_agent"
             }
         ))
-        
-        # Run execution loop as a background task
-        asyncio.create_task(self.execution_engine.execute_task(execution_id, task))
+        await self.event_bus.publish(Event(
+            type="TaskScheduled",
+            payload={"execution_id": execution_id, "run_at": scheduled_for},
+        ))
+        self.execution_engine.schedule_execution(
+            execution_id, task, run_at=scheduled_for,
+        )
         
         return execution_id

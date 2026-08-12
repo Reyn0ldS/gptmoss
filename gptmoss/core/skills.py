@@ -14,6 +14,7 @@ class Skill:
     allowed_capabilities: List[str]
     source_path: str
     digest: str
+    auto_select: bool = True
 
 class SkillRegistry:
     TOOL_MAP = {"shell_command": "shell", "apply_patch": "filesystem"}
@@ -70,9 +71,12 @@ class SkillRegistry:
                     for item in re.split(r"[\s,]+", raw_capabilities)
                     if item
                 ]
+            auto_select = str(fields.get("auto-select", fields.get("auto_select", "true"))).lower() not in {
+                "0", "false", "no", "off",
+            }
             skill = Skill(name, str(fields.get("description") or ""), instructions,
                           [str(item).lower() for item in raw_capabilities],
-                          str(path), hashlib.sha256(text.encode("utf-8")).hexdigest())
+                          str(path), hashlib.sha256(text.encode("utf-8")).hexdigest(), auto_select)
             self.skills[name] = skill
             discovered.append(skill)
         return discovered
@@ -125,6 +129,8 @@ class SkillRegistry:
         task_tokens = self._tokens(task_lower)
         ranked = []
         for skill in self.skills.values():
+            if not skill.auto_select:
+                continue
             haystack = f"{skill.name} {skill.description} {skill.instructions[:500]}".lower()
             overlap = task_tokens & self._tokens(haystack)
             score = len(overlap) + len(task_tokens & self._tokens(skill.description)) * 2
@@ -157,6 +163,8 @@ class SkillRegistry:
         scored = []
         for skill in self.skills.values():
             if skill.name in seen:
+                continue
+            if not skill.auto_select:
                 continue
             haystack = f"{skill.name} {skill.description} {skill.instructions[:500]}".lower()
             overlap = task_tokens & self._tokens(haystack)

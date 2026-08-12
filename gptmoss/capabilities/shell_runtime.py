@@ -4,6 +4,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from typing import Callable, Optional
@@ -129,33 +130,50 @@ class ProcessRunner:
             {"creationflags": getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)}
             if sys.platform == "win32" else {"start_new_session": True}
         )
-        process = subprocess.Popen(
-            command, shell=use_shell, cwd=cwd, stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace",
-            env=environment, **options,
-        )
-        self.registry.register(execution_id, process)
-        deadline = time.monotonic() + timeout if timeout else None
-        try:
-            while True:
-                if cancelled(execution_id):
-                    self.registry.terminate(process)
-                    process.communicate()
-                    return "Error: Command execution cancelled."
-                remaining = None if deadline is None else deadline - time.monotonic()
-                if remaining is not None and remaining <= 0:
-                    self.registry.terminate(process)
-                    process.communicate()
-                    return f"Error: Command execution timed out ({timeout}s)."
-                try:
-                    stdout, stderr = process.communicate(
-                        timeout=min(0.25, remaining) if remaining is not None else 0.25
-                    )
-                    break
-                except subprocess.TimeoutExpired:
-                    continue
-        finally:
-            self.registry.unregister(execution_id, process)
+        with tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace") as stdout_file, \
+                tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace") as stderr_file:
+            process = subprocess.Popen(
+                command, shell=use_shell, cwd=cwd, stdout=stdout_file,
+                stderr=stderr_file, text=True, encoding="utf-8", errors="replace",
+                env=environment, **options,
+            )
+            self.registry.register(execution_id, process)
+            deadline = time.monotonic() + timeout if timeout else None
+            try:
+                while True:
+                    if cancelled(execution_id):
+                        self.registry.terminate(process)
+                        process.wait()
+                        return "Error: Command execution cancelled."
+                    remaining = None if deadline is None else deadline - time.monotonic()
+                    if remaining is not None and remaining <= 0:
+                        self.registry.terminate(process)
+                        process.wait()
+                        return f"Error: Command execution timed out ({timeout}s)."
+                    try:
+                        process.wait(
+                            timeout=min(0.25, remaining) if remaining is not None else 0.25
+                        )
+                        break
+                    except subprocess.TimeoutExpired:
+                        continue
+            finally:
+                self.registry.unregister(execution_id, process)
+
+            # Cancellation can terminate the process between the polling check
+            # above and wait() returning.  The execution state is authoritative;
+            # do not expose the platform-specific termination exit code instead.
+            if cancelled(execution_id):
+                return "Error: Command execution cancelled."
+
+            budget = max_output_chars if max_output_chars else None
+            stdout_file.seek(0)
+            stdout = stdout_file.read(budget)
+            stdout_truncated = bool(budget and stdout_file.read(1))
+            remaining_budget = None if budget is None else max(0, budget - len(stdout))
+            stderr_file.seek(0)
+            stderr = stderr_file.read(remaining_budget)
+            stderr_truncated = bool(budget and stderr_file.read(1))
         output = f"EXIT_CODE: {process.returncode}\n"
         if stdout:
             output += f"STDOUT:\n{stdout}\n"
@@ -163,6 +181,6 @@ class ProcessRunner:
             output += f"STDERR:\n{stderr}\n"
         if not stdout and not stderr:
             output += "Command produced no output."
-        if max_output_chars and len(output) > max_output_chars:
-            output = output[:max_output_chars] + "\n… [output truncated by shell safety limit]"
+        if stdout_truncated or stderr_truncated:
+            output += "\n… [output truncated by shell safety limit]"
         return output

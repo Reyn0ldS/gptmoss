@@ -37,7 +37,7 @@ echo [INFO] Server controls: http://127.0.0.1:!GPTMOSS_CONTROL_PORT!
 set "exit_code=!errorlevel!"
 
 popd
-pause
+if not defined GPTMOSS_NO_PAUSE pause
 exit /b !exit_code!
 
 :failed

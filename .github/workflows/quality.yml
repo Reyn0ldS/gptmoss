@@ -1,0 +1,78 @@
+name: Quality
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: tests-${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - run: python -m pip install -r requirements-dev.txt
+      - run: python -m ruff check .
+      - run: python scripts/run_delivery_benchmarks.py --compact
+      - run: python scripts/run_quality_benchmarks.py --compact
+      - run: python scripts/generate_symbol_map.py --check
+      - run: python scripts/validate_application_map.py
+      - run: python -m pytest -q --cov=gptmoss --cov-report=term-missing --cov-report=xml --cov-fail-under=75
+
+  windows-offline-release:
+    name: windows-offline-release
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Verify source manifest and clean Git archive
+        shell: pwsh
+        run: |
+          python scripts/verify_source_release.py
+          git archive --format=zip --prefix=gptmoss/ HEAD -o "$env:RUNNER_TEMP/gptmoss-source.zip"
+          python scripts/verify_source_release.py --archive "$env:RUNNER_TEMP/gptmoss-source.zip"
+          Expand-Archive "$env:RUNNER_TEMP/gptmoss-source.zip" "$env:RUNNER_TEMP/release"
+      - name: Verify and install without network
+        shell: pwsh
+        working-directory: ${{ runner.temp }}/release/gptmoss
+        run: |
+          $env:GPTMOSS_NO_PAUSE = "1"
+          cmd /c prepare-offline-source.bat --verify-only
+          cmd /c install.bat
+      - name: Start clean archive and audit real Edge layouts
+        shell: pwsh
+        working-directory: ${{ runner.temp }}/release/gptmoss
+        run: |
+          $python = (Resolve-Path "python-3.13.14-embed-amd64/python.exe").Path
+          $process = Start-Process -FilePath $python -ArgumentList @("-B", "main.py", "--port", "8123") -PassThru -WindowStyle Hidden
+          try {
+            $ready = $false
+            foreach ($attempt in 1..60) {
+              try {
+                Invoke-WebRequest "http://127.0.0.1:8123/readiness" -UseBasicParsing | Out-Null
+                $ready = $true
+                break
+              } catch {
+                Start-Sleep -Seconds 1
+              }
+            }
+            if (-not $ready) { throw "GPTMOSS did not become ready" }
+            & $python -B scripts/browser_layout_audit.py http://127.0.0.1:8123/ --quick
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          } finally {
+            if (-not $process.HasExited) { Stop-Process -Id $process.Id -Force }
+          }

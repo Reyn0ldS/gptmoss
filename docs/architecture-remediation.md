@@ -9,7 +9,9 @@ façades afin de préserver l'API Python, les fichiers persistés et le paquet o
 `StateEngine` sérialise un snapshot versionné et le publie avec
 `core.durable_io.write_text_atomic`. Une erreur d'écriture ou de remplacement laisse le
 dernier fichier valide intact. Le verrou est créé avec l'instance et protège les
-sauvegardes concurrentes. Preuves : `tests/test_state_durability.py`.
+sauvegardes concurrentes. Les versions anciennes sont migrées, les versions futures ou
+corrompues sont mises en quarantaine, et l'historique est borné. Preuves :
+`tests/test_state_durability.py`.
 
 ## 2. Cycle de vie des événements
 
@@ -29,13 +31,17 @@ durabilité, d'API, d'exécution et de délégation.
 
 `ExecutionEngine` délègue la reprise fournisseur à `ProviderRecoveryCoordinator`,
 l'assurance à `DeliveryCoordinator` et les décisions humaines à
-`ApprovalCoordinator`. Les méthodes de façade restent compatibles.
+`ApprovalCoordinator`. La préparation d'une tâche, la coordination du DAG, l'exécution
+d'une étape et le traitement des appels d'outils sont séparés. Les méthodes de façade
+restent compatibles.
 Preuves : `tests/test_execution_services.py` et les suites d'exécution existantes.
 
 ## 5. Qwen et Shell
 
-Le contexte Qwen et le parsing des tool calls sont des politiques pures. La décision de
-sécurité shell, le registre des processus et le lanceur sont séparés de la capacité.
+Le contexte Qwen et le parsing des tool calls sont des politiques pures. Chaque
+reconfiguration ferme le client HTTP remplacé et l'arrêt ferme le client actif. La
+décision de sécurité shell, le registre des processus et le lanceur sont séparés de la
+capacité ; stdout/stderr sont spoulés sur disque puis lus dans un budget borné.
 Preuves :
 `tests/test_provider_and_shell_services.py`, `tests/test_provider_integration.py` et
 `tests/test_runtime_improvements.py`.
@@ -43,8 +49,9 @@ Preuves :
 ## 6. Surfaces auparavant dormantes
 
 `Scheduler` ordonne les callbacks, annule les jobs, exécute les échéances et retente les
-erreurs. Les partitions historiques restent chargeables mais sont dépréciées au profit
-des projets et de la mémoire gouvernée. Preuves :
+erreurs. Il est désormais l'unique service de délais pour les tâches planifiées, reprises
+fournisseur et backoffs. Les partitions historiques restent chargeables mais sont
+dépréciées au profit des projets et de la mémoire gouvernée. Preuves :
 `tests/test_scheduler_and_legacy_state.py`.
 
 ## 7. Graphe GUI/API/scripts
@@ -55,6 +62,20 @@ invocations entre scripts. Un appel GUI littéral sans route backend alimente
 validation d'un skill, dont la route exige POST. Preuves : `tests/test_symbol_map.py` et
 `tests/test_application_map.py`.
 
+## 8. Généralisation et ressources
+
+`ProjectDomainRegistry` fournit des domaines génériques et accepte des marqueurs par
+projet ; les packs spécialisés déclarent `auto-select: false`. `RuntimeSettings` est le
+contrat unique des limites et paramètres. Uploads, texte joint, transitions, contexte et
+sorties shell ont des valeurs sûres. Preuves : tests d'autonomie, d'API, d'état et shell.
+
+## 9. Qualification et publication
+
+`document_quality_cases.json` mesure rappels et faux positifs des livrables. Le manifeste
+source empêche la disparition silencieuse de code, GUI, skills, scripts ou docs. La CI
+Linux/Windows valide lint, couverture, benchmarks, cartes, archive Git propre,
+installation offline, démarrage et audit Edge.
+
 ## Qualification
 
 Chaque domaine possède une suite ciblée. La qualification complète ajoute :
@@ -62,7 +83,10 @@ Chaque domaine possède une suite ciblée. La qualification complète ajoute :
 ```powershell
 python scripts/generate_symbol_map.py --check
 python scripts/validate_application_map.py
-python -m pytest -q
+python scripts/run_delivery_benchmarks.py
+python scripts/run_quality_benchmarks.py
+python scripts/verify_source_release.py
+python -m pytest -q --cov=gptmoss --cov-fail-under=75
 prepare-offline-source.bat --verify-only
 ```
 

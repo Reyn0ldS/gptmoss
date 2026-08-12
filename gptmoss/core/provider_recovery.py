@@ -7,6 +7,7 @@ from typing import Any, Awaitable, Callable, Dict
 
 from gptmoss.core.event_bus import Event, EventBus
 from gptmoss.core.state import StateEngine
+from gptmoss.core.scheduler import Scheduler
 from gptmoss.interfaces.llm import LLMProvider
 
 
@@ -31,13 +32,15 @@ class ProviderRecoveryCoordinator:
 
     def __init__(self, event_bus: EventBus, state_engine: StateEngine,
                  llm_provider: LLMProvider,
-                 execute: Callable[[str, str], Awaitable[Any]], max_attempts: int):
+                 execute: Callable[[str, str], Awaitable[Any]], max_attempts: int,
+                 scheduler: Scheduler):
         self.event_bus = event_bus
         self.state_engine = state_engine
         self.llm_provider = llm_provider
         self.execute = execute
         self.max_attempts = max(1, int(max_attempts))
-        self.tasks: Dict[str, asyncio.Task] = {}
+        self.scheduler = scheduler
+        self.jobs: Dict[str, str] = {}
 
     @staticmethod
     def is_permanent(error: Exception) -> bool:
@@ -75,17 +78,17 @@ class ProviderRecoveryCoordinator:
                     "execution_id": execution_id, "attempt": consecutive_errors,
                     "delay_seconds": delay, "error_type": error.__class__.__name__,
                 }))
-                await asyncio.sleep(delay)
+                await self.scheduler.wait(
+                    delay, job_id=f"provider-delay:{execution_id}:{consecutive_errors}"
+                )
 
     def schedule(self, execution_id: str, delay_seconds: int = 30) -> None:
-        existing = self.tasks.get(execution_id)
-        if existing and not existing.done():
+        job_id = f"provider-resume:{execution_id}"
+        if self.scheduler.has(job_id):
             return
 
         async def resume_later() -> None:
-            cancelled = False
             try:
-                await asyncio.sleep(max(1, min(int(delay_seconds), 300)))
                 state = self.state_engine.get_execution(execution_id)
                 if state.status != "waiting_provider":
                     return
@@ -100,17 +103,20 @@ class ProviderRecoveryCoordinator:
                     "attempt": state.variables["provider_resume_attempts"],
                 }))
                 await self.execute(execution_id, str(state.variables.get("task") or ""))
-            except asyncio.CancelledError:
-                cancelled = True
-                raise
             finally:
-                self.tasks.pop(execution_id, None)
+                self.jobs.pop(execution_id, None)
                 state = self.state_engine.get_execution(execution_id)
-                if not cancelled and state.status == "waiting_provider":
+                if state.status == "waiting_provider":
                     attempts = int(state.variables.get("provider_resume_attempts", 0))
                     self.schedule(execution_id, min(300, 30 * max(1, attempts)))
 
-        self.tasks[execution_id] = asyncio.create_task(resume_later())
+        self.jobs[execution_id] = self.scheduler.schedule(
+            resume_later,
+            delay=max(1, min(int(delay_seconds), 300)),
+            job_id=job_id,
+            metadata={"kind": "provider-resume", "execution_id": execution_id},
+        )
+        self.scheduler.start()
 
     def resume_persisted(self) -> None:
         for execution_id, state in self.state_engine.executions.items():
@@ -118,9 +124,6 @@ class ProviderRecoveryCoordinator:
                 self.schedule(execution_id, delay_seconds=1)
 
     async def stop(self) -> None:
-        tasks = list(self.tasks.values())
-        self.tasks.clear()
-        for task in tasks:
-            task.cancel()
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
+        for job_id in list(self.jobs.values()):
+            self.scheduler.cancel(job_id)
+        self.jobs.clear()

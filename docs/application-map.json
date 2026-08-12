@@ -30,6 +30,7 @@
     "gptmoss/core/delivery_package.py": "delivery",
     "gptmoss/core/document_quality.py": "assurance",
     "gptmoss/core/documents.py": "documents",
+    "gptmoss/core/domains.py": "planning",
     "gptmoss/core/durable_io.py": "persistence",
     "gptmoss/core/event_bus.py": "runtime",
     "gptmoss/core/evolution.py": "skills",
@@ -39,6 +40,7 @@
     "gptmoss/core/professional_delivery.py": "delivery",
     "gptmoss/core/provider_recovery.py": "runtime",
     "gptmoss/core/scheduler.py": "planning",
+    "gptmoss/core/settings.py": "configuration",
     "gptmoss/core/skills.py": "skills",
     "gptmoss/core/state.py": "persistence",
     "gptmoss/interfaces/capability.py": "contract",
@@ -63,8 +65,10 @@
     "scripts/prepare_offline_source_launcher.py",
     "scripts/prepare_portable_python.py",
     "scripts/run_delivery_benchmarks.py",
+    "scripts/run_quality_benchmarks.py",
     "scripts/server_supervisor.py",
     "scripts/validate_application_map.py",
+    "scripts/verify_source_release.py",
     "scripts/validate_document.py"
   ],
   "capabilities": {
@@ -173,6 +177,7 @@
     "StepStarted",
     "TaskCreated",
     "TaskDeleted",
+    "TaskScheduled",
     "TasksCleared",
     "ToolCalled",
     "ToolCompleted",
@@ -214,6 +219,7 @@
     "max_context_chars",
     "max_upload_bytes",
     "max_attachment_text_chars",
+    "max_transitions_per_execution",
     "max_step_iterations",
     "max_step_retries",
     "safe_shell_mode",
@@ -264,7 +270,7 @@
   "features": [
     {
       "id": "runtime-api-gui",
-      "tests": ["tests/test_api.py", "tests/test_end_to_end_workflow.py", "tests/test_functional_coverage_contract.py"]
+      "tests": ["tests/test_api.py", "tests/test_browser_layout_audit.py", "tests/test_end_to_end_workflow.py", "tests/test_functional_coverage_contract.py"]
     },
     {
       "id": "planning-execution-lifecycle",
@@ -288,7 +294,7 @@
     },
     {
       "id": "document-quality-delivery",
-      "tests": ["tests/test_document_quality.py", "tests/test_document_planner_fallback.py", "tests/test_professional_delivery.py", "tests/test_delivery_assurance.py", "tests/test_delivery_benchmarks.py", "tests/test_corpus.py"]
+      "tests": ["tests/test_document_quality.py", "tests/test_document_planner_fallback.py", "tests/test_professional_delivery.py", "tests/test_delivery_assurance.py", "tests/test_delivery_benchmarks.py", "tests/test_quality_benchmarks.py", "tests/test_corpus.py"]
     },
     {
       "id": "skills-evolution",
@@ -304,7 +310,7 @@
     },
     {
       "id": "offline-portable-runtime",
-      "tests": ["tests/test_offline_source_package.py", "tests/test_windows_portable_python.py"]
+      "tests": ["tests/test_offline_source_package.py", "tests/test_source_release.py", "tests/test_windows_portable_python.py"]
     },
     {
       "id": "documentation-cartography",
@@ -325,6 +331,7 @@
       "requirements-runtime.txt",
       "constraints-runtime.txt",
       "offline-runtime-manifest.json",
+      "release-source-manifest.json",
       "install.bat",
       "start.bat",
       "prepare-offline-source.bat",
@@ -336,7 +343,8 @@
       "scripts/generate_symbol_map.py",
       "scripts/prepare_offline_source.py",
       "scripts/prepare_offline_source_launcher.py",
-      "scripts/server_supervisor.py"
+      "scripts/server_supervisor.py",
+      "scripts/verify_source_release.py"
     ]
   },
   "documents": [

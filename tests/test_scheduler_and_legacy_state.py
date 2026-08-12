@@ -16,8 +16,24 @@ async def test_scheduler_orders_cancels_and_runs_due_jobs():
 
     assert await scheduler.run_due(now=101) == ["first"]
     assert calls == ["first"]
-    assert scheduler.pending() == [{"job_id": later, "run_at": 110.0, "attempts": 0}]
+    assert scheduler.pending() == [{
+        "job_id": later, "run_at": 110.0, "attempts": 0, "metadata": {},
+    }]
     assert await scheduler.run_due(now=110) == ["later"]
+
+
+@pytest.mark.asyncio
+async def test_scheduler_is_single_service_for_delays_and_background_jobs():
+    scheduler = Scheduler()
+    calls = []
+    first_service = scheduler.start()
+    assert scheduler.start() is first_service
+    scheduler.schedule(lambda: calls.append("job"), delay=0.01, job_id="job")
+    await scheduler.wait(0.02, job_id="test-delay")
+    assert calls == ["job"]
+    assert not scheduler.has("test-delay")
+    await scheduler.stop(cancel_pending=True)
+    assert first_service.done()
 
 
 @pytest.mark.asyncio

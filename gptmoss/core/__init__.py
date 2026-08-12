@@ -13,6 +13,8 @@ from gptmoss.core.corpus import DocumentChunk, LocalDocumentIndex, chunk_documen
 from gptmoss.core.execution import ExecutionEngine
 from gptmoss.core.kernel import RuntimeKernel
 from gptmoss.core.scheduler import Scheduler
+from gptmoss.core.domains import DomainDefinition, ProjectDomainRegistry
+from gptmoss.core.settings import RuntimeSettings
 from gptmoss.core.constants import DEFAULT_SYSTEM_PROMPT
 from gptmoss.core.observability import TraceRecorder
 from gptmoss.core.skills import SkillRegistry
@@ -48,6 +50,9 @@ __all__ = [
     "ExecutionEngine",
     "RuntimeKernel",
     "Scheduler",
+    "DomainDefinition",
+    "ProjectDomainRegistry",
+    "RuntimeSettings",
     "DEFAULT_SYSTEM_PROMPT",
     "TraceRecorder",
     "SkillRegistry",

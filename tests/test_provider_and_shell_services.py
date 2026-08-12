@@ -1,6 +1,10 @@
+import asyncio
 from types import SimpleNamespace
 
+import pytest
+
 from gptmoss.capabilities.shell_runtime import ProcessRegistry, ProcessRunner, ShellSafetyPolicy
+from gptmoss.providers.qwen import QwenProvider
 from gptmoss.providers.qwen_support import ContextWindowPolicy, ToolCallParser
 
 
@@ -36,21 +40,124 @@ def test_process_runner_formats_success_and_releases_registry(monkeypatch, tmp_p
         returncode = 0
         pid = 42
 
-        def communicate(self, timeout=None):
-            return "ok", ""
+        def __init__(self, stdout, **kwargs):
+            self.stdout = stdout
+
+        def wait(self, timeout=None):
+            self.stdout.write("ok")
+            self.stdout.flush()
+            return self.returncode
 
         def poll(self):
             return self.returncode
 
     registry = ProcessRegistry()
     runner = ProcessRunner(registry)
-    monkeypatch.setattr("gptmoss.capabilities.shell_runtime.subprocess.Popen", lambda *a, **k: Process())
+    monkeypatch.setattr(
+        "gptmoss.capabilities.shell_runtime.subprocess.Popen",
+        lambda *a, **kwargs: Process(**kwargs),
+    )
     output = runner.run(
         ["ignored"], use_shell=False, cwd=str(tmp_path), execution_id="exec",
         timeout=1, max_output_chars=0, cancelled=lambda _: False,
     )
     assert output == "EXIT_CODE: 0\nSTDOUT:\nok\n"
     assert registry.count() == 0
+
+
+def test_process_runner_bounds_large_output_before_returning(monkeypatch, tmp_path):
+    class Process:
+        returncode = 0
+        pid = 43
+
+        def __init__(self, stdout, stderr, **kwargs):
+            self.stdout = stdout
+            self.stderr = stderr
+
+        def wait(self, timeout=None):
+            self.stdout.write("x" * 50_000)
+            self.stderr.write("y" * 50_000)
+            self.stdout.flush()
+            self.stderr.flush()
+            return self.returncode
+
+    monkeypatch.setattr(
+        "gptmoss.capabilities.shell_runtime.subprocess.Popen",
+        lambda *a, **kwargs: Process(**kwargs),
+    )
+    runner = ProcessRunner(ProcessRegistry())
+
+    output = runner.run(
+        ["ignored"], use_shell=False, cwd=str(tmp_path), execution_id="bounded",
+        timeout=1, max_output_chars=128, cancelled=lambda _: False,
+    )
+
+    assert len(output) < 300
+    assert "x" * 128 in output
+    assert "STDERR:" not in output
+    assert "output truncated by shell safety limit" in output
+
+
+def test_process_runner_reports_cancellation_that_races_with_process_exit(
+    monkeypatch, tmp_path
+):
+    class Process:
+        returncode = -15
+        pid = 44
+
+        def wait(self, timeout=None):
+            return self.returncode
+
+    monkeypatch.setattr(
+        "gptmoss.capabilities.shell_runtime.subprocess.Popen",
+        lambda *args, **kwargs: Process(),
+    )
+    cancellation_checks = iter((False, True))
+    runner = ProcessRunner(ProcessRegistry())
+
+    output = runner.run(
+        ["ignored"],
+        use_shell=False,
+        cwd=str(tmp_path),
+        execution_id="cancel-race",
+        timeout=1,
+        max_output_chars=128,
+        cancelled=lambda _: next(cancellation_checks),
+    )
+
+    assert output == "Error: Command execution cancelled."
+
+
+@pytest.mark.asyncio
+async def test_qwen_reconfiguration_closes_superseded_and_active_clients(monkeypatch):
+    created = []
+
+    class FakeHttpClient:
+        pass
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs):
+            self.closed = 0
+            self.kwargs = kwargs
+            created.append(self)
+
+        async def close(self):
+            self.closed += 1
+
+    monkeypatch.setattr("httpx.AsyncClient", lambda **kwargs: FakeHttpClient())
+    monkeypatch.setattr("gptmoss.providers.qwen.AsyncOpenAI", FakeOpenAI)
+    provider = QwenProvider(api_key="one", base_url="https://one.invalid")
+    first = provider.client
+
+    provider.update_config("two", "https://two.invalid", model_name="qwen-next")
+    await asyncio.sleep(0)
+
+    assert first.closed == 1
+    assert first not in provider._retired_clients
+    active = provider.client
+    assert active is created[-1]
+    await provider.close()
+    assert active.closed == 1
 
 
 def test_context_policy_preserves_system_and_recent_tool_order():

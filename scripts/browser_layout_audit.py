@@ -31,43 +31,72 @@ def find_edge() -> Path:
 
 
 def audit_case(
-    edge: Path, url: str, width: int, height: int, scale: float, scenario: str
+    edge: Path,
+    url: str,
+    width: int,
+    height: int,
+    scale: float,
+    scenario: str,
+    *,
+    timeout_seconds: int = 45,
+    attempts: int = 2,
 ) -> dict:
     separator = "&" if "?" in url else "?"
     case_url = url if scenario == "empty" else f"{url}{separator}layout_audit={scenario}"
-    with tempfile.TemporaryDirectory(prefix="gptmoss-edge-") as profile:
-        result = subprocess.run(
-            [
-                str(edge),
-                "--headless=new",
-                "--disable-gpu",
-                "--hide-scrollbars",
-                "--no-first-run",
-                "--disable-extensions",
-                f"--user-data-dir={profile}",
-                f"--window-size={width},{height}",
-                f"--force-device-scale-factor={scale}",
-                "--virtual-time-budget=2500",
-                "--dump-dom",
-                case_url,
-            ],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=30,
-        )
-    overflow = re.search(r'data-layout-global-overflow="([^"]+)"', result.stdout)
-    offenders = re.search(r'data-layout-offender-count="([^"]+)"', result.stdout)
+    last_timeout = None
+    for attempt in range(1, max(1, attempts) + 1):
+        with tempfile.TemporaryDirectory(prefix="gptmoss-edge-") as profile:
+            try:
+                result = subprocess.run(
+                    [
+                        str(edge),
+                        "--headless=new",
+                        "--disable-gpu",
+                        "--disable-dev-shm-usage",
+                        "--hide-scrollbars",
+                        "--no-first-run",
+                        "--disable-extensions",
+                        f"--user-data-dir={profile}",
+                        f"--window-size={width},{height}",
+                        f"--force-device-scale-factor={scale}",
+                        "--virtual-time-budget=2500",
+                        "--dump-dom",
+                        case_url,
+                    ],
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=timeout_seconds,
+                )
+            except subprocess.TimeoutExpired as exc:
+                last_timeout = exc
+                continue
+        overflow = re.search(r'data-layout-global-overflow="([^"]+)"', result.stdout)
+        offenders = re.search(r'data-layout-offender-count="([^"]+)"', result.stdout)
+        return {
+            "viewport": [width, height],
+            "scale_factor": scale,
+            "scenario": scenario,
+            "browser_exit_code": result.returncode,
+            "audit_present": bool(overflow and offenders),
+            "global_horizontal_overflow": overflow.group(1) == "true" if overflow else None,
+            "offender_count": int(offenders.group(1)) if offenders else None,
+            "attempts": attempt,
+            "timed_out": False,
+            "stderr": result.stderr[-2_000:],
+        }
     return {
         "viewport": [width, height],
         "scale_factor": scale,
         "scenario": scenario,
-        "browser_exit_code": result.returncode,
-        "audit_present": bool(overflow and offenders),
-        "global_horizontal_overflow": overflow.group(1) == "true" if overflow else None,
-        "offender_count": int(offenders.group(1)) if offenders else None,
-        "stderr": result.stderr[-2_000:],
+        "browser_exit_code": None,
+        "audit_present": False,
+        "global_horizontal_overflow": None,
+        "offender_count": None,
+        "attempts": max(1, attempts),
+        "timed_out": True,
+        "stderr": str(last_timeout),
     }
 
 

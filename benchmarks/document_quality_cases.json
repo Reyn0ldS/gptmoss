@@ -1,0 +1,75 @@
+{
+  "schema_version": 1,
+  "description": "Corpus hors ligne de non-régression pour les livrables documentaires professionnels.",
+  "cases": [
+    {
+      "id": "complete-local-evidence",
+      "expected_valid": true,
+      "constraints": {
+        "required_headings": ["Synthèse", "Décisions", "Traçabilité"],
+        "required_requirement_ids": ["REQ-001", "REQ-002"],
+        "required_traceability_ids": ["REQ-001", "REQ-002"],
+        "required_source_files": ["besoins.docx", "comite.pptx"],
+        "source_inventory": {"besoins.docx": {"blocks": 3}, "comite.pptx": {"slides": 2}},
+        "require_local_references": true,
+        "require_bounded_references": true,
+        "require_source_coverage": true,
+        "forbid_external_links": true,
+        "forbid_placeholders": true
+      },
+      "document": "# Dossier de décision\n\n## Synthèse\n\nREQ-001 définit le périmètre local et les résultats attendus. [besoins.docx > blocs 1-3]\n\n## Décisions\n\nREQ-002 retient le scénario validé par le comité et ses limites opérationnelles. [comite.pptx > diapositives 1-2]\n\n## Traçabilité\n\n| Exigence | Décision | Source |\n|---|---|---|\n| REQ-001 | Périmètre local | besoins.docx, blocs 1-3 |\n| REQ-002 | Scénario retenu | comite.pptx, diapositives 1-2 |\n"
+    },
+    {
+      "id": "out-of-bounds-citation",
+      "expected_valid": false,
+      "expected_failure_markers": ["invalid blocks range 2-9"],
+      "constraints": {
+        "required_source_files": ["besoins.docx"],
+        "source_inventory": {"besoins.docx": {"blocks": 3}},
+        "require_bounded_references": true
+      },
+      "document": "# Décision\n\nLa décision est attribuée à une plage inexistante. [besoins.docx > blocs 2-9]\n"
+    },
+    {
+      "id": "partial-source-coverage",
+      "expected_valid": false,
+      "expected_failure_markers": ["incomplete source coverage"],
+      "constraints": {
+        "required_source_files": ["besoins.docx", "comite.pptx"],
+        "source_inventory": {"besoins.docx": {"blocks": 4}, "comite.pptx": {"slides": 3}},
+        "require_bounded_references": true,
+        "require_source_coverage": true
+      },
+      "document": "# Couverture\n\nBesoins couverts en partie. [besoins.docx > blocs 1-2]\n\nComité couvert. [comite.pptx > diapositives 1-3]\n"
+    },
+    {
+      "id": "unsupported-material-claim",
+      "expected_valid": false,
+      "expected_failure_markers": ["material paragraph(s) lack a local reference"],
+      "constraints": {
+        "require_claim_references": true,
+        "claim_min_words": 12,
+        "source_inventory": {"audit.pdf": {"blocks": 2}}
+      },
+      "document": "# Analyse\n\nCette affirmation substantielle présente une décision importante, ses conséquences opérationnelles et un niveau de certitude sans fournir aucune preuve locale vérifiable.\n"
+    },
+    {
+      "id": "missing-traceability-and-placeholder",
+      "expected_valid": false,
+      "expected_failure_markers": ["absent from Markdown traceability tables", "placeholder"],
+      "constraints": {
+        "required_requirement_ids": ["REQ-007"],
+        "required_traceability_ids": ["REQ-007"],
+        "forbid_placeholders": true
+      },
+      "document": "# Rapport\n\nREQ-007 sera détaillée dans la version finale. TODO: compléter la matrice.\n"
+    },
+    {
+      "id": "requirement-near-match",
+      "expected_valid": false,
+      "expected_failure_markers": ["missing requirement ID(s): REQ-001"],
+      "constraints": {"required_requirement_ids": ["REQ-001"]},
+      "document": "# Notes\n\nREQ-0010 est une autre exigence et ne doit pas satisfaire le contrôle de l’identifiant plus court.\n"
+    }
+  ]
+}
