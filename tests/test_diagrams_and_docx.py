@@ -1,8 +1,15 @@
-from zipfile import ZipFile
 from io import BytesIO
+from zipfile import ZipFile
 
-from gptmoss.core.diagrams import DiagramEdge, DiagramNode, DiagramSpec, parse_mermaid, render_svg, validate_diagram
 from gptmoss.core.delivery_package import render_docx
+from gptmoss.core.diagrams import (
+    DiagramEdge,
+    DiagramNode,
+    DiagramSpec,
+    parse_mermaid,
+    render_svg,
+    validate_diagram,
+)
 
 
 def test_diagram_semantics_and_renderer_are_deterministic():
@@ -19,16 +26,34 @@ def test_diagram_semantics_and_renderer_are_deterministic():
     assert "Architecture" in render_svg(spec)
 
 
-def test_mermaid_parser_rejects_missing_nodes():
+def test_mermaid_parser_rejects_missing_or_empty_nodes():
     spec = parse_mermaid("graph TD\nA[API] --> B[Store]")
     assert len(spec.nodes) == 2
     assert validate_diagram(spec)["valid"]
-    invalid = DiagramSpec("bad", "Bad", "Bad", "Bad", nodes=[DiagramNode("a", "A")], edges=[DiagramEdge("a", "missing")])
+    invalid = DiagramSpec(
+        "bad",
+        "Bad",
+        "Bad",
+        "Bad",
+        nodes=[DiagramNode("a", "A")],
+        edges=[DiagramEdge("a", "missing")],
+    )
     assert not validate_diagram(invalid)["valid"]
+    assert not validate_diagram(parse_mermaid("graph TD"))["valid"]
 
 
 def test_docx_contains_real_table_and_embedded_svg():
-    markdown = """# Dossier\n\n| Élément | Valeur |\n| --- | --- |\n| API | local |\n\n```mermaid\ngraph TD\nA[API] --> B[Store]\n```\n"""
+    markdown = """# Dossier
+
+| Élément | Valeur |
+| --- | --- |
+| API | local |
+
+```mermaid
+graph TD
+A[API] --> B[Store]
+```
+"""
     payload = render_docx(markdown, title="Dossier")
     with ZipFile(BytesIO(payload)) as archive:
         names = set(archive.namelist())
@@ -36,4 +61,45 @@ def test_docx_contains_real_table_and_embedded_svg():
         assert "word/media/diagram-1.svg" in names
         document = archive.read("word/document.xml").decode("utf-8")
         assert "<w:tbl>" in document
-        assert "r:embed=\"rId2\"" in document
+        assert 'r:embed="rId2"' in document
+
+
+def test_docx_multiple_diagrams_have_unique_ids_and_accessible_descriptions():
+    markdown = """# Dossier
+```mermaid
+graph TD
+A[API] --> B[Store]
+```
+```mermaid
+graph TD
+C[Client] --> D[Service]
+```
+"""
+    with ZipFile(BytesIO(render_docx(markdown, title="Dossier"))) as archive:
+        names = set(archive.namelist())
+        assert {"word/media/diagram-1.svg", "word/media/diagram-2.svg"} <= names
+        document = archive.read("word/document.xml").decode("utf-8")
+        assert 'wp:docPr id="1"' in document
+        assert 'wp:docPr id="2"' in document
+        assert 'pic:cNvPr id="1"' in document
+        assert 'pic:cNvPr id="2"' in document
+        assert document.count(" descr=") == 2
+        relationships = archive.read("word/_rels/document.xml.rels").decode("utf-8")
+        assert 'Id="rId2"' in relationships and 'Id="rId3"' in relationships
+
+
+def test_docx_diagram_feature_flags_change_the_rendered_delivery():
+    markdown = """# Dossier
+```mermaid
+graph TD
+A[API] --> B[Store]
+```
+"""
+    for options, expected_text in (
+        ({"render_diagrams": False}, "Diagram source (rendering disabled)"),
+        ({"embed_diagrams": False}, "Diagram:"),
+    ):
+        with ZipFile(BytesIO(render_docx(markdown, title="Dossier", **options))) as archive:
+            assert not any(name.startswith("word/media/") for name in archive.namelist())
+            document = archive.read("word/document.xml").decode("utf-8")
+            assert expected_text in document

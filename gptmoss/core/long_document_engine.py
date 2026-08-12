@@ -69,6 +69,7 @@ class LongDocumentEngine:
             execution_id=str(execution_id),
             title=title,
             output_path=str(output_path),
+            writing_brief=str(task),
             requirements=[dict(item) for item in requirements],
         )
         self.store.save(model)
@@ -98,12 +99,20 @@ class LongDocumentEngine:
                 section_id=section_id,
                 heading=clean_heading,
                 purpose=f"Explain {clean_heading} with source-grounded facts, decisions and consequences.",
-                target_words=target_words or _word_target(model.title),
+                target_words=target_words or _word_target(model.writing_brief or model.title),
                 required_topics=[clean_heading],
                 requirement_ids=owned_ids,
                 evidence_refs=refs,
                 dependencies=[f"SEC-{index - 1:03d}"] if index > 1 else [],
             ))
+        assigned = {requirement_id for contract in contracts for requirement_id in contract.requirement_ids}
+        unassigned = [
+            str(item.get("id")) for item in requirement_rows
+            if item.get("id") and str(item.get("id")) not in assigned
+        ]
+        for index, requirement_id in enumerate(unassigned):
+            if contracts:
+                contracts[index % len(contracts)].requirement_ids.append(requirement_id)
         model.sections = [DocumentSection(contract=item) for item in contracts]
         model.status = "planned"
         model.revision += 1
@@ -145,8 +154,8 @@ class LongDocumentEngine:
 
     def consolidate(self, model: DocumentModel) -> str:
         content = model.assemble_markdown()
-        model.status = "complete" if all(section.content for section in model.sections) else "writing"
-        model.updated_at = model.updated_at
+        complete = bool(model.sections) and all(section.content for section in model.sections)
+        model.mark_status("complete" if complete else "writing")
         self.store.save(model)
         output = Path(model.output_path)
         output.parent.mkdir(parents=True, exist_ok=True)

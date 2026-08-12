@@ -1467,12 +1467,22 @@ class ExecutionEngine:
         workspace = self._delivery_workspace(execution_id)
         if not workspace:
             return
-        checkpoint_root = os.path.join(workspace, ".gptmoss", "document-state")
+        workspace_path = Path(workspace).resolve()
+        checkpoint_root = workspace_path / ".gptmoss" / "document-state"
         engine = LongDocumentEngine(checkpoint_root)
-        model = engine.resume(execution_id)
+        try:
+            model = engine.resume(execution_id)
+        except ValueError as exc:
+            logger.warning("Recreating corrupt document checkpoint for %s: %s", execution_id, exc)
+            model = None
         if model is None:
             primary = str(plan.get("primary_artifact") or "deliverable.md")
-            model = engine.create_model(execution_id, task, os.path.join(workspace, primary), plan.get("requirements", []))
+            output_path = (workspace_path / primary).resolve()
+            if output_path == workspace_path or workspace_path not in output_path.parents:
+                logger.warning("Unsafe primary document path %r; using deliverable.md", primary)
+                primary = "deliverable.md"
+                output_path = workspace_path / primary
+            model = engine.create_model(execution_id, task, str(output_path), plan.get("requirements", []))
             headings: list[str] = []
             for policy in plan.get("artifact_validations", []):
                 if policy.get("path") == primary:
@@ -1490,7 +1500,9 @@ class ExecutionEngine:
                 requirements=plan.get("requirements", []),
                 target_words=self.document_target_section_words,
             )
-        state.variables["document_model_checkpoint"] = str(engine.store.path_for(execution_id))
+        state.variables["document_model_checkpoint"] = str(
+            Path(".gptmoss") / "document-state" / engine.store.path_for(execution_id).name
+        ).replace("\\", "/")
         state.variables["document_sections"] = [
             {
                 "section_id": section.contract.section_id,
@@ -1504,16 +1516,21 @@ class ExecutionEngine:
 
     def _sync_document_checkpoint(self, execution_id: str, state) -> None:
         """Reconcile written Markdown into section checkpoints after each step."""
-        checkpoint = state.variables.get("document_model_checkpoint")
-        if not checkpoint:
+        if not state.variables.get("document_model_checkpoint"):
             return
         try:
-            checkpoint_path = Path(str(checkpoint)).resolve()
-            engine = LongDocumentEngine(checkpoint_path.parent)
+            workspace = self._delivery_workspace(execution_id)
+            if not workspace:
+                return
+            workspace_path = Path(workspace).resolve()
+            engine = LongDocumentEngine(workspace_path / ".gptmoss" / "document-state")
             model = engine.resume(execution_id)
             if model is None:
                 return
-            output = Path(model.output_path)
+            output = Path(model.output_path).resolve()
+            if output == workspace_path or workspace_path not in output.parents:
+                logger.warning("Ignoring unsafe document output path for %s: %s", execution_id, output)
+                return
             if not output.is_file():
                 return
             markdown = output.read_text(encoding="utf-8")
@@ -1908,6 +1925,8 @@ class ExecutionEngine:
                         package = build_delivery_package(
                             workspace, execution_id, state.current_plan,
                             assurance_report,
+                            diagram_rendering=self.diagram_rendering,
+                            docx_embed_diagrams=self.docx_embed_diagrams,
                         )
                         if package:
                             state.results["delivery_package"] = package
