@@ -20,9 +20,35 @@ def test_committed_symbol_map_is_deterministic_and_current():
     committed = _graph_payload()
 
     assert generated == committed
-    assert committed["scope"]["structured_data_only"] is True
+    assert committed["scope"]["structured_data_only"] is False
     assert committed["stats"]["nodes"] > 1_000
     assert committed["stats"]["edges"] > 3_000
+
+
+def test_symbol_graph_links_gui_routes_websockets_controls_and_scripts():
+    payload = _graph_payload()
+    edges = _edges(payload)
+    nodes = {node["id"]: node for node in payload["nodes"]}
+
+    assert payload["diagnostics"]["unresolved_gui_api_calls"] == []
+    assert "gui:pauseActiveExecution" in nodes
+    assert (
+        "gui:pauseActiveExecution",
+        "data:api-route:POST /executions/{execution_id}/pause",
+        "calls_api",
+    ) in edges
+    assert (
+        "gui:setupWebSocket",
+        "data:api-route:WEBSOCKET /ws/events",
+        "opens_websocket",
+    ) in edges
+    assert any(kind == "triggers" and target == "gui:pauseActiveExecution"
+               for source, target, kind in edges)
+    assert (
+        "script:prepare-offline-source.bat",
+        "script:scripts/prepare_offline_source_launcher.py",
+        "invokes_script",
+    ) in edges
 
 
 def test_symbol_graph_links_classes_methods_calls_and_composition():

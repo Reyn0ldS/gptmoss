@@ -17,13 +17,16 @@
     "gptmoss/capabilities/filesystem.py": "capability",
     "gptmoss/capabilities/memory.py": "capability",
     "gptmoss/capabilities/shell.py": "capability",
+    "gptmoss/capabilities/shell_runtime.py": "security",
     "gptmoss/core/adaptive.py": "runtime",
+    "gptmoss/core/approval_coordinator.py": "runtime",
     "gptmoss/core/artifact_validation.py": "assurance",
     "gptmoss/core/artifacts.py": "documents",
     "gptmoss/core/constants.py": "runtime",
     "gptmoss/core/context.py": "memory",
     "gptmoss/core/corpus.py": "assurance",
     "gptmoss/core/delivery.py": "assurance",
+    "gptmoss/core/delivery_coordinator.py": "assurance",
     "gptmoss/core/delivery_package.py": "delivery",
     "gptmoss/core/document_quality.py": "assurance",
     "gptmoss/core/documents.py": "documents",
@@ -34,7 +37,8 @@
     "gptmoss/core/kernel.py": "runtime",
     "gptmoss/core/observability.py": "observability",
     "gptmoss/core/professional_delivery.py": "delivery",
-    "gptmoss/core/scheduler.py": "reserved",
+    "gptmoss/core/provider_recovery.py": "runtime",
+    "gptmoss/core/scheduler.py": "planning",
     "gptmoss/core/skills.py": "skills",
     "gptmoss/core/state.py": "persistence",
     "gptmoss/interfaces/capability.py": "contract",
@@ -46,7 +50,8 @@
     "gptmoss/memory/ram.py": "memory",
     "gptmoss/planners/simple.py": "planning",
     "gptmoss/policies/simple.py": "security",
-    "gptmoss/providers/qwen.py": "provider"
+    "gptmoss/providers/qwen.py": "provider",
+    "gptmoss/providers/qwen_support.py": "provider"
   },
   "operational_files": [
     "scripts/browser_layout_audit.py",
@@ -263,11 +268,11 @@
     },
     {
       "id": "planning-execution-lifecycle",
-      "tests": ["tests/test_execution.py", "tests/test_lifecycle_chronology.py", "tests/test_planning_modes.py", "tests/test_general_runtime_adaptation.py", "tests/test_adaptive_autonomy.py"]
+      "tests": ["tests/test_execution.py", "tests/test_lifecycle_chronology.py", "tests/test_planning_modes.py", "tests/test_general_runtime_adaptation.py", "tests/test_adaptive_autonomy.py", "tests/test_execution_services.py", "tests/test_scheduler_and_legacy_state.py", "tests/test_state_durability.py"]
     },
     {
       "id": "provider-recovery",
-      "tests": ["tests/test_provider_integration.py", "tests/test_runtime_improvements.py"]
+      "tests": ["tests/test_provider_integration.py", "tests/test_runtime_improvements.py", "tests/test_provider_and_shell_services.py"]
     },
     {
       "id": "policy-tools-delegation",
@@ -339,6 +344,7 @@
     "docs/functional-map.md",
     "docs/coverage-matrix.md",
     "docs/offline-package-manifest.md",
-    "docs/symbol-relations.md"
+    "docs/symbol-relations.md",
+    "docs/architecture-remediation.md"
   ]
 }

@@ -119,6 +119,17 @@ ou relation modifiée rend le fichier versionné obsolète jusqu'à sa régéné
 validateur principal appelle ce contrôle : la cartographie relationnelle ne peut donc pas
 diverger silencieusement du code.
 
+## Couverture frontend et exploitation
+
+Le graphe couvre également les fonctions et contrôles de `gui.html`, les appels
+`fetch`/`requestApi`, les WebSockets et les relations entre scripts BAT, PowerShell et
+shell. Les relations `calls_api`, `opens_websocket`, `triggers` et `invokes_script`
+relient ainsi l'interface et les chaînes d'installation/démarrage au backend.
+
+Les URL frontend littérales sans route correspondante sont publiées dans
+`diagnostics.unresolved_gui_api_calls`. Les URL entièrement dynamiques restent marquées
+`calls_dynamic_api` et doivent être validées par leurs tests fonctionnels.
+
 ## Limites assumées
 
 L'analyse est statique et n'exécute ni import ni application. Les appels construits par

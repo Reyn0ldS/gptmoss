@@ -114,6 +114,19 @@ surfaces publiques et tests. Le graphe doit ensuite être régénéré avec
 - Un nouveau test doit être rattaché à une fonctionnalité de la matrice ; un module ou
   script opérationnel non classé fait échouer la validation.
 
+## Services de fiabilité
+
+Les responsabilités transversales ont des propriétaires explicites :
+`ProviderRecoveryCoordinator` pour la reprise LLM, `DeliveryCoordinator` pour
+l'assurance, `ContextWindowPolicy` et `ToolCallParser` pour Qwen, puis
+`ShellSafetyPolicy` et `ProcessRegistry` pour le shell. `ExecutionEngine` reste la façade
+compatible et délègue à ces services.
+
+`ExecutionState.status` est validé par `ExecutionStatus`. Les mutations du runtime passent
+par `StateEngine.transition_execution`, qui contrôle la transition et conserve son motif,
+son acteur, sa corrélation et son horodatage. La persistance publie atomiquement les
+snapshots ; l'arrêt FastAPI effectue un flush final puis retire son abonnement au bus.
+
 ## Dette et limites explicites
 
 - `core/scheduler.py` est un stub non connecté ; la chronologie courante repose sur les

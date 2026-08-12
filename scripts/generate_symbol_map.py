@@ -54,6 +54,27 @@ def source_paths(root: Path) -> list[Path]:
     return sorted({path.resolve() for path in paths if path.is_file()})
 
 
+def operational_paths(root: Path) -> list[Path]:
+    """Return non-Python sources that participate in GUI and distribution flows."""
+    paths = [root / "gptmoss" / "api" / "gui.html"]
+    for pattern in ("*.bat", "*.sh", "*.ps1"):
+        paths.extend(root.glob(pattern))
+        paths.extend((root / "scripts").rglob(pattern))
+    paths.extend((root / "scripts").rglob("*.py"))
+    return sorted({path.resolve() for path in paths if path.is_file()})
+
+
+def normalize_web_path(value: str) -> str:
+    path = value.split("?", 1)[0]
+    path = re.sub(r"\$\{([^}]+)\}", lambda match: "{" + match.group(1) + "}", path)
+    return path
+
+
+def route_shape(path: str) -> tuple[str, ...]:
+    return tuple("{}" if part.startswith("{") and part.endswith("}") else part
+                 for part in path.strip("/").split("/"))
+
+
 def symbol_id(module: str, qualname: str) -> str:
     return f"{module}:{qualname}"
 
@@ -173,6 +194,112 @@ class SymbolGraphBuilder:
         self._index_definitions()
         self._resolve_aliases()
         self._extract_relations()
+        self._extract_gui_relations()
+        self._extract_script_relations()
+
+    def _extract_gui_relations(self) -> None:
+        path = self.root / "gptmoss" / "api" / "gui.html"
+        if not path.is_file():
+            return
+        relative = path.relative_to(self.root).as_posix()
+        source = path.read_text(encoding="utf-8")
+        functions = list(re.finditer(
+            r"(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(", source
+        ))
+        for index, match in enumerate(functions):
+            name = match.group(1)
+            identifier = f"gui:{name}"
+            line = source.count("\n", 0, match.start()) + 1
+            end = functions[index + 1].start() if index + 1 < len(functions) else len(source)
+            self.add_node(identifier, "function", name=name, qualname=name, path=relative,
+                          module="gptmoss.api.gui", line=line, end_line=source.count("\n", 0, end) + 1,
+                          visibility="public")
+            self.add_edge("surface:gui", identifier, "contains", line)
+
+        def owner(position: int) -> str:
+            preceding = [match for match in functions if match.start() <= position]
+            return f"gui:{preceding[-1].group(1)}" if preceding else "surface:gui"
+
+        self.add_node("surface:gui", "surface", data_kind="gui", name="GPTMOSS GUI", path=relative)
+        routes = [
+            node for node in self.nodes.values()
+            if node.get("data_kind") == "api-route"
+        ]
+        unresolved = []
+        for match in re.finditer(r"(?:fetch|requestApi)\(\s*([`\"'])(.*?)\1", source, flags=re.DOTALL):
+            raw = match.group(2).strip()
+            if not raw.startswith("/") or "${runtimeControl.supervisor_url}" in raw:
+                continue
+            snippet = source[match.end():match.end() + 500].split(";", 1)[0]
+            method_match = re.search(r"\bmethod\s*:\s*[\"']([A-Za-z]+)[\"']", snippet)
+            method = (method_match.group(1) if method_match else "GET").upper()
+            normalized = normalize_web_path(raw)
+            if "{endpoint}" in normalized or "{action}" in normalized:
+                target = data_id("api-call", f"{method} {normalized}")
+                self.add_node(target, "surface", data_kind="dynamic-api-call",
+                              name=f"{method} {normalized}", path=relative)
+                self.add_edge(owner(match.start()), target, "calls_dynamic_api",
+                              source.count("\n", 0, match.start()) + 1, "dynamic")
+                continue
+            shape = route_shape(normalized)
+            candidates = [route for route in routes
+                          if route.get("name", "").startswith(method + " ")
+                          and route_shape(route["name"].split(" ", 1)[1]) == shape]
+            if candidates:
+                self.add_edge(owner(match.start()), candidates[0]["id"], "calls_api",
+                              source.count("\n", 0, match.start()) + 1)
+            else:
+                unresolved.append({"method": method, "path": normalized,
+                                   "line": source.count("\n", 0, match.start()) + 1})
+                target = data_id("unresolved-api-call", f"{method} {normalized}")
+                self.add_node(target, "surface", data_kind="unresolved-api-call",
+                              name=f"{method} {normalized}", path=relative)
+                self.add_edge(owner(match.start()), target, "calls_missing_api",
+                              source.count("\n", 0, match.start()) + 1)
+        self.gui_unresolved = unresolved
+
+        for match in re.finditer(r"new\s+WebSocket\(\s*`[^`]*?(/ws/[^`]*)`", source):
+            normalized = normalize_web_path(match.group(1))
+            shape = route_shape(normalized)
+            candidate = next((route for route in routes
+                              if route.get("name", "").startswith("WEBSOCKET ")
+                              and route_shape(route["name"].split(" ", 1)[1]) == shape), None)
+            if candidate:
+                self.add_edge(owner(match.start()), candidate["id"], "opens_websocket",
+                              source.count("\n", 0, match.start()) + 1)
+
+        known_functions = {match.group(1) for match in functions}
+        for match in re.finditer(r"\bonclick\s*=\s*[\"']([A-Za-z_$][\w$]*)\s*\(", source):
+            element_id = f"gui-element:onclick:{source.count(chr(10), 0, match.start()) + 1}"
+            self.add_node(element_id, "surface", data_kind="gui-control",
+                          name=f"onclick {match.group(1)}", path=relative,
+                          line=source.count("\n", 0, match.start()) + 1)
+            if match.group(1) in known_functions:
+                self.add_edge(element_id, f"gui:{match.group(1)}", "triggers",
+                              source.count("\n", 0, match.start()) + 1)
+
+    def _extract_script_relations(self) -> None:
+        paths = operational_paths(self.root)
+        by_name = {path.name.lower(): path for path in paths}
+        for path in paths:
+            if path.suffix.lower() == ".html":
+                continue
+            relative = path.relative_to(self.root).as_posix()
+            identifier = f"script:{relative}"
+            self.add_node(identifier, "surface", data_kind="operational-script",
+                          name=path.name, path=relative)
+        for path in paths:
+            if path.suffix.lower() == ".html":
+                continue
+            relative = path.relative_to(self.root).as_posix()
+            content = path.read_text(encoding="utf-8", errors="replace").lower()
+            for name, target_path in by_name.items():
+                if target_path == path or name not in content:
+                    continue
+                target_relative = target_path.relative_to(self.root).as_posix()
+                if target_path.suffix.lower() != ".html":
+                    self.add_edge(f"script:{relative}", f"script:{target_relative}",
+                                  "invokes_script", 0, "literal")
 
     def _index_definitions(self) -> None:
         for info in self.modules.values():
@@ -578,7 +705,7 @@ class SymbolGraphBuilder:
 
     def build(self) -> dict[str, Any]:
         self.load()
-        paths = source_paths(self.root)
+        paths = sorted(set([*source_paths(self.root), *operational_paths(self.root)]))
         digest = hashlib.sha256()
         for path in paths:
             relative = path.relative_to(self.root).as_posix()
@@ -603,8 +730,11 @@ class SymbolGraphBuilder:
                 "production": ["main.py", "gptmoss/**/*.py"],
                 "operations": ["scripts/**/*.py"],
                 "tests": ["tests/**/*.py"],
-                "structured_data_only": True,
+                "frontend": ["gptmoss/api/gui.html"],
+                "distribution": ["*.bat", "*.sh", "scripts/**/*.ps1"],
+                "structured_data_only": False,
             },
+            "diagnostics": {"unresolved_gui_api_calls": getattr(self, "gui_unresolved", [])},
             "stats": {"files": len(paths), "nodes": len(nodes), "edges": len(edges), "nodes_by_kind": kind_counts, "edges_by_kind": edge_counts},
             "nodes": nodes,
             "edges": edges,

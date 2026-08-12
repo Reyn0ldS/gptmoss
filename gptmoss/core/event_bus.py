@@ -22,22 +22,45 @@ class EventBus:
         self._subscribers: Dict[str, List[EventCallback]] = {}
         self._all_subscribers: List[EventCallback] = []
 
-    def subscribe(self, event_type: str, callback: EventCallback):
+    def subscribe(self, event_type: str, callback: EventCallback) -> EventCallback:
         """Subscribe to a specific event type."""
         if event_type not in self._subscribers:
             self._subscribers[event_type] = []
-        self._subscribers[event_type].append(callback)
+        if callback not in self._subscribers[event_type]:
+            self._subscribers[event_type].append(callback)
         logger.debug(f"Subscribed callback to event type: {event_type}")
+        return callback
 
-    def subscribe_all(self, callback: EventCallback):
+    def subscribe_all(self, callback: EventCallback) -> EventCallback:
         """Subscribe to all events emitted on the bus."""
-        self._all_subscribers.append(callback)
+        if callback not in self._all_subscribers:
+            self._all_subscribers.append(callback)
         logger.debug("Subscribed callback to all events")
+        return callback
 
-    def unsubscribe(self, event_type: str, callback: EventCallback):
+    def unsubscribe(self, event_type: str, callback: EventCallback) -> bool:
         """Unsubscribe from a specific event type."""
         if event_type in self._subscribers and callback in self._subscribers[event_type]:
             self._subscribers[event_type].remove(callback)
+            if not self._subscribers[event_type]:
+                self._subscribers.pop(event_type, None)
+            return True
+        return False
+
+    def unsubscribe_all(self, callback: EventCallback) -> bool:
+        """Remove a callback previously registered for every event."""
+        if callback in self._all_subscribers:
+            self._all_subscribers.remove(callback)
+            return True
+        return False
+
+    def subscriber_count(self, event_type: str | None = None) -> int:
+        """Return the number of registered callbacks for diagnostics and tests."""
+        if event_type is None:
+            return len(self._all_subscribers) + sum(
+                len(callbacks) for callbacks in self._subscribers.values()
+            )
+        return len(self._subscribers.get(event_type, ()))
 
     async def publish(self, event: Event):
         """

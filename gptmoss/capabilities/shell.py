@@ -3,10 +3,9 @@ import os
 import re
 import shlex
 import sys
-import threading
-import time
 from typing import Dict, Any, Optional
 from gptmoss.interfaces.capability import capability, action
+from gptmoss.capabilities.shell_runtime import ProcessRegistry, ProcessRunner, ShellSafetyPolicy
 
 @capability(name="shell", description="Run terminal commands on the local machine.")
 class ShellCapability:
@@ -19,8 +18,9 @@ class ShellCapability:
         self.safe_mode = safe_mode
         self.timeout_seconds = max(0, int(timeout_seconds))
         self.max_output_chars = max(0, int(max_output_chars))
-        self._active_processes = {}
-        self._active_processes_lock = threading.Lock()
+        self.safety_policy = ShellSafetyPolicy(safe_mode, timeout_seconds)
+        self.process_registry = ProcessRegistry()
+        self.process_runner = ProcessRunner(self.process_registry)
 
     def update_workspace_config(self, workspace_root: str):
         self.workspace_root = os.path.abspath(workspace_root)
@@ -29,17 +29,11 @@ class ShellCapability:
         self.safe_mode = safe_mode
         self.timeout_seconds = max(0, int(timeout_seconds))
         self.max_output_chars = max(0, int(max_output_chars))
+        self.safety_policy.configure(safe_mode, timeout_seconds)
 
     def _effective_timeout(self, command: str) -> Optional[int]:
         """Zero selects an adaptive timeout."""
-        if self.timeout_seconds:
-            return self.timeout_seconds
-        normalized = command.lower()
-        if any(marker in normalized for marker in ("pytest", "unittest", " test", " build", "compile")):
-            return 900
-        if any(marker in normalized for marker in ("download", "install", "pip ", "npm ", "cargo ")):
-            return 1_800
-        return 120
+        return self.safety_policy.effective_timeout(command)
 
     @staticmethod
     def _has_shell_operators(command: str) -> bool:
@@ -96,37 +90,7 @@ class ShellCapability:
         return None
 
     def _blocked_command_reason(self, command: str) -> Optional[str]:
-        if not self.safe_mode:
-            return None
-        normalized = command.lower().replace("\\", "/")
-        broad_process_termination = (
-            re.search(r"(?:^|[\s&|])taskkill\b[^\r\n]*(?:/im\s+|\*)", normalized)
-            or re.search(r"(?:^|[\s&|])stop-process\b[^\r\n]*-name\b", normalized)
-            or re.search(r"(?:^|[\s&|])(?:pkill|killall)\b", normalized)
-        )
-        if broad_process_termination:
-            return (
-                "Command blocked by shell safe mode because process-wide "
-                "termination by name can stop the runtime or unrelated work."
-            )
-        destructive_patterns = (
-            "rm -rf /", "del /s", "format ", "diskpart",
-            "reg delete", "remove-item -recurse", "clear-disk",
-        )
-        power_control = (
-            re.search(
-                r"(?:^|[;&|]\s*)shutdown(?:\.exe)?\s+"
-                r"(?:now\b|(?:/|--?)[a-z])",
-                normalized,
-            )
-            or re.search(
-                r"(?:^|[;&|]\s*)reboot(?:\.exe)?(?:\s|$)",
-                normalized,
-            )
-        )
-        if power_control or any(pattern in normalized for pattern in destructive_patterns):
-            return "Command blocked by shell safe mode because it is destructive."
-        return None
+        return self.safety_policy.blocked_reason(command)
 
     @staticmethod
     def _without_interactive_pager(command: str) -> str:
@@ -139,48 +103,18 @@ class ShellCapability:
         ).strip()
 
     def _register_process(self, execution_id: Optional[str], process) -> None:
-        if not execution_id:
-            return
-        with self._active_processes_lock:
-            self._active_processes.setdefault(execution_id, set()).add(process)
+        self.process_registry.register(execution_id, process)
 
     def _unregister_process(self, execution_id: Optional[str], process) -> None:
-        if not execution_id:
-            return
-        with self._active_processes_lock:
-            processes = self._active_processes.get(execution_id)
-            if processes is not None:
-                processes.discard(process)
-                if not processes:
-                    self._active_processes.pop(execution_id, None)
+        self.process_registry.unregister(execution_id, process)
 
     @staticmethod
     def _terminate_process_tree(process) -> None:
-        if process.poll() is not None:
-            return
-        try:
-            if sys.platform == "win32":
-                killer = subprocess.Popen(
-                    ["taskkill", "/PID", str(process.pid), "/T", "/F"],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-                )
-                killer.communicate(timeout=5)
-            else:
-                os.killpg(os.getpgid(process.pid), 15)
-        except Exception:
-            try:
-                process.kill()
-            except Exception:
-                pass
+        return ProcessRegistry.terminate(process)
 
     def cancel_execution(self, execution_id: str) -> None:
         """Terminate every command still running for an execution."""
-        with self._active_processes_lock:
-            processes = list(self._active_processes.get(execution_id, set()))
-        for process in processes:
-            self._terminate_process_tree(process)
+        self.process_registry.cancel(execution_id)
 
     def _execution_cancelled(self, execution_id: Optional[str]) -> bool:
         if not execution_id or not self.state_engine:
@@ -484,67 +418,16 @@ class ShellCapability:
                 command_to_run = portable_python_shell_command or cleaned_cmd
                 use_shell = True
 
-            command_environment = os.environ.copy()
-            command_environment.setdefault("PYTHONUTF8", "1")
-            command_environment.setdefault("PYTHONIOENCODING", "utf-8")
-            command_environment.setdefault("PYTHONUNBUFFERED", "1")
-            command_environment.setdefault("PAGER", "cat")
-            command_environment.setdefault("GIT_PAGER", "cat")
-
-            popen_options = {}
-            if sys.platform == "win32":
-                popen_options["creationflags"] = getattr(
-                    subprocess, "CREATE_NEW_PROCESS_GROUP", 0
-                )
-            else:
-                popen_options["start_new_session"] = True
-            process = subprocess.Popen(
-                command_to_run,
-                shell=use_shell,
-                cwd=cwd_dir,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                env=command_environment,
-                **popen_options,
-            )
-            self._register_process(execution_id, process)
             timeout = self._effective_timeout(cleaned_cmd)
-            deadline = time.monotonic() + timeout if timeout else None
-            try:
-                while True:
-                    if self._execution_cancelled(execution_id):
-                        self._terminate_process_tree(process)
-                        process.communicate()
-                        return "Error: Command execution cancelled."
-                    remaining = None if deadline is None else deadline - time.monotonic()
-                    if remaining is not None and remaining <= 0:
-                        self._terminate_process_tree(process)
-                        process.communicate()
-                        return f"Error: Command execution timed out ({timeout}s)."
-                    try:
-                        stdout, stderr = process.communicate(
-                            timeout=min(0.25, remaining) if remaining is not None else 0.25
-                        )
-                        break
-                    except subprocess.TimeoutExpired:
-                        continue
-            finally:
-                self._unregister_process(execution_id, process)
-
-            output = f"EXIT_CODE: {process.returncode}\n"
-            if stdout:
-                output += f"STDOUT:\n{stdout}\n"
-            if stderr:
-                output += f"STDERR:\n{stderr}\n"
-            if not stdout and not stderr:
-                output += "Command produced no output."
-                
-            if self.max_output_chars and len(output) > self.max_output_chars:
-                output = output[:self.max_output_chars] + "\n… [output truncated by shell safety limit]"
-            return output
+            return self.process_runner.run(
+                command_to_run,
+                use_shell=use_shell,
+                cwd=cwd_dir,
+                execution_id=execution_id,
+                timeout=timeout,
+                max_output_chars=self.max_output_chars,
+                cancelled=self._execution_cancelled,
+            )
         except subprocess.TimeoutExpired:
             return f"Error: Command execution timed out ({self._effective_timeout(command)}s)."
         except Exception as e:

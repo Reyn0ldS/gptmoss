@@ -1,12 +1,11 @@
 import hashlib
-import html
 import json
 import os
 import logging
-import re
 from typing import List, Dict, Any, Optional
 from openai import AsyncOpenAI
 from gptmoss.interfaces.llm import LLMProvider
+from gptmoss.providers.qwen_support import ContextWindowPolicy, ToolCallParser
 
 logger = logging.getLogger("gptmoss.providers.qwen")
 
@@ -91,72 +90,18 @@ class QwenProvider(LLMProvider):
 
     @staticmethod
     def _is_context_limit_error(error: Exception) -> bool:
-        text = (error.__class__.__name__ + " " + str(error)).lower()
-        return any(marker in text for marker in (
-            "context length", "context_length", "maximum context",
-            "max context", "too many tokens", "token limit",
-            "prompt is too long", "input length",
-        ))
+        return ContextWindowPolicy.is_limit_error(error)
 
     @staticmethod
     def _message_chars(messages: List[Dict[str, Any]]) -> int:
-        return sum(len(json.dumps(message, ensure_ascii=False, default=str)) for message in messages)
+        return ContextWindowPolicy.message_chars(messages)
 
     @classmethod
     def _compact_messages(
         cls, messages: List[Dict[str, Any]], target_chars: int
     ) -> List[Dict[str, Any]]:
         """Drop oldest complete context items while preserving instructions and recent tool ordering."""
-        items = [dict(message) for message in messages]
-        if cls._message_chars(items) <= target_chars:
-            return items
-        preserved_first = items[0] if items[0].get("role") == "system" else None
-        body = items[1:] if preserved_first else items
-        omitted = 0
-        while len(body) > 4 and cls._message_chars(
-            ([preserved_first] if preserved_first else []) + body
-        ) > target_chars:
-            body.pop(0)
-            omitted += 1
-            while body and body[0].get("role") == "tool":
-                body.pop(0)
-                omitted += 1
-        compacted = ([preserved_first] if preserved_first else [])
-        if omitted:
-            compacted.append({
-                "role": "system",
-                "content": (
-                    f"{omitted} older context message(s) were compacted after "
-                    "the provider reported its context limit. Durable execution "
-                    "state and the current plan remain authoritative."
-                ),
-            })
-        compacted.extend(body)
-        while cls._message_chars(compacted) > target_chars:
-            candidates = [
-                (len(str(message.get("content") or "")), index)
-                for index, message in enumerate(compacted)
-                if message is not preserved_first and str(message.get("content") or "")
-            ]
-            if not candidates:
-                break
-            _, index = max(candidates)
-            content = str(compacted[index].get("content") or "")
-            without_content = [dict(message) for message in compacted]
-            without_content[index]["content"] = ""
-            # Leave room for JSON escaping and message serialization overhead,
-            # then re-evaluate in the loop.
-            available = max(1, target_chars - cls._message_chars(without_content) - 64)
-            if len(content) <= available:
-                break
-            notice = "\n… [message compacted at provider context boundary] …\n"
-            payload = max(0, available - len(notice))
-            head = (payload * 2) // 3
-            tail = payload - head
-            compacted[index]["content"] = (
-                content[:head] + notice + (content[-tail:] if tail else "")
-            )
-        return compacted
+        return ContextWindowPolicy.compact(messages, target_chars)
 
     async def _create_with_context_recovery(self, arguments: Dict[str, Any]):
         """Learn a provider's effective context size and recover without losing task state."""
@@ -246,120 +191,12 @@ class QwenProvider(LLMProvider):
                 raise e
 
     def _parse_openai_response(self, response) -> Dict[str, Any]:
-        choice = response.choices[0]
-        message = choice.message
-        content = message.content
-        tool_calls = None
-        if message.tool_calls:
-            tool_calls = []
-            for tc in message.tool_calls:
-                try:
-                    args = json.loads(tc.function.arguments)
-                except Exception:
-                    args = tc.function.arguments
-                    
-                tool_calls.append({
-                    "id": tc.id,
-                    "type": "function",
-                    "function": {
-                        "name": tc.function.name,
-                        "arguments": args
-                    }
-                })
-        elif content:
-            # Some Qwen/vLLM deployments render the model's tool-call template
-            # into message.content instead of exposing OpenAI's tool_calls field.
-            tool_calls = self._parse_text_tool_calls(content) or None
-            if tool_calls:
-                content = None
-                
-        usage = {
-            "prompt_tokens": response.usage.prompt_tokens if response.usage else 0,
-            "completion_tokens": response.usage.completion_tokens if response.usage else 0,
-            "total_tokens": response.usage.total_tokens if response.usage else 0
-        }
-        
-        return {
-            "content": content,
-            "tool_calls": tool_calls,
-            "usage": usage
-        }
+        return ToolCallParser.parse_response(response)
 
     @staticmethod
     def _parse_text_tool_calls(content: str) -> List[Dict[str, Any]]:
         """Parse common Qwen textual tool-call formats into OpenAI calls."""
-        calls = []
-        blocks = re.findall(r"<tool_call>\s*(.*?)\s*</tool_call>", content, flags=re.DOTALL | re.IGNORECASE)
-        if not blocks:
-            candidates = [str(content or "").strip()]
-            candidates.extend(re.findall(
-                r"```(?:json)?\s*(\{.*?\})\s*```",
-                str(content or ""),
-                flags=re.DOTALL | re.IGNORECASE,
-            ))
-            first, last = str(content or "").find("{"), str(content or "").rfind("}")
-            if first >= 0 and last > first:
-                candidates.append(str(content or "")[first:last + 1])
-            blocks = list(dict.fromkeys(candidate for candidate in candidates if candidate))
-        seen = set()
-        for index, block in enumerate(blocks):
-            name = ""
-            arguments: Any = {}
-
-            try:
-                candidate = json.loads(block.strip())
-            except (TypeError, ValueError):
-                candidate = None
-            if isinstance(candidate, dict):
-                candidate = candidate.get("tool_call", candidate)
-                if not isinstance(candidate, dict):
-                    candidate = {}
-                function = candidate.get("function") if isinstance(candidate.get("function"), dict) else candidate
-                name = str(function.get("name") or "").strip()
-                arguments = function.get("arguments", {})
-
-            if not name:
-                function_match = re.search(
-                    r"<function=([^>\r\n]+)>\s*(.*?)\s*</function>",
-                    block,
-                    flags=re.DOTALL | re.IGNORECASE,
-                )
-                if function_match:
-                    name = html.unescape(function_match.group(1)).strip().strip(chr(34) + chr(39))
-                    arguments = {}
-                    for parameter_match in re.finditer(
-                        r"<parameter=([^>\r\n]+)>\s*(.*?)\s*</parameter>",
-                        function_match.group(2),
-                        flags=re.DOTALL | re.IGNORECASE,
-                    ):
-                        parameter_name = html.unescape(parameter_match.group(1)).strip().strip(chr(34) + chr(39))
-                        raw_value = html.unescape(parameter_match.group(2)).strip()
-                        try:
-                            arguments[parameter_name] = json.loads(raw_value)
-                        except (TypeError, ValueError):
-                            arguments[parameter_name] = raw_value
-
-            if not name:
-                continue
-            if not isinstance(arguments, dict):
-                arguments = {}
-            stable_payload = json.dumps(
-                {"name": name, "arguments": arguments},
-                ensure_ascii=False,
-                sort_keys=True,
-                separators=(",", ":"),
-                default=str,
-            )
-            digest = hashlib.sha256(stable_payload.encode("utf-8")).hexdigest()[:16]
-            if digest in seen:
-                continue
-            seen.add(digest)
-            calls.append({
-                "id": f"qwen-text-{digest}",
-                "type": "function",
-                "function": {"name": name, "arguments": arguments},
-            })
-        return calls
+        return ToolCallParser.parse_text(content)
 
     async def _prompt_based_tool_calling(
         self,

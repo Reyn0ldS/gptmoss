@@ -1,5 +1,13 @@
 from gptmoss.core.event_bus import Event, EventBus
-from gptmoss.core.state import StateEngine, ExecutionState, ConversationState, AgentState
+from gptmoss.core.state import (
+    AgentState,
+    ConversationState,
+    ExecutionState,
+    ExecutionStatus,
+    ExecutionTransition,
+    InvalidExecutionTransition,
+    StateEngine,
+)
 from gptmoss.core.context import ContextEngine
 from gptmoss.core.corpus import DocumentChunk, LocalDocumentIndex, chunk_document
 from gptmoss.core.execution import ExecutionEngine
@@ -28,6 +36,9 @@ __all__ = [
     "EventBus",
     "StateEngine",
     "ExecutionState",
+    "ExecutionStatus",
+    "ExecutionTransition",
+    "InvalidExecutionTransition",
     "ConversationState",
     "AgentState",
     "ContextEngine",

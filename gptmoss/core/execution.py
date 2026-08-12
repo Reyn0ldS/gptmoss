@@ -31,6 +31,13 @@ from gptmoss.core.delivery import (
 from gptmoss.core.adaptive import AdaptiveRuntimePolicy, tool_call_fingerprint
 from gptmoss.core.professional_delivery import apply_professional_profile
 from gptmoss.core.delivery_package import build_delivery_package
+from gptmoss.core.delivery_coordinator import DeliveryCoordinator
+from gptmoss.core.approval_coordinator import ApprovalCoordinator
+from gptmoss.core.provider_recovery import (
+    ProviderConfigurationError as RecoveryProviderConfigurationError,
+    ProviderRecoveryCoordinator,
+    ProviderUnavailableError as RecoveryProviderUnavailableError,
+)
 
 ROLE_DISPLAY_NAMES = {
     "architect": "Architecte",
@@ -330,6 +337,17 @@ class ExecutionEngine:
         self._execution_locks: Dict[str, asyncio.Lock] = {}
         self._provider_resume_tasks: Dict[str, asyncio.Task] = {}
         self._path_locks: Dict[str, asyncio.Lock] = {}
+        self.provider_recovery = ProviderRecoveryCoordinator(
+            event_bus, state_engine, llm_provider,
+            lambda execution_id, task: self.execute_task(execution_id, task),
+            self.max_step_iterations,
+        )
+        self._provider_resume_tasks = self.provider_recovery.tasks
+        self.delivery_coordinator = DeliveryCoordinator(state_engine, self.get_capability)
+        self.approval_coordinator = ApprovalCoordinator(
+            state_engine, event_bus,
+            lambda execution_id, task: self.execute_task(execution_id, task),
+        )
 
     def register_capability(self, capability_name: str, instance: Any):
         """Register instantiated capability."""
@@ -344,95 +362,27 @@ class ExecutionEngine:
 
     @staticmethod
     def _is_permanent_llm_error(error: Exception) -> bool:
-        text = (error.__class__.__name__ + " " + str(error)).lower()
-        permanent_markers = ("authentication", "permissiondenied", "invalid api key", "401", "403")
-        return any(marker in text for marker in permanent_markers)
+        return ProviderRecoveryCoordinator.is_permanent(error)
 
     @classmethod
     def _is_transient_llm_error(cls, error: Exception) -> bool:
-        text = (error.__class__.__name__ + " " + str(error)).lower()
-        transient_markers = (
-            "connection", "timeout", "timed out", "ratelimit", "rate limit", "429",
-            "internalserver", "server error", "502", "503", "504", "temporar", "unavailable",
-        )
-        return not cls._is_permanent_llm_error(error) and any(
-            marker in text for marker in transient_markers
-        )
+        return ProviderRecoveryCoordinator.is_transient(error)
 
     async def _completion_with_recovery(self, execution_id: str, **kwargs) -> Dict[str, Any]:
         """Keep durable task state through temporary local/provider outages."""
-        consecutive_errors = 0
-        while True:
-            try:
-                return await self.llm_provider.completion(**kwargs)
-            except Exception as error:
-                if self._is_permanent_llm_error(error):
-                    raise ProviderConfigurationError(error) from error
-                if not self._is_transient_llm_error(error):
-                    raise
-                if consecutive_errors >= min(4, self.max_step_iterations):
-                    raise ProviderUnavailableError(
-                        "LLM provider is temporarily unavailable; execution state was preserved.",
-                        error,
-                    ) from error
-                consecutive_errors += 1
-                delay_seconds = min(30, 2 ** min(consecutive_errors - 1, 5))
-                await self.event_bus.publish(Event(
-                    type="LLMRetryScheduled",
-                    payload={
-                        "execution_id": execution_id,
-                        "attempt": consecutive_errors,
-                        "delay_seconds": delay_seconds,
-                        "error_type": error.__class__.__name__,
-                    },
-                ))
-                await asyncio.sleep(delay_seconds)
+        try:
+            return await self.provider_recovery.completion(execution_id, **kwargs)
+        except RecoveryProviderConfigurationError as error:
+            raise ProviderConfigurationError(error.original_error) from error
+        except RecoveryProviderUnavailableError as error:
+            raise ProviderUnavailableError(str(error), error.original_error) from error
 
     def _schedule_provider_resume(self, execution_id: str, delay_seconds: int = 30) -> None:
-        existing = self._provider_resume_tasks.get(execution_id)
-        if existing and not existing.done():
-            return
-
-        async def resume_later():
-            cancelled = False
-            try:
-                await asyncio.sleep(max(1, min(int(delay_seconds), 300)))
-                state = self.state_engine.get_execution(execution_id)
-                if state.status != "waiting_provider":
-                    return
-                state.status = "running"
-                state.variables["provider_resume_attempts"] = (
-                    int(state.variables.get("provider_resume_attempts", 0)) + 1
-                )
-                await self.event_bus.publish(Event(
-                    type="ExecutionProviderRetry",
-                    payload={
-                        "execution_id": execution_id,
-                        "attempt": state.variables["provider_resume_attempts"],
-                    },
-                ))
-                await self.execute_task(
-                    execution_id, str(state.variables.get("task") or "")
-                )
-            except asyncio.CancelledError:
-                cancelled = True
-                raise
-            finally:
-                self._provider_resume_tasks.pop(execution_id, None)
-                state = self.state_engine.get_execution(execution_id)
-                if not cancelled and state.status == "waiting_provider":
-                    attempts = int(state.variables.get("provider_resume_attempts", 0))
-                    self._schedule_provider_resume(
-                        execution_id, delay_seconds=min(300, 30 * max(1, attempts))
-                    )
-
-        self._provider_resume_tasks[execution_id] = asyncio.create_task(resume_later())
+        self.provider_recovery.schedule(execution_id, delay_seconds)
 
     def resume_waiting_provider_executions(self) -> None:
         """Restore automatic retries after a process restart."""
-        for execution_id, state in self.state_engine.executions.items():
-            if state.status == "waiting_provider":
-                self._schedule_provider_resume(execution_id, delay_seconds=1)
+        self.provider_recovery.resume_persisted()
 
     def resume_interrupted_executions(self) -> None:
         """Resume top-level work that was persisted while the process stopped."""
@@ -442,7 +392,9 @@ class ExecutionEngine:
                 state.variables.get("parent_execution_id") is not None
                 and state.status == "running"
             ):
-                state.status = "pending"
+                self.state_engine.transition_execution(
+                    state, "pending", reason="interrupted child recovery", actor="runtime"
+                )
                 state.variables["interrupted_resume_count"] = (
                     int(state.variables.get("interrupted_resume_count", 0)) + 1
                 )
@@ -462,12 +414,7 @@ class ExecutionEngine:
                 asyncio.create_task(self.execute_task(execution_id, task))
 
     async def stop_provider_resume_tasks(self) -> None:
-        tasks = list(self._provider_resume_tasks.values())
-        self._provider_resume_tasks.clear()
-        for task in tasks:
-            task.cancel()
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
+        await self.provider_recovery.stop()
 
     def get_capabilities_schemas(
         self,
@@ -1463,64 +1410,13 @@ class ExecutionEngine:
         }, ensure_ascii=False)
 
     def _delivery_histories(self, execution_id: str) -> List[Dict[str, Any]]:
-        histories: List[Dict[str, Any]] = []
-        queue = [execution_id]
-        visited = set()
-        while queue:
-            current = queue.pop(0)
-            if current in visited:
-                continue
-            visited.add(current)
-            current_state = self.state_engine.get_execution(current)
-            histories.extend(current_state.variables.get("tool_call_history", []))
-            queue.extend(
-                child_id for child_id, child in self.state_engine.executions.items()
-                if child.variables.get("parent_execution_id") == current
-            )
-        return histories
+        return self.delivery_coordinator.histories(execution_id)
 
     def _delivery_workspace(self, execution_id: str) -> Optional[str]:
-        filesystem = self.get_capability("filesystem")
-        if not filesystem or not hasattr(filesystem, "_get_workspace_for_execution"):
-            return None
-        try:
-            return filesystem._get_workspace_for_execution(execution_id)
-        except (OSError, PermissionError, ValueError):
-            return None
+        return self.delivery_coordinator.workspace(execution_id)
 
     def _independent_delivery_report(self, execution_id: str, steps: List[Dict[str, Any]]) -> Dict[str, Any]:
-        state = self.state_engine.get_execution(execution_id)
-        contract = state.variables.get("delivery_contract")
-        workspace = self._delivery_workspace(execution_id)
-        if isinstance(contract, dict) and not contract.get("software_delivery") and not workspace:
-            return {
-                "schema_version": 1,
-                "contract_sha256": contract.get("contract_sha256"),
-                "passed": True,
-                "checks": [{"name": "direct_task_contract", "passed": True}],
-                "failures": [],
-            }
-        if isinstance(contract, dict) and not workspace:
-            has_artifacts = any(step.get("required_artifacts") for step in steps)
-            has_commands = bool(contract.get("verification_commands") or contract.get("launch_commands"))
-            if not has_artifacts and not has_commands:
-                return {
-                    "schema_version": 1,
-                    "contract_sha256": contract.get("contract_sha256"),
-                    "passed": True,
-                    "checks": [{"name": "scheduler_only_contract", "passed": True}],
-                    "failures": [],
-                }
-        if not isinstance(contract, dict) or not workspace:
-            return {
-                "schema_version": 1,
-                "passed": False,
-                "checks": [],
-                "failures": ["delivery contract or workspace is unavailable"],
-            }
-        return evaluate_delivery(
-            workspace, contract, steps, self._delivery_histories(execution_id)
-        )
+        return self.delivery_coordinator.assurance(execution_id, steps)
 
     async def execute_task(self, execution_id: str, task: str):
         """Run an execution once, even if resume/reconnect schedules it repeatedly."""
@@ -1537,7 +1433,9 @@ class ExecutionEngine:
             except asyncio.CancelledError:
                 raise
             except ProviderUnavailableError as exc:
-                state.status = "waiting_provider"
+                self.state_engine.transition_execution(
+                    state, "waiting_provider", reason="provider unavailable", actor="runtime"
+                )
                 state.variables["provider_wait"] = {
                     "error": str(exc.original_error),
                     "error_type": exc.original_error.__class__.__name__,
@@ -1555,7 +1453,9 @@ class ExecutionEngine:
                 ))
                 self._schedule_provider_resume(execution_id)
             except Exception as exc:
-                state.status = "failed"
+                self.state_engine.transition_execution(
+                    state, "failed", reason="unhandled execution error", actor="runtime"
+                )
                 state.results["error"] = str(exc)
                 self.telemetry.record("execution_failed", execution_id, error=str(exc))
                 await self.event_bus.publish(Event(
@@ -1577,7 +1477,9 @@ class ExecutionEngine:
 
         # 1. Initialize states if new
         if state.status == "pending":
-            state.status = "running"
+            self.state_engine.transition_execution(
+                state, "running", reason="execution started", actor="runtime"
+            )
             
             parent_task = state.variables.get("parent_task")
             if not parent_task:
@@ -1732,7 +1634,9 @@ class ExecutionEngine:
         approved_contract = state.variables.get("approved_scope_contract_sha256")
         if (not state.variables.get("parent_execution_id") and scope_changes
                 and approved_contract != delivery_contract.get("contract_sha256")):
-            state.status = "paused"
+            self.state_engine.transition_execution(
+                state, "paused", reason="scope approval required", actor="runtime"
+            )
             state.variables["pending_scope_approval"] = {
                 "contract_sha256": delivery_contract.get("contract_sha256"),
                 "changes": scope_changes,
@@ -1812,7 +1716,9 @@ class ExecutionEngine:
 
                     sub_exec = self.state_engine.get_execution(sub_id)
                     if is_new_assignment:
-                        sub_exec.status = "pending"
+                        self.state_engine.transition_execution(
+                            sub_exec, "pending", reason="delegated task assigned", actor="runtime"
+                        )
                     sub_exec.variables["role_name"] = role_name
                     sub_exec.variables["role_key"] = role_key
                     sub_exec.variables["generic_role_name"] = generic_role_name
@@ -1896,7 +1802,9 @@ class ExecutionEngine:
                         
                         if parent_state.status == "cancelled":
                             if sub_state.status in ("running", "paused", "pending"):
-                                sub_state.status = "cancelled"
+                                self.state_engine.transition_execution(
+                                    sub_state, "cancelled", reason="parent cancelled", actor="runtime"
+                                )
                                 await self.event_bus.publish(Event(
                                     type="ExecutionCancelled",
                                     payload={"execution_id": sub_id}
@@ -1904,7 +1812,9 @@ class ExecutionEngine:
                             break
                         elif parent_state.status == "paused":
                             if sub_state.status == "running":
-                                sub_state.status = "paused"
+                                self.state_engine.transition_execution(
+                                    sub_state, "paused", reason="parent paused", actor="runtime"
+                                )
                                 await self.event_bus.publish(Event(
                                     type="ExecutionPaused",
                                     payload={"execution_id": sub_id}
@@ -1913,14 +1823,18 @@ class ExecutionEngine:
                         
                         # Resume child if parent is resumed
                         if parent_state.status == "running" and sub_state.status == "paused" and not sub_state.variables.get("pending_approval"):
-                            sub_state.status = "running"
+                            self.state_engine.transition_execution(
+                                sub_state, "running", reason="parent resumed", actor="runtime"
+                            )
                             asyncio.create_task(self.execute_task(sub_id, sub_exec.variables["task"]))
 
                         if sub_state.status == "paused" and sub_state.variables.get("pending_approval"):
                             pending_child = dict(sub_state.variables["pending_approval"])
                             pending_child["child_execution_id"] = sub_id
                             pending_child["child_role_name"] = sub_state.variables.get("role_name")
-                            parent_state.status = "paused"
+                            self.state_engine.transition_execution(
+                                parent_state, "paused", reason="child approval required", actor="runtime"
+                            )
                             parent_state.variables["pending_approval"] = pending_child
                             step["status"] = "pending"
                             self.state_engine.save_to_disk()
@@ -1947,7 +1861,9 @@ class ExecutionEngine:
                             return "suspended"
 
                         if sub_state.status == "waiting_provider":
-                            parent_state.status = "waiting_provider"
+                            self.state_engine.transition_execution(
+                                parent_state, "waiting_provider", reason="child waiting for provider", actor="runtime"
+                            )
                             parent_state.variables["provider_wait"] = {
                                 "child_execution_id": sub_id,
                                 "suspended_at": time.time(),
@@ -2029,7 +1945,9 @@ class ExecutionEngine:
                 if sub_id:
                     child = self.state_engine.get_execution(sub_id)
                     if child.status in ("pending", "running", "paused"):
-                        child.status = "cancelled"
+                        self.state_engine.transition_execution(
+                            child, "cancelled", reason="step cancelled", actor="runtime"
+                        )
                 step["status"] = "pending" if state.status == "paused" else "cancelled"
                 raise
             except ProviderUnavailableError:
@@ -2184,7 +2102,9 @@ class ExecutionEngine:
         # Loop until all steps are completed or execution finishes/pauses/cancels
         while state.status in ("running", "pending"):
             if state.status == "pending":
-                state.status = "running"
+                self.state_engine.transition_execution(
+                    state, "running", reason="plan execution resumed", actor="runtime"
+                )
                 
             parent_state = self.state_engine.get_execution(execution_id)
             if parent_state.status in ("paused", "cancelled", "completed", "failed"):
@@ -2262,7 +2182,9 @@ class ExecutionEngine:
                                 },
                             ))
                             continue
-                        state.status = "failed"
+                        self.state_engine.transition_execution(
+                            state, "failed", reason="delivery assurance failed", actor="runtime"
+                        )
                         state.results["error"] = (
                             "Independent delivery assurance failed: "
                             + "; ".join(assurance_report.get("failures", []))
@@ -2275,7 +2197,9 @@ class ExecutionEngine:
                             },
                         ))
                         break
-                    state.status = "completed"
+                    self.state_engine.transition_execution(
+                        state, "completed", reason="delivery completed", actor="runtime"
+                    )
                     workspace = self._delivery_workspace(execution_id)
                     if workspace:
                         package = build_delivery_package(
@@ -2340,13 +2264,17 @@ class ExecutionEngine:
                 state.current_step = sum(1 for s in steps if s.get("status") == "completed")
                 
                 if step_suspended:
-                    state.status = "paused"
+                    self.state_engine.transition_execution(
+                        state, "paused", reason="step suspended", actor="runtime"
+                    )
                     for t in running_tasks.values():
                         t.cancel()
                     return
 
                 if provider_suspended:
-                    state.status = "waiting_provider"
+                    self.state_engine.transition_execution(
+                        state, "waiting_provider", reason="step waiting for provider", actor="runtime"
+                    )
                     for t in running_tasks.values():
                         t.cancel()
                     await asyncio.gather(*running_tasks.values(), return_exceptions=True)
@@ -2355,7 +2283,9 @@ class ExecutionEngine:
                     return
                     
                 if step_failure:
-                    state.status = "failed"
+                    self.state_engine.transition_execution(
+                        state, "failed", reason="step failed", actor="runtime"
+                    )
                     state.results["error"] = str(step_failure)
                     self.telemetry.record("execution_failed", execution_id, error=str(step_failure))
                     for t in running_tasks.values():
@@ -2364,7 +2294,9 @@ class ExecutionEngine:
                     for child in self.state_engine.executions.values():
                         if (child.variables.get("parent_execution_id") == execution_id
                                 and child.status in ("pending", "running", "paused")):
-                            child.status = "cancelled"
+                            self.state_engine.transition_execution(
+                                child, "cancelled", reason="parent step failed", actor="runtime"
+                            )
                             await self.event_bus.publish(Event(
                                 type="ExecutionCancelled", payload={"execution_id": child.execution_id}
                             ))
@@ -2375,7 +2307,9 @@ class ExecutionEngine:
                     return
             else:
                 logger.error(f"Execution {execution_id} has unresolvable cyclical step dependencies.")
-                state.status = "failed"
+                self.state_engine.transition_execution(
+                    state, "failed", reason="cyclical plan dependencies", actor="runtime"
+                )
                 await self.event_bus.publish(Event(
                     type="ExecutionFailed",
                     payload={"execution_id": execution_id, "error": "Cyclical step dependencies detected in plan."}
@@ -2978,7 +2912,9 @@ class ExecutionEngine:
                     ))
                 elif policy_desc.decision == "approval":
                     # Human-in-the-loop: Pause execution and await approval
-                    state.status = "paused"
+                    self.state_engine.transition_execution(
+                        state, "paused", reason="capability approval required", actor="runtime"
+                    )
                     state.variables["pending_approval"] = {
                         "tool_call_id": tool_id,
                         "capability": cap_name,
@@ -3297,127 +3233,12 @@ class ExecutionEngine:
         self, execution_id: str, decision: str, reason: Optional[str] = None
     ) -> None:
         """Approve or reject a frozen scope reduction before workspace execution."""
-        state = self.state_engine.get_execution(execution_id)
-        pending = state.variables.get("pending_scope_approval")
-        if state.status != "paused" or not isinstance(pending, dict):
-            raise ValueError(f"Execution {execution_id} has no pending scope approval.")
-        state.variables.setdefault("scope_decisions", []).append({
-            "contract_sha256": pending.get("contract_sha256"),
-            "decision": decision,
-            "reason": reason or "",
-            "decided_at": time.time(),
-        })
-        state.variables.pop("pending_scope_approval", None)
-        if decision != "allow":
-            state.status = "failed"
-            state.results["error"] = "Proposed scope reduction was rejected by the user."
-            self.state_engine.save_to_disk()
-            await self.event_bus.publish(Event(
-                type="ExecutionFailed",
-                payload={"execution_id": execution_id, "error": state.results["error"]},
-            ))
-            return
-        state.variables["approved_scope_contract_sha256"] = pending.get("contract_sha256")
-        state.status = "running"
-        self.state_engine.save_to_disk()
-        await self.event_bus.publish(Event(
-            type="ScopeApproved",
-            payload={"execution_id": execution_id, "reason": reason or ""},
-        ))
-        asyncio.create_task(self.execute_task(
-            execution_id, str(state.variables.get("task") or "")
-        ))
+        await self.approval_coordinator.resolve_scope(execution_id, decision, reason)
 
     async def resume_with_decision(self, execution_id: str, decision: str, reason: Optional[str] = None):
         """
         Resumes a paused execution with the user decision ('allow' or 'reject').
         """
-        state = self.state_engine.get_execution(execution_id)
-        if state.status != "paused":
-            raise ValueError(f"Execution {execution_id} is not paused.")
-
-        pending_app = state.variables.get("pending_approval")
-        if not pending_app:
-            raise ValueError(f"No pending approval found for execution {execution_id}.")
-
-        child_execution_id = pending_app.get("child_execution_id")
-        if child_execution_id:
-            child_state = self.state_engine.get_execution(child_execution_id)
-            child_pending = child_state.variables.get("pending_approval")
-            if child_state.status != "paused" or not isinstance(child_pending, dict):
-                state.variables.pop("pending_approval", None)
-                state.status = "running"
-                self.state_engine.save_to_disk()
-                await self.event_bus.publish(Event(
-                    type="StaleDelegatedApprovalCleared",
-                    payload={
-                        "execution_id": execution_id,
-                        "child_execution_id": child_execution_id,
-                    },
-                ))
-                asyncio.create_task(self.execute_task(
-                    execution_id, str(state.variables.get("task") or "")
-                ))
-                return
-            child_pending["decision"] = decision
-            child_pending["reason"] = reason or ""
-            fingerprint = child_pending.get("fingerprint") or tool_call_fingerprint(
-                child_pending["capability"], child_pending["action"], child_pending["arguments"]
-            )
-            child_state.variables.setdefault("approval_decisions", {})[fingerprint] = decision
-            child_state.status = "running"
-            state.variables.pop("pending_approval", None)
-            state.status = "running"
-            self.state_engine.save_to_disk()
-            await self.event_bus.publish(Event(
-                type="ExecutionResumed",
-                payload={
-                    "execution_id": execution_id,
-                    "child_execution_id": child_execution_id,
-                    "decision": decision,
-                },
-            ))
-            asyncio.create_task(self.execute_task(
-                child_execution_id, str(child_state.variables.get("task") or "")
-            ))
-            asyncio.create_task(self.execute_task(
-                execution_id, str(state.variables.get("task") or "")
-            ))
-            return
-
-        pending_app["decision"] = decision
-        pending_app["reason"] = reason or ""
-
-        # Set status back to running and resume execution
-        state.status = "running"
-        parent_id = state.variables.get("parent_execution_id")
-        parent_state = (
-            self.state_engine.get_execution(parent_id)
-            if parent_id and parent_id in self.state_engine.executions
-            else None
+        await self.approval_coordinator.resolve_capability(
+            execution_id, decision, reason
         )
-        if parent_state is not None:
-            parent_pending = parent_state.variables.get("pending_approval")
-            if (
-                isinstance(parent_pending, dict)
-                and parent_pending.get("child_execution_id") == execution_id
-            ):
-                parent_state.variables.pop("pending_approval", None)
-                if parent_state.status == "paused":
-                    parent_state.status = "running"
-                asyncio.create_task(self.execute_task(
-                    parent_id, str(parent_state.variables.get("task") or "")
-                ))
-        self.state_engine.save_to_disk()
-        await self.event_bus.publish(Event(
-            type="ExecutionResumed",
-            payload={"execution_id": execution_id, "decision": decision}
-        ))
-
-        # Re-start execution process (it will load the step again, find the pending approval, and process it)
-        task = state.variables.get("task") or self.state_engine.get_conversation(execution_id).messages[0]["content"]
-        if task.startswith("Task: "):
-            task = task[6:]
-            
-        # Run execution loop asynchronously in the background so it doesn't block the caller
-        asyncio.create_task(self.execute_task(execution_id, task))

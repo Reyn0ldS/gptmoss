@@ -146,9 +146,12 @@ async def lifespan(_: FastAPI):
         if app_state.execution_engine:
             await app_state.execution_engine.stop_provider_resume_tasks()
         if app_state.flush_task:
-            app_state.flush_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await app_state.flush_task
+            if app_state.state_engine:
+                await app_state.state_engine.stop_db_flush_loop(flush=True)
+            else:
+                app_state.flush_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await app_state.flush_task
             app_state.flush_task = None
 
 app = FastAPI(title="MOSS Agent Runtime Platform API", version="0.1.0", lifespan=lifespan)
@@ -899,7 +902,9 @@ async def pause_execution(execution_id: str):
     if state.status != "running":
         raise HTTPException(status_code=400, detail=f"Cannot pause execution in status '{state.status}'.")
         
-    state.status = "paused"
+    app_state.state_engine.transition_execution(
+        state, "paused", reason="manual pause", actor="api"
+    )
     await app_state.event_bus.publish(Event(
         type="ExecutionPaused",
         payload={"execution_id": execution_id}
@@ -959,7 +964,9 @@ async def resume_execution(execution_id: str):
             state.variables.get("manual_failure_resumes", 0)
         ) + 1
 
-    state.status = "running"
+    app_state.state_engine.transition_execution(
+        state, "running", reason="manual resume", actor="api"
+    )
     await app_state.event_bus.publish(Event(
         type="ExecutionResumed",
         payload={"execution_id": execution_id, "decision": "manual"}
@@ -989,7 +996,9 @@ async def cancel_execution(execution_id: str):
         current_id = to_cancel.pop(0)
         current = app_state.state_engine.get_execution(current_id)
         if current.status in {"running", "paused", "pending", "waiting_provider"}:
-            current.status = "cancelled"
+            app_state.state_engine.transition_execution(
+                current, "cancelled", reason="manual cancellation", actor="api"
+            )
             current.variables.pop("pending_approval", None)
             current.variables.pop("pending_scope_approval", None)
             cancelled.append(current_id)

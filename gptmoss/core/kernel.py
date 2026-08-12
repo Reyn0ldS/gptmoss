@@ -73,7 +73,9 @@ class RuntimeKernel:
         
         # Mark state execution as pending
         exec_state = self.state_engine.get_execution(execution_id)
-        exec_state.status = "pending"
+        self.state_engine.transition_execution(
+            exec_state, "pending", reason="task submitted", actor="kernel"
+        )
         exec_state.variables["task"] = task
         exec_state.variables["delegation_depth"] = delegation_depth
         exec_state.variables["delegation_lineage"] = delegation_lineage

@@ -76,7 +76,9 @@ La vérification seule ne télécharge rien. Elle contrôle notamment :
 - imports FastAPI, HTTP, OpenAI, Pydantic, tests, WebSocket et PDF ;
 - capacité de lancer les tests sans écrire de bytecode dans le dépôt.
 
-La cartographie ajoute un contrôle sans exécuter le runtime :
+La cartographie ajoute un contrôle sans exécuter le runtime. Elle vérifie aussi les liens
+GUI/API/WebSocket et les invocations entre scripts d'installation, de démarrage et de
+préparation offline :
 
 ```powershell
 python .\scripts\validate_application_map.py

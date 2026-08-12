@@ -61,6 +61,11 @@ Les prérequis validés sont réutilisés, et les chemins possédés empêchent 
 concurrents de modifier le même livrable. Une répétition sans preuve consomme le budget de
 stagnation ; une modification durable ou une nouvelle validation réussie le remet à zéro.
 
+Toutes les mutations applicatives de statut passent par la table de transitions du
+`StateEngine`. Chaque changement conserve ancien et nouvel état, motif, acteur,
+corrélation et horodatage. Une transition terminale incohérente est refusée avant
+persistance ou publication d'événement.
+
 Les appels shell peuvent mettre l'exécution en `paused` avec `ApprovalRequested`.
 L'approbation reprend exactement l'appel en attente ; le rejet devient une preuve à
 intégrer au raisonnement. Pause utilisateur, annulation et reprise sont propagées aux

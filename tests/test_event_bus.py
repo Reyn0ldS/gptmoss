@@ -42,3 +42,26 @@ async def test_event_bus_subscribe_all():
     assert len(all_events) == 2
     assert all_events[0].type == "EventA"
     assert all_events[1].type == "EventB"
+
+
+@pytest.mark.asyncio
+async def test_event_bus_subscriptions_are_idempotent_and_removable():
+    bus = EventBus()
+    events = []
+
+    async def callback(event: Event):
+        events.append(event.type)
+
+    assert bus.subscribe_all(callback) is callback
+    bus.subscribe_all(callback)
+    bus.subscribe("Selected", callback)
+    bus.subscribe("Selected", callback)
+    assert bus.subscriber_count() == 2
+
+    await bus.publish(Event(type="Selected"))
+    assert events == ["Selected", "Selected"]
+    assert bus.unsubscribe("Selected", callback)
+    assert not bus.unsubscribe("Selected", callback)
+    assert bus.unsubscribe_all(callback)
+    assert not bus.unsubscribe_all(callback)
+    assert bus.subscriber_count() == 0

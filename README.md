@@ -8,6 +8,10 @@ La conception de la traçabilité, des propriétaires de fichiers, de l'audit
 indépendant, des reprises LLM et du benchmark multi-prompts est détaillée dans
 [DELIVERY_ASSURANCE.md](DELIVERY_ASSURANCE.md).
 
+Les garanties de persistance, cycle de vie, transitions typées, reprise fournisseur,
+sécurité shell et cartographie GUI/API sont détaillées dans le
+[dossier de remédiation architecturale](docs/architecture-remediation.md).
+
 La cartographie vivante de l'application est répartie entre
 [l'architecture](docs/architecture.md), les
 [parcours fonctionnels](docs/functional-map.md), la
@@ -611,9 +615,12 @@ GPTMOSS déjà démarré :
 python scripts/browser_layout_audit.py http://127.0.0.1:8000/
 ```
 
-Les tests vérifient notamment l'API, le moteur d'exécution, les politiques, la mémoire, les skills, les artefacts et le workflow documentaire local. La validation complète du 10 août 2026 a produit :
+Les tests vérifient notamment l'API, le moteur d'exécution, la persistance atomique, les
+transitions chronologiques, les politiques Qwen/shell, le scheduler, la mémoire, les
+skills, les artefacts, le workflow documentaire et les relations GUI/API/scripts. La
+validation complète du 12 août 2026 a produit :
 
-- `202 passed` pour la suite GPTMOSS sur la branche documentaire ;
+- `266 passed` pour la suite GPTMOSS ;
 - 48/48 cas Edge réussis entre 360 × 740 et 1920 × 1080, avec des facteurs d'échelle de 100 % à 200 % ;
 - aucun débordement horizontal global et aucun élément signalé hors écran dans les scénarios vide, contenu, approbation, réglages et bibliothèque.
 

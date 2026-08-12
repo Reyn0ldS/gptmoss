@@ -1,16 +1,92 @@
+import asyncio
+import json
+import logging
+import os
+import threading
+import time
+import warnings
+from contextlib import suppress
+from enum import Enum
 from typing import Dict, Any, Optional, List
-from pydantic import BaseModel, Field
+
+from pydantic import BaseModel, ConfigDict, Field
+
+from gptmoss.core.durable_io import write_text_atomic
+
+
+logger = logging.getLogger("gptmoss.state")
+STATE_SCHEMA_VERSION = 1
+
+
+class ExecutionStatus(str, Enum):
+    PENDING = "pending"
+    RUNNING = "running"
+    PAUSED = "paused"
+    WAITING_PROVIDER = "waiting_provider"
+    CANCELLED = "cancelled"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+    def __str__(self) -> str:
+        """Preserve the historical string contract across Python versions."""
+        return self.value
+
+
+class InvalidExecutionTransition(ValueError):
+    pass
+
+
+class ExecutionTransition(BaseModel):
+    previous_status: ExecutionStatus
+    status: ExecutionStatus
+    reason: str = "runtime"
+    actor: str = "runtime"
+    correlation_id: Optional[str] = None
+    timestamp: float = Field(default_factory=time.time)
+
+
+ALLOWED_EXECUTION_TRANSITIONS = {
+    ExecutionStatus.PENDING: {
+        ExecutionStatus.RUNNING, ExecutionStatus.PAUSED,
+        ExecutionStatus.WAITING_PROVIDER, ExecutionStatus.CANCELLED,
+        ExecutionStatus.COMPLETED, ExecutionStatus.FAILED,
+    },
+    ExecutionStatus.RUNNING: {
+        ExecutionStatus.PENDING, ExecutionStatus.PAUSED,
+        ExecutionStatus.WAITING_PROVIDER, ExecutionStatus.CANCELLED,
+        ExecutionStatus.COMPLETED, ExecutionStatus.FAILED,
+    },
+    ExecutionStatus.PAUSED: {
+        ExecutionStatus.RUNNING, ExecutionStatus.WAITING_PROVIDER,
+        ExecutionStatus.CANCELLED, ExecutionStatus.FAILED,
+    },
+    ExecutionStatus.WAITING_PROVIDER: {
+        ExecutionStatus.PENDING, ExecutionStatus.RUNNING,
+        ExecutionStatus.PAUSED, ExecutionStatus.CANCELLED,
+        ExecutionStatus.FAILED,
+    },
+    # A failed top-level execution may be explicitly resumed after correction.
+    ExecutionStatus.FAILED: {
+        ExecutionStatus.PENDING, ExecutionStatus.RUNNING,
+        ExecutionStatus.CANCELLED,
+    },
+    ExecutionStatus.CANCELLED: set(),
+    ExecutionStatus.COMPLETED: set(),
+}
 
 class ConversationState(BaseModel):
     messages: List[Dict[str, Any]] = Field(default_factory=list)
 
 class ExecutionState(BaseModel):
+    model_config = ConfigDict(validate_assignment=True)
+
     execution_id: str
-    status: str = "pending"  # pending, running, paused, waiting_provider, cancelled, completed, failed
+    status: ExecutionStatus = ExecutionStatus.PENDING
     current_step: Optional[int] = None
     current_plan: Optional[Dict[str, Any]] = None
     variables: Dict[str, Any] = Field(default_factory=dict)
     results: Dict[str, Any] = Field(default_factory=dict)
+    transitions: List[ExecutionTransition] = Field(default_factory=list)
 
 class AgentState(BaseModel):
     agent_id: str
@@ -41,11 +117,13 @@ class StateEngine:
         self.workspaces: Dict[str, WorkspaceState] = {}
         self.knowledges: Dict[str, KnowledgeState] = {}
         self.users: Dict[str, UserState] = {}
+        self._save_lock = threading.Lock()
+        self._flush_task: Optional[asyncio.Task] = None
+        self._flush_event_bus = None
+        self._flush_callback = None
         self._load_from_disk()
 
     def _load_from_disk(self):
-        import json
-        import os
         if not self.persist_path or not os.path.exists(self.persist_path):
             return
         try:
@@ -76,58 +154,32 @@ class StateEngine:
             for k, v in data.get("users", {}).items():
                 self.users[k] = UserState(**v)
         except Exception as e:
-            import logging
-            logging.getLogger("gptmoss.state").error(f"Failed to load state from disk: {e}")
+            logger.error(f"Failed to load state from disk: {e}")
 
-    def save_to_disk(self):
-        import json
-        import os
-        import threading
-        import time
-        if not hasattr(self, "_save_lock"):
-            self._save_lock = threading.Lock()
-            
+    def _snapshot(self) -> Dict[str, Any]:
+        return {
+            "schema_version": STATE_SCHEMA_VERSION,
+            "conversations": {k: v.model_dump() for k, v in self.conversations.items()},
+            "executions": {k: v.model_dump() for k, v in self.executions.items()},
+            "agents": {k: v.model_dump() for k, v in self.agents.items()},
+            "workspaces": {k: v.model_dump() for k, v in self.workspaces.items()},
+            "knowledges": {k: v.model_dump() for k, v in self.knowledges.items()},
+            "users": {k: v.model_dump() for k, v in self.users.items()},
+        }
+
+    def save_to_disk(self) -> bool:
+        """Atomically persist a complete snapshot, preserving the previous file on failure."""
         if not self.persist_path:
-            return
-            
+            return True
+
         with self._save_lock:
-            max_retries = 5
-            for attempt in range(max_retries):
-                try:
-                    persist_dir = os.path.dirname(self.persist_path)
-                    if persist_dir:
-                        os.makedirs(persist_dir, exist_ok=True)
-                    data = {
-                        "conversations": {k: v.model_dump() for k, v in self.conversations.items()},
-                        "executions": {k: v.model_dump() for k, v in self.executions.items()},
-                        "agents": {k: v.model_dump() for k, v in self.agents.items()},
-                        "workspaces": {k: v.model_dump() for k, v in self.workspaces.items()},
-                        "knowledges": {k: v.model_dump() for k, v in self.knowledges.items()},
-                        "users": {k: v.model_dump() for k, v in self.users.items()}
-                    }
-                    # Write to a temp file first then rename to prevent corruption
-                    temp_path = self.persist_path + ".tmp"
-                    with open(temp_path, "w", encoding="utf-8") as f:
-                        json.dump(data, f, indent=2, ensure_ascii=False)
-                    
-                    # Windows safe replacement fallback
-                    if os.path.exists(self.persist_path):
-                        try:
-                            os.remove(self.persist_path)
-                        except Exception:
-                            pass
-                    os.replace(temp_path, self.persist_path)
-                    break # Success!
-                except PermissionError as e:
-                    if attempt == max_retries - 1:
-                        import logging
-                        logging.getLogger("gptmoss.state").error(f"Failed to save state to disk after {max_retries} attempts: {e}")
-                    else:
-                        time.sleep(0.05 * (attempt + 1))
-                except Exception as e:
-                    import logging
-                    logging.getLogger("gptmoss.state").error(f"Failed to save state to disk: {e}")
-                    break
+            try:
+                content = json.dumps(self._snapshot(), indent=2, ensure_ascii=False)
+                write_text_atomic(self.persist_path, content)
+                return True
+            except Exception as e:
+                logger.error(f"Failed to save state to disk: {e}")
+                return False
 
     def get_conversation(self, convo_id: str) -> ConversationState:
         if convo_id not in self.conversations:
@@ -141,6 +193,36 @@ class StateEngine:
             self.save_to_disk()
         return self.executions[exec_id]
 
+    def transition_execution(
+        self,
+        execution: str | ExecutionState,
+        status: str | ExecutionStatus,
+        *,
+        reason: str = "runtime",
+        actor: str = "runtime",
+        correlation_id: Optional[str] = None,
+    ) -> ExecutionState:
+        """Apply and audit one valid execution lifecycle transition."""
+        state = self.get_execution(execution) if isinstance(execution, str) else execution
+        previous = ExecutionStatus(state.status)
+        target = ExecutionStatus(status)
+        if previous == target:
+            return state
+        if target not in ALLOWED_EXECUTION_TRANSITIONS[previous]:
+            raise InvalidExecutionTransition(
+                f"Execution {state.execution_id} cannot transition from "
+                f"{previous.value} to {target.value}."
+            )
+        state.status = target
+        state.transitions.append(ExecutionTransition(
+            previous_status=previous,
+            status=target,
+            reason=reason,
+            actor=actor,
+            correlation_id=correlation_id,
+        ))
+        return state
+
     def get_agent(self, agent_id: str) -> AgentState:
         if agent_id not in self.agents:
             self.agents[agent_id] = AgentState(agent_id=agent_id)
@@ -148,18 +230,30 @@ class StateEngine:
         return self.agents[agent_id]
 
     def get_workspace(self, workspace_id: str) -> WorkspaceState:
+        warnings.warn(
+            "WorkspaceState is a legacy compatibility partition; use project configuration.",
+            DeprecationWarning, stacklevel=2,
+        )
         if workspace_id not in self.workspaces:
             self.workspaces[workspace_id] = WorkspaceState()
             self.save_to_disk()
         return self.workspaces[workspace_id]
 
     def get_knowledge(self, knowledge_id: str) -> KnowledgeState:
+        warnings.warn(
+            "KnowledgeState is a legacy compatibility partition; use governed memory.",
+            DeprecationWarning, stacklevel=2,
+        )
         if knowledge_id not in self.knowledges:
             self.knowledges[knowledge_id] = KnowledgeState()
             self.save_to_disk()
         return self.knowledges[knowledge_id]
 
     def get_user(self, user_id: str) -> UserState:
+        warnings.warn(
+            "UserState is a legacy compatibility partition; use scoped governed memory.",
+            DeprecationWarning, stacklevel=2,
+        )
         if user_id not in self.users:
             self.users[user_id] = UserState(user_id=user_id)
             self.save_to_disk()
@@ -167,18 +261,20 @@ class StateEngine:
 
     def start_db_flush_loop(self, event_bus):
         """Starts a debounced background state saving loop."""
-        import asyncio
-        import logging
         from gptmoss.core.event_bus import Event
-        
-        logger = logging.getLogger("gptmoss.state")
+
+        if self._flush_task and not self._flush_task.done():
+            return self._flush_task
+        if self._flush_event_bus and self._flush_callback:
+            self._flush_event_bus.unsubscribe_all(self._flush_callback)
+
         state_changed = asyncio.Event()
-        
+
         async def save_state_on_event(event: Event):
             state_changed.set()
-            
+
         event_bus.subscribe_all(save_state_on_event)
-        
+
         async def db_flush_loop():
             while True:
                 try:
@@ -186,8 +282,30 @@ class StateEngine:
                     state_changed.clear()
                     await asyncio.sleep(1.0)
                     await asyncio.to_thread(self.save_to_disk)
+                except asyncio.CancelledError:
+                    raise
                 except Exception as e:
                     logger.error(f"Error in db_flush_loop: {e}")
                     await asyncio.sleep(1.0)
-                    
-        return asyncio.create_task(db_flush_loop())
+
+        self._flush_event_bus = event_bus
+        self._flush_callback = save_state_on_event
+        self._flush_task = asyncio.create_task(db_flush_loop())
+        return self._flush_task
+
+    async def stop_db_flush_loop(self, *, flush: bool = True) -> None:
+        """Detach the persistence callback, flush once, and stop the worker."""
+        if self._flush_event_bus and self._flush_callback:
+            self._flush_event_bus.unsubscribe_all(self._flush_callback)
+        self._flush_event_bus = None
+        self._flush_callback = None
+
+        if flush:
+            await asyncio.to_thread(self.save_to_disk)
+
+        task = self._flush_task
+        self._flush_task = None
+        if task and not task.done():
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
