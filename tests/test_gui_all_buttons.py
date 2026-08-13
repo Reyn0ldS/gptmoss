@@ -243,7 +243,9 @@ def test_every_gui_button_api_contract_works(tmp_path):
     assert client.get(f"/executions/{parent_id}").status_code == 200
     assert client.get(f"/executions/{parent_id}/unified-feed").status_code == 200
     assert client.get(f"/executions/{parent_id}/document").status_code in {200, 404}
-    assert client.post(f"/executions/{parent_id}/pause").status_code in {200, 409}
+    # The mock execution may already be terminal by the time the live button
+    # audit reaches Pause; 400 is then the documented state-machine response.
+    assert client.post(f"/executions/{parent_id}/pause").status_code in {200, 400, 409}
     assert client.post(f"/executions/{parent_id}/resume").status_code in {200, 409}
     paused = client.post("/executions/paused-audit/approve", json={"reason": "audit"})
     assert paused.status_code in {200, 409, 400}

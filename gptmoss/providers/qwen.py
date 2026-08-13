@@ -157,11 +157,29 @@ class QwenProvider(LLMProvider):
         if inspect.isawaitable(result):
             await result
 
+    @staticmethod
+    def _extract_usage(response: Any) -> Dict[str, int]:
+        """Normalize usage from SDK objects and assembled streaming dictionaries."""
+        usage = response.get("usage") if isinstance(response, dict) else getattr(response, "usage", None)
+        if isinstance(usage, dict):
+            value = lambda key: int(usage.get(key) or 0)
+        else:
+            value = lambda key: int(getattr(usage, key, 0) or 0)
+        return {
+            "prompt_tokens": value("prompt_tokens"),
+            "completion_tokens": value("completion_tokens"),
+            "total_tokens": value("total_tokens"),
+        }
+
     async def _consume_chat_stream(self, stream, on_text_delta=None) -> Dict[str, Any]:
         """Assemble an OpenAI-compatible stream into the provider response dict."""
         content_parts: List[str] = []
         tool_acc: Dict[int, Dict[str, str]] = {}
+        usage = self._extract_usage(None)
         async for chunk in stream:
+            chunk_usage = self._extract_usage(chunk)
+            if any(chunk_usage.values()):
+                usage = chunk_usage
             choices = getattr(chunk, "choices", None) or []
             if not choices:
                 continue
@@ -202,7 +220,7 @@ class QwenProvider(LLMProvider):
             if parsed:
                 calls = parsed
                 content = None
-        return {"content": content, "tool_calls": calls, "usage": {}}
+        return {"content": content, "tool_calls": calls, "usage": usage}
 
     async def _create_with_context_recovery(self, arguments: Dict[str, Any], on_text_delta=None):
         """Learn a provider's effective context size and recover without losing task state."""
@@ -215,7 +233,25 @@ class QwenProvider(LLMProvider):
             request["messages"] = messages
             try:
                 if on_text_delta is not None:
-                    stream = await self.client.chat.completions.create(**request, stream=True)
+                    stream_request = dict(request)
+                    stream_request.setdefault("stream_options", {"include_usage": True})
+                    try:
+                        stream = await self.client.chat.completions.create(
+                            **stream_request, stream=True
+                        )
+                    except Exception as stream_error:
+                        error_text = str(stream_error).lower()
+                        if not any(
+                            marker in error_text
+                            for marker in ("stream_options", "include_usage")
+                        ):
+                            raise
+                        # Some OpenAI-compatible servers stream correctly but
+                        # reject the optional usage extension.
+                        stream_request.pop("stream_options", None)
+                        stream = await self.client.chat.completions.create(
+                            **stream_request, stream=True
+                        )
                     return await self._consume_chat_stream(stream, on_text_delta)
                 return await self.client.chat.completions.create(**request)
             except Exception as error:
@@ -416,8 +452,16 @@ class QwenProvider(LLMProvider):
             "messages": fallback_messages,
             **kwargs,
         }, on_text_delta=on_text_delta)
+        pre_parsed_tool_calls = None
         if isinstance(response, dict) and "content" in response:
             content = response.get("content") or ""
+            available_names = {
+                tool.get("function", {}).get("name") for tool in tools
+            }
+            pre_parsed_tool_calls = [
+                call for call in (response.get("tool_calls") or [])
+                if call.get("function", {}).get("name") in available_names
+            ] or None
         else:
             choice = response.choices[0]
             content = choice.message.content or ""
@@ -447,8 +491,8 @@ class QwenProvider(LLMProvider):
             return None
 
         parsed = _extract_json_block(content)
-        tool_calls = None
-        text_content = content
+        tool_calls = pre_parsed_tool_calls
+        text_content = None if pre_parsed_tool_calls else content
         
         if parsed:
             try:
@@ -508,11 +552,7 @@ class QwenProvider(LLMProvider):
             except Exception:
                 pass
             
-        usage = {
-            "prompt_tokens": response.usage.prompt_tokens if response.usage else 0,
-            "completion_tokens": response.usage.completion_tokens if response.usage else 0,
-            "total_tokens": response.usage.total_tokens if response.usage else 0
-        }
+        usage = self._extract_usage(response)
         
         return {
             "content": text_content,

@@ -88,27 +88,23 @@ class ProviderRecoveryCoordinator:
             return
 
         async def resume_later() -> None:
-            try:
-                state = self.state_engine.get_execution(execution_id)
-                if state.status != "waiting_provider":
-                    return
-                self.state_engine.transition_execution(
-                    state, "running", reason="provider retry", actor="provider recovery"
-                )
-                state.variables["provider_resume_attempts"] = int(
-                    state.variables.get("provider_resume_attempts", 0)
-                ) + 1
-                await self.event_bus.publish(Event(type="ExecutionProviderRetry", payload={
-                    "execution_id": execution_id,
-                    "attempt": state.variables["provider_resume_attempts"],
-                }))
-                await self.execute(execution_id, str(state.variables.get("task") or ""))
-            finally:
-                self.jobs.pop(execution_id, None)
-                state = self.state_engine.get_execution(execution_id)
-                if state.status == "waiting_provider":
-                    attempts = int(state.variables.get("provider_resume_attempts", 0))
-                    self.schedule(execution_id, min(300, 30 * max(1, attempts)))
+            self.jobs.pop(execution_id, None)
+            state = self.state_engine.get_execution(execution_id)
+            if state.status != "waiting_provider":
+                return
+            self.state_engine.transition_execution(
+                state, "running", reason="provider retry", actor="provider recovery"
+            )
+            state.variables["provider_resume_attempts"] = int(
+                state.variables.get("provider_resume_attempts", 0)
+            ) + 1
+            await self.event_bus.publish(Event(type="ExecutionProviderRetry", payload={
+                "execution_id": execution_id,
+                "attempt": state.variables["provider_resume_attempts"],
+            }))
+            # ExecutionEngine owns the returned task. If the provider remains
+            # unavailable, execute_task schedules the next durable resume.
+            self.execute(execution_id, str(state.variables.get("task") or ""))
 
         self.jobs[execution_id] = self.scheduler.schedule(
             resume_later,
@@ -122,6 +118,11 @@ class ProviderRecoveryCoordinator:
         for execution_id, state in self.state_engine.executions.items():
             if state.status == "waiting_provider":
                 self.schedule(execution_id, delay_seconds=1)
+
+    def cancel(self, execution_id: str) -> bool:
+        """Cancel the durable resume job owned by one execution."""
+        job_id = self.jobs.pop(execution_id, None)
+        return self.scheduler.cancel(job_id) if job_id else False
 
     async def stop(self) -> None:
         for job_id in list(self.jobs.values()):

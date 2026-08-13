@@ -436,7 +436,18 @@ Invoke-RestMethod -Method Post "http://127.0.0.1:8000/executions/$id/reject" -Co
 Invoke-RestMethod -Method Post "http://127.0.0.1:8000/executions/$id/cancel"
 ```
 
-`/resume` ne convient pas à une pause d'approbation : dans ce cas, utilisez impérativement `/approve` ou `/reject`. `cancel` est possible seulement pour les états `pending`, `running` ou `paused`.
+`/resume` ne convient pas à une pause d'approbation : dans ce cas, utilisez impérativement `/approve` ou `/reject`. `cancel` est possible pour les états `pending`, `running`, `paused` ou `waiting_provider`. Le moteur conserve un registre unique des tâches `asyncio` actives : l'annulation interrompt l'appel LLM, les étapes du DAG et les sous-agents connus, arrête les processus shell, puis supprime les reprises planifiées avant de confirmer l'état final.
+
+La persistance v3 utilise un index atomique et des sidecars immuables adressés par leur
+SHA-256. Une sauvegarde ne crée que les générations modifiées ; l'index est remplacé
+après leur écriture, puis les anciennes générations sont nettoyées. Une interruption
+avant le remplacement de l'index recharge donc toujours le dernier ensemble cohérent.
+Les snapshots historiques v1 et v2 restent migrables.
+
+Le streaming Qwen demande les statistiques de tokens lorsqu'un endpoint compatible les
+fournit. Les endpoints qui refusent l'extension `stream_options` sont retentés sans elle ;
+la réponse conserve alors des compteurs nuls plutôt que d'interrompre l'exécution. Ce
+contrat s'applique aussi au repli textuel lorsque les tool calls natifs sont indisponibles.
 
 Pour une exécution principale en `failed`, `/resume` rouvre uniquement l'étape en échec, conserve les étapes déjà validées et incrémente `manual_retry_count`. Le budget d'exécution persistant de cette étape (`iterations`, stagnation et rappels) est supprimé afin que la tentative reparte réellement de zéro ; les compteurs des autres étapes restent intacts. Une exécution déléguée en échec ne se reprend pas directement : reprenez son parent de premier niveau. Ce mécanisme ne contourne jamais `pending_approval` ni `pending_scope_approval`.
 

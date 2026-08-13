@@ -13,6 +13,7 @@ import pytest
 import uvicorn
 
 from gptmoss.api.server import app, init_app
+from gptmoss.capabilities.filesystem import FilesystemCapability
 from gptmoss.core import ContextEngine, EventBus, ExecutionEngine, RuntimeKernel, StateEngine
 from gptmoss.memory import RAMMemoryProvider
 from gptmoss.planners import SimplePlanner
@@ -22,7 +23,7 @@ from tests.mock_llm import MockLLMProvider
 from tests.test_api import ASGIClient
 
 
-def _gui_app():
+def _gui_app(workspace=None):
     event_bus = EventBus()
     state_engine = StateEngine()
     llm = MockLLMProvider()
@@ -31,6 +32,10 @@ def _gui_app():
         event_bus, state_engine, ContextEngine(state_engine, RAMMemoryProvider()),
         llm, SimplePlanner(llm), SimplePolicyProvider(),
     )
+    if workspace is not None:
+        engine.register_capability(
+            "filesystem", FilesystemCapability(str(workspace), state_engine)
+        )
     kernel = RuntimeKernel(event_bus, state_engine, engine)
     init_app(kernel, engine, state_engine, event_bus)
     return app, state_engine
@@ -150,6 +155,42 @@ def test_live_gui_renders_planning_controls_and_task_title_in_edge():
             assert "Verifier le titre visible" in dumped
             if "data-layout-global-overflow" in dumped:
                 assert 'data-layout-global-overflow="false"' in dumped
+    finally:
+        server.should_exit = True
+        thread.join(timeout=5)
+
+
+def test_live_gui_escapes_project_markup_in_edge(tmp_path):
+    try:
+        edge = find_edge()
+    except FileNotFoundError:
+        pytest.skip("Microsoft Edge is required for the live DOM dump")
+
+    _gui_app(tmp_path)
+    port = _free_port()
+    server, thread = _serve(port)
+    base = f"http://127.0.0.1:{port}"
+    payload = (
+        '<img id="gptmoss-xss-probe" src="x" '
+        'onerror="document.body.dataset.gptmossXss=\'true\'">'
+    )
+    try:
+        created_project = httpx.post(f"{base}/projects", json={
+            "id": "xss-project",
+            "name": payload,
+        }, timeout=5)
+        assert created_project.status_code == 201
+        created_execution = httpx.post(f"{base}/executions", json={
+            "task": "Render the project name safely",
+            "project_id": "xss-project",
+            "planning_mode": "direct",
+        }, timeout=5)
+        assert created_execution.status_code == 201
+
+        dumped = _dump_dom(edge, f"{base}/", 1366, 768)
+        assert '<img id="gptmoss-xss-probe"' not in dumped
+        assert 'data-gptmoss-xss="true"' not in dumped
+        assert "&lt;img" in dumped
     finally:
         server.should_exit = True
         thread.join(timeout=5)

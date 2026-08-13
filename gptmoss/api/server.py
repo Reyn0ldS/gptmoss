@@ -1052,6 +1052,8 @@ async def pause_execution(execution_id: str):
     app_state.state_engine.transition_execution(
         state, "paused", reason="manual pause", actor="api"
     )
+    if app_state.execution_engine:
+        await app_state.execution_engine.cancel_active_execution(execution_id)
     await app_state.event_bus.publish(Event(
         type="ExecutionPaused",
         payload={"execution_id": execution_id}
@@ -1125,7 +1127,7 @@ async def resume_execution(execution_id: str):
         task = task[6:]
         
     # Rerun loop
-    asyncio.create_task(app_state.execution_engine.execute_task(execution_id, task))
+    app_state.execution_engine.start_execution(execution_id, task)
     return {"status": "running"}
 
 @app.post("/executions/{execution_id}/cancel")
@@ -1163,6 +1165,10 @@ async def cancel_execution(execution_id: str):
                 and child_id not in to_cancel
             ):
                 to_cancel.append(child_id)
+    await asyncio.gather(*(
+        app_state.execution_engine.cancel_active_execution(exec_id)
+        for exec_id in cancelled
+    ))
     app_state.state_engine.save_to_disk()
     return {"status": "cancelled", "execution_ids": cancelled}
 

@@ -127,10 +127,18 @@ humaines, `ContextWindowPolicy` et `ToolCallParser` pour Qwen, puis `ShellSafety
 compatible ; la coordination du plan, l'exécution d'une étape et le traitement d'un lot
 d'outils sont désormais des méthodes séparées et testées.
 
+`ExecutionEngine.start_execution` possède un registre indexé par identifiant d'exécution.
+Les reprises API, approbations, sous-agents et jobs du `Scheduler` convergent vers ce
+point unique. `cancel_active_execution` retire aussi les jobs de reprise fournisseur et
+annule la coroutine possédée ; son `finally` annule les tâches d'étapes encore actives.
+L'arrêt du runtime vide ce registre avant de fermer le transport du fournisseur.
+
 `ExecutionState.status` est validé par `ExecutionStatus`. Les mutations du runtime passent
 par `StateEngine.transition_execution`, qui contrôle la transition et conserve son motif,
-son acteur, sa corrélation et son horodatage. La persistance publie atomiquement les
-snapshots ; l'arrêt FastAPI effectue un flush final puis retire son abonnement au bus.
+son acteur, sa corrélation et son horodatage. La persistance v3 référence des sidecars
+immuables par identité et SHA-256 : seules les générations modifiées sont produites et un
+index atomique constitue le point de commit. L'arrêt FastAPI effectue un flush final puis
+retire son abonnement au bus.
 
 ## Dette et limites explicites
 

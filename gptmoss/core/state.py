@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -17,7 +18,7 @@ from gptmoss.core.durable_io import unlink_resilient, write_text_atomic
 
 
 logger = logging.getLogger("gptmoss.state")
-STATE_SCHEMA_VERSION = 2
+STATE_SCHEMA_VERSION = 3
 DEFAULT_MAX_TRANSITIONS_PER_EXECUTION = 2_000
 TRANSIENT_FLUSH_EVENT_TYPES = frozenset({"LLMDelta"})
 _SAFE_STATE_ID = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
@@ -131,6 +132,8 @@ class StateEngine:
         self.corrupt_backup_path: Optional[str] = None
         self._persisted_execution_ids: set[str] = set()
         self._persisted_conversation_ids: set[str] = set()
+        self._execution_record_refs: Dict[str, Dict[str, str]] = {}
+        self._conversation_record_refs: Dict[str, Dict[str, str]] = {}
         self._load_from_disk()
 
     @staticmethod
@@ -157,6 +160,10 @@ class StateEngine:
                 version = 2
                 migrated["schema_version"] = version
                 continue
+            if version == 2:
+                version = 3
+                migrated["schema_version"] = version
+                continue
             raise ValueError(f"No state migration is available from schema {version}.")
         return migrated
 
@@ -171,11 +178,33 @@ class StateEngine:
 
     @staticmethod
     def _sidecar_filename(key: str) -> str:
+        """Return the legacy schema-v2 sidecar filename."""
         text = str(key or "").strip()
         if _SAFE_STATE_ID.fullmatch(text):
             return f"{text}.json"
         safe = re.sub(r"[^A-Za-z0-9._-]", "_", text)[:128]
         return f"{safe or 'unnamed'}.json"
+
+    @staticmethod
+    def _generation_filename(key: str, digest: str) -> str:
+        text = str(key or "").strip()
+        safe = re.sub(r"[^A-Za-z0-9._-]", "_", text)[:72] or "unnamed"
+        key_digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+        return f"{safe}--{key_digest}--{digest[:20]}.json"
+
+    @staticmethod
+    def _record_payload(key: str, value: Any) -> tuple[str, str]:
+        payload = value.model_dump() if hasattr(value, "model_dump") else dict(value)
+        canonical = json.dumps(
+            payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        )
+        digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+        envelope = json.dumps({
+            "record_id": str(key),
+            "sha256": digest,
+            "payload": payload,
+        }, indent=2, ensure_ascii=False)
+        return digest, envelope
 
     @staticmethod
     def _has_embedded_records(records: Any) -> bool:
@@ -205,6 +234,42 @@ class StateEngine:
                 loaded[key] = payload
         return loaded
 
+    def _load_generation_records(
+        self, directory: Optional[Path], references: Any
+    ) -> Dict[str, Dict[str, Any]]:
+        loaded: Dict[str, Dict[str, Any]] = {}
+        if directory is None or not isinstance(references, dict):
+            return loaded
+        for key, reference in references.items():
+            if not isinstance(reference, dict):
+                logger.warning("Invalid state record reference for %s", key)
+                continue
+            filename = str(reference.get("file") or "")
+            expected_digest = str(reference.get("sha256") or "")
+            if not filename or Path(filename).name != filename or not filename.endswith(".json"):
+                logger.warning("Unsafe state record reference for %s: %s", key, filename)
+                continue
+            path = directory / filename
+            try:
+                envelope = json.loads(path.read_text(encoding="utf-8"))
+                payload = envelope["payload"]
+                actual_id = str(envelope["record_id"])
+                canonical = json.dumps(
+                    payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+                )
+                actual_digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+                if actual_id != str(key):
+                    raise ValueError(f"record identity mismatch: {actual_id}")
+                if actual_digest != expected_digest or envelope.get("sha256") != expected_digest:
+                    raise ValueError("record digest mismatch")
+                if not isinstance(payload, dict):
+                    raise ValueError("record payload is not an object")
+            except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+                logger.error("Failed to load state generation %s: %s", path, error)
+                continue
+            loaded[str(key)] = payload
+        return loaded
+
     def _quarantine_invalid_snapshot(self) -> None:
         if not self.persist_path or not os.path.exists(self.persist_path):
             return
@@ -225,7 +290,19 @@ class StateEngine:
 
             conversations = data.get("conversations") or {}
             executions = data.get("executions") or {}
-            if int(data.get("schema_version", 0)) >= 2 and not (
+            schema_version = int(data.get("schema_version", 0))
+            if schema_version >= 3 and (
+                "execution_records" in data or "conversation_records" in data
+            ):
+                self._execution_record_refs = dict(data.get("execution_records") or {})
+                self._conversation_record_refs = dict(data.get("conversation_records") or {})
+                executions = self._load_generation_records(
+                    self._partition_dir("state_executions"), self._execution_record_refs
+                )
+                conversations = self._load_generation_records(
+                    self._partition_dir("state_conversations"), self._conversation_record_refs
+                )
+            elif schema_version >= 2 and not (
                 self._has_embedded_records(executions) or self._has_embedded_records(conversations)
             ):
                 execution_ids = [
@@ -270,11 +347,17 @@ class StateEngine:
             logger.error(f"Failed to load state from disk: {e}")
             self._quarantine_invalid_snapshot()
 
-    def _index_snapshot(self) -> Dict[str, Any]:
+    def _index_snapshot(
+        self,
+        execution_records: Optional[Dict[str, Dict[str, str]]] = None,
+        conversation_records: Optional[Dict[str, Dict[str, str]]] = None,
+    ) -> Dict[str, Any]:
         return {
             "schema_version": STATE_SCHEMA_VERSION,
             "execution_ids": sorted(self.executions),
             "conversation_ids": sorted(self.conversations),
+            "execution_records": execution_records if execution_records is not None else self._execution_record_refs,
+            "conversation_records": conversation_records if conversation_records is not None else self._conversation_record_refs,
             "agents": {k: v.model_dump() for k, v in self.agents.items()},
             "workspaces": {k: v.model_dump() for k, v in self.workspaces.items()},
             "knowledges": {k: v.model_dump() for k, v in self.knowledges.items()},
@@ -288,18 +371,31 @@ class StateEngine:
         snapshot["executions"] = {k: v.model_dump() for k, v in self.executions.items()}
         return snapshot
 
-    def _write_sidecars(
-        self, directory: Path, records: Dict[str, Any], previous_ids: set[str]
-    ) -> None:
+    def _write_generations(
+        self, directory: Path, records: Dict[str, Any]
+    ) -> Dict[str, Dict[str, str]]:
         directory.mkdir(parents=True, exist_ok=True)
-        current_names = set()
+        references: Dict[str, Dict[str, str]] = {}
         for key, value in records.items():
-            filename = self._sidecar_filename(key)
-            current_names.add(filename)
-            payload = value.model_dump() if hasattr(value, "model_dump") else dict(value)
-            write_text_atomic(directory / filename, json.dumps(payload, indent=2, ensure_ascii=False))
-        for stale in previous_ids - set(records):
-            unlink_resilient(directory / self._sidecar_filename(stale))
+            digest, envelope = self._record_payload(key, value)
+            filename = self._generation_filename(key, digest)
+            target = directory / filename
+            if not target.is_file():
+                write_text_atomic(target, envelope)
+            references[str(key)] = {"file": filename, "sha256": digest}
+        return references
+
+    @staticmethod
+    def _cleanup_generations(directory: Path, references: Dict[str, Dict[str, str]]) -> None:
+        retained = {
+            str(reference.get("file")) for reference in references.values()
+            if isinstance(reference, dict) and reference.get("file")
+        }
+        if not directory.is_dir():
+            return
+        for candidate in directory.glob("*.json"):
+            if candidate.name not in retained:
+                unlink_resilient(candidate)
 
     def save_to_disk(self) -> bool:
         """Atomically persist sidecars first, then the compact index."""
@@ -310,18 +406,26 @@ class StateEngine:
             try:
                 executions_dir = self._partition_dir("state_executions")
                 conversations_dir = self._partition_dir("state_conversations")
+                execution_records: Dict[str, Dict[str, str]] = {}
+                conversation_records: Dict[str, Dict[str, str]] = {}
                 if executions_dir is not None:
-                    self._write_sidecars(
-                        executions_dir, self.executions, self._persisted_execution_ids
-                    )
+                    execution_records = self._write_generations(executions_dir, self.executions)
                 if conversations_dir is not None:
-                    self._write_sidecars(
-                        conversations_dir, self.conversations, self._persisted_conversation_ids
+                    conversation_records = self._write_generations(
+                        conversations_dir, self.conversations
                     )
-                content = json.dumps(self._index_snapshot(), indent=2, ensure_ascii=False)
+                content = json.dumps(self._index_snapshot(
+                    execution_records, conversation_records
+                ), indent=2, ensure_ascii=False)
                 write_text_atomic(self.persist_path, content)
+                self._execution_record_refs = execution_records
+                self._conversation_record_refs = conversation_records
                 self._persisted_execution_ids = set(self.executions)
                 self._persisted_conversation_ids = set(self.conversations)
+                if executions_dir is not None:
+                    self._cleanup_generations(executions_dir, execution_records)
+                if conversations_dir is not None:
+                    self._cleanup_generations(conversations_dir, conversation_records)
                 return True
             except Exception as e:
                 logger.error(f"Failed to save state to disk: {e}")

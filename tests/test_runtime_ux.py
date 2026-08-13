@@ -134,12 +134,19 @@ async def test_qwen_stream_assembles_content_and_forwards_deltas():
             self.delta = _Delta(content)
 
     class _Chunk:
-        def __init__(self, content):
-            self.choices = [_Choice(content)]
+        def __init__(self, content=None, usage=None):
+            self.choices = [_Choice(content)] if content is not None else []
+            self.usage = usage
 
     class _Stream:
         def __init__(self):
-            self._items = [_Chunk("Hel"), _Chunk("lo")]
+            self._items = [
+                _Chunk("Hel"),
+                _Chunk("lo"),
+                _Chunk(usage=SimpleNamespace(
+                    prompt_tokens=4, completion_tokens=2, total_tokens=6
+                )),
+            ]
 
         def __aiter__(self):
             return self
@@ -161,6 +168,119 @@ async def test_qwen_stream_assembles_content_and_forwards_deltas():
     )
     assert seen == ["Hel", "lo"]
     assert result["content"] == "Hello"
+    assert result["usage"] == {
+        "prompt_tokens": 4,
+        "completion_tokens": 2,
+        "total_tokens": 6,
+    }
+
+
+@pytest.mark.asyncio
+async def test_qwen_prompt_tool_fallback_stream_normalizes_dict_usage():
+    provider = QwenProvider(api_key="mock", base_url="http://127.0.0.1:9/v1")
+    provider._native_tools_supported = False
+
+    class _Delta:
+        def __init__(self, content=None):
+            self.content = content
+            self.tool_calls = None
+
+    class _Chunk:
+        def __init__(self, content=None, usage=None):
+            self.choices = (
+                [SimpleNamespace(delta=_Delta(content))] if content is not None else []
+            )
+            self.usage = usage
+
+    class _Stream:
+        def __init__(self):
+            self._items = [
+                _Chunk('{"tool_call":{"name":"read_file","arguments":'),
+                _Chunk('{"path":"README.md"}}}'),
+                _Chunk(usage=SimpleNamespace(
+                    prompt_tokens=20, completion_tokens=8, total_tokens=28
+                )),
+            ]
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            if not self._items:
+                raise StopAsyncIteration
+            return self._items.pop(0)
+
+    async def fake_create(**kwargs):
+        assert kwargs.get("stream") is True
+        return _Stream()
+
+    provider.client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=fake_create))
+    )
+    seen = []
+    result = await provider.completion(
+        messages=[{"role": "user", "content": "read the file"}],
+        tools=[{
+            "type": "function",
+            "function": {
+                "name": "read_file",
+                "description": "Read a file",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }],
+        on_text_delta=seen.append,
+    )
+
+    assert seen
+    assert result["tool_calls"][0]["function"] == {
+        "name": "read_file", "arguments": {"path": "README.md"}
+    }
+    assert result["usage"]["total_tokens"] == 28
+
+
+@pytest.mark.asyncio
+async def test_qwen_stream_retries_without_optional_usage_extension():
+    provider = QwenProvider(api_key="mock", base_url="http://127.0.0.1:9/v1")
+    calls = []
+
+    class _Stream:
+        def __init__(self):
+            self.done = False
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            if self.done:
+                raise StopAsyncIteration
+            self.done = True
+            return SimpleNamespace(
+                choices=[SimpleNamespace(delta=SimpleNamespace(
+                    content="ok", tool_calls=None
+                ))],
+                usage=None,
+            )
+
+    async def fake_create(**kwargs):
+        calls.append(kwargs)
+        if "stream_options" in kwargs:
+            raise RuntimeError("stream_options is not supported")
+        return _Stream()
+
+    provider.client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=fake_create))
+    )
+    result = await provider.completion(
+        messages=[{"role": "user", "content": "hi"}], on_text_delta=lambda _: None
+    )
+
+    assert len(calls) == 2
+    assert result["content"] == "ok"
+    assert result["usage"] == {
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "total_tokens": 0,
+    }
 
 
 def test_state_schema_v2_writes_sidecars_and_reloads(tmp_path):
@@ -175,11 +295,13 @@ def test_state_schema_v2_writes_sidecars_and_reloads(tmp_path):
     assert index["schema_version"] == STATE_SCHEMA_VERSION
     assert "exec-a" in index["execution_ids"]
     assert "executions" not in index
-    sidecar = tmp_path / "state_executions" / "exec-a.json"
-    conversation = tmp_path / "state_conversations" / "exec-a.json"
+    sidecar = tmp_path / "state_executions" / index["execution_records"]["exec-a"]["file"]
+    conversation = (
+        tmp_path / "state_conversations" / index["conversation_records"]["exec-a"]["file"]
+    )
     assert sidecar.is_file()
     assert conversation.is_file()
-    assert json.loads(sidecar.read_text(encoding="utf-8"))["results"]["marker"] == "kept"
+    assert json.loads(sidecar.read_text(encoding="utf-8"))["payload"]["results"]["marker"] == "kept"
 
     restored = StateEngine(str(path))
     assert restored.get_execution("exec-a").results["marker"] == "kept"
@@ -201,9 +323,11 @@ async def test_flush_loop_ignores_llm_delta_events(tmp_path):
     state.get_execution("delta").results["before"] = True
     await bus.publish(Event(type="LLMDelta", payload={"delta": "x"}))
     await asyncio.sleep(0.05)
+    index = json.loads(path.read_text(encoding="utf-8"))
+    delta_sidecar = tmp_path / "state_executions" / index["execution_records"]["delta"]["file"]
     assert "before" not in json.loads(
-        (tmp_path / "state_executions" / "delta.json").read_text(encoding="utf-8")
-    ).get("results", {})
+        delta_sidecar.read_text(encoding="utf-8")
+    )["payload"].get("results", {})
     await bus.publish(Event(type="ExecutionChanged"))
     await state.stop_db_flush_loop()
     assert StateEngine(str(path)).get_execution("delta").results["before"] is True

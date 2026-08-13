@@ -67,6 +67,150 @@ async def test_execution_control_api_preserves_transition_chronology(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_cancel_interrupts_inflight_execution_and_clears_owned_task(tmp_path):
+    event_bus = EventBus()
+    state = StateEngine(persist_path=str(tmp_path / "state.json"))
+
+    class BlockingLLM(MockLLMProvider):
+        def __init__(self):
+            super().__init__()
+            self.started = asyncio.Event()
+            self.cancelled = asyncio.Event()
+
+        async def completion(self, *args, **kwargs):
+            self.started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                self.cancelled.set()
+                raise
+
+    llm = BlockingLLM()
+    engine = ExecutionEngine(
+        event_bus, state, ContextEngine(state, RAMMemoryProvider()), llm,
+        SimplePlanner(llm), SimplePolicyProvider(),
+    )
+    engine.register_capability("filesystem", FilesystemCapability(str(tmp_path), state))
+    kernel = RuntimeKernel(event_bus, state, engine)
+    init_app(kernel, engine, state, event_bus)
+    execution = state.get_execution("blocked")
+    execution.status = "running"
+    execution.variables["task"] = "Wait for cancellation"
+    execution.current_plan = {
+        "steps": [{
+            "id": 0,
+            "role": "coordinator",
+            "specialist": "Blocking specialist",
+            "description": "Wait for the provider",
+            "dependencies": [],
+            "status": "pending",
+            "acceptance_criteria": ["Provider returned."],
+        }],
+    }
+    engine.start_execution("blocked", "Wait for cancellation")
+    await asyncio.wait_for(llm.started.wait(), timeout=2)
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.post("/executions/blocked/cancel")
+
+    assert response.status_code == 200
+    await asyncio.wait_for(llm.cancelled.wait(), timeout=2)
+    assert state.get_execution("blocked").status == "cancelled"
+    assert "blocked" not in engine._active_execution_tasks
+
+
+@pytest.mark.asyncio
+async def test_pause_interrupts_inflight_execution_without_cancelling_state(tmp_path):
+    event_bus = EventBus()
+    state = StateEngine(persist_path=str(tmp_path / "state.json"))
+
+    class BlockingLLM(MockLLMProvider):
+        def __init__(self):
+            super().__init__()
+            self.started = asyncio.Event()
+            self.cancelled = asyncio.Event()
+
+        async def completion(self, *args, **kwargs):
+            self.started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                self.cancelled.set()
+                raise
+
+    llm = BlockingLLM()
+    engine = ExecutionEngine(
+        event_bus, state, ContextEngine(state, RAMMemoryProvider()), llm,
+        SimplePlanner(llm), SimplePolicyProvider(),
+    )
+    engine.register_capability("filesystem", FilesystemCapability(str(tmp_path), state))
+    init_app(RuntimeKernel(event_bus, state, engine), engine, state, event_bus)
+    execution = state.get_execution("paused-blocked")
+    execution.status = "running"
+    execution.variables["task"] = "Pause me"
+    execution.current_plan = {
+        "steps": [{
+            "id": 0, "role": "coordinator", "specialist": "Blocking specialist",
+            "description": "Wait", "dependencies": [], "status": "pending",
+            "acceptance_criteria": ["Wait completed."],
+        }],
+    }
+    engine.start_execution("paused-blocked", "Pause me")
+    await asyncio.wait_for(llm.started.wait(), timeout=2)
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.post("/executions/paused-blocked/pause")
+
+    assert response.status_code == 200
+    await asyncio.wait_for(llm.cancelled.wait(), timeout=2)
+    assert state.get_execution("paused-blocked").status == "paused"
+    assert execution.current_plan["steps"][0]["status"] == "pending"
+    assert "paused-blocked" not in engine._active_execution_tasks
+
+
+@pytest.mark.asyncio
+async def test_scheduler_remains_available_while_execution_task_runs(tmp_path):
+    _, _, _, engine = _runtime(tmp_path)
+    started = asyncio.Event()
+    release = asyncio.Event()
+    timer_fired = asyncio.Event()
+
+    async def blocked_execute(execution_id, task):
+        started.set()
+        await release.wait()
+
+    engine.execute_task = blocked_execute
+    engine.schedule_execution("scheduled-running", "Long task")
+    await asyncio.wait_for(started.wait(), timeout=2)
+    engine.scheduler.schedule(timer_fired.set, delay=0, job_id="independent-timer")
+
+    await asyncio.wait_for(timer_fired.wait(), timeout=2)
+    release.set()
+    await engine.stop_runtime_services()
+
+
+@pytest.mark.asyncio
+async def test_stop_runtime_services_interrupts_all_owned_executions(tmp_path):
+    _, _, state, engine = _runtime(tmp_path)
+    started = asyncio.Event()
+
+    async def blocked_execute(execution_id, task):
+        started.set()
+        await asyncio.Event().wait()
+
+    engine.execute_task = blocked_execute
+    task = engine.start_execution("shutdown", "Stop me")
+    await asyncio.wait_for(started.wait(), timeout=2)
+
+    await engine.stop_runtime_services()
+
+    assert task.cancelled()
+    assert not engine._active_execution_tasks
+
+
+@pytest.mark.asyncio
 async def test_approval_endpoints_record_ordered_scope_decisions(tmp_path):
     _, events, state_engine, engine = _runtime(tmp_path)
     tool = state_engine.get_execution("tool-approval")

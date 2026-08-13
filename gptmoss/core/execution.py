@@ -148,18 +148,19 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
         self.autonomous_specialization = bool(autonomous_specialization)
         self._capabilities: Dict[str, Any] = {}  # capability_name -> instance
         self._execution_locks: Dict[str, asyncio.Lock] = {}
+        self._active_execution_tasks: Dict[str, asyncio.Task] = {}
         self._path_locks: Dict[str, asyncio.Lock] = {}
         self._progress_file_digest_cache: Dict[str, tuple] = {}
         self.scheduler = scheduler or Scheduler()
         self.provider_recovery = ProviderRecoveryCoordinator(
             event_bus, state_engine, llm_provider,
-            lambda execution_id, task: self.execute_task(execution_id, task),
+            self.start_execution,
             self.max_step_iterations, self.scheduler,
         )
         self.delivery_coordinator = DeliveryCoordinator(state_engine, self.get_capability)
         self.approval_coordinator = ApprovalCoordinator(
             state_engine, event_bus,
-            lambda execution_id, task: self.execute_task(execution_id, task),
+            self.start_execution,
         )
 
     def register_capability(self, capability_name: str, instance: Any):
@@ -192,6 +193,48 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
 
     def _schedule_provider_resume(self, execution_id: str, delay_seconds: int = 30) -> None:
         self.provider_recovery.schedule(execution_id, delay_seconds)
+
+    def start_execution(self, execution_id: str, task: str) -> asyncio.Task:
+        """Start or reuse the one owned asyncio task for an execution."""
+        existing = self._active_execution_tasks.get(execution_id)
+        if existing is not None and not existing.done():
+            return existing
+        running = asyncio.create_task(
+            self.execute_task(execution_id, task),
+            name=f"gptmoss-execution:{execution_id}",
+        )
+        self._active_execution_tasks[execution_id] = running
+
+        def discard(completed: asyncio.Task) -> None:
+            if self._active_execution_tasks.get(execution_id) is completed:
+                self._active_execution_tasks.pop(execution_id, None)
+
+        running.add_done_callback(discard)
+        return running
+
+    async def cancel_active_execution(self, execution_id: str) -> bool:
+        """Cancel scheduled retries and interrupt an in-flight execution task."""
+        cancelled = self.scheduler.cancel(f"execution:{execution_id}")
+        cancelled = self.provider_recovery.cancel(execution_id) or cancelled
+        running = self._active_execution_tasks.get(execution_id)
+        if running is None or running.done():
+            return cancelled
+        if running is asyncio.current_task():
+            return cancelled
+        running.cancel()
+        await asyncio.gather(running, return_exceptions=True)
+        if self._active_execution_tasks.get(execution_id) is running:
+            self._active_execution_tasks.pop(execution_id, None)
+        return True
+
+    async def stop_active_executions(self) -> None:
+        """Interrupt all owned execution work before transports are closed."""
+        running = [task for task in self._active_execution_tasks.values() if not task.done()]
+        for task in running:
+            task.cancel()
+        if running:
+            await asyncio.gather(*running, return_exceptions=True)
+        self._active_execution_tasks.clear()
 
     def resume_waiting_provider_executions(self) -> None:
         """Restore automatic retries after a process restart."""
@@ -232,16 +275,26 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
                            run_at: Optional[float] = None) -> str:
         """Schedule one execution through the shared runtime timing service."""
         job_id = f"execution:{execution_id}"
+        self.scheduler.start()
+        due = float(run_at) if run_at is not None else time.time() + max(0.0, float(delay))
+        if due <= time.time():
+            self.start_execution(execution_id, task)
+            return job_id
         if self.scheduler.has(job_id):
             return job_id
+
+        def launch() -> None:
+            # The timing service must remain free to deliver provider backoffs
+            # while the owned execution task is running.
+            self.start_execution(execution_id, task)
+
         self.scheduler.schedule(
-            lambda: self.execute_task(execution_id, task),
+            launch,
             delay=delay,
-            run_at=run_at,
+            run_at=due,
             job_id=job_id,
             metadata={"kind": "execution", "execution_id": execution_id},
         )
-        self.scheduler.start()
         return job_id
 
     async def stop_provider_resume_tasks(self) -> None:
@@ -250,6 +303,7 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
     async def stop_runtime_services(self) -> None:
         await self.provider_recovery.stop()
         await self.scheduler.stop(cancel_pending=True)
+        await self.stop_active_executions()
         close_provider = getattr(self.llm_provider, "close", None)
         if close_provider:
             result = close_provider()
@@ -1125,9 +1179,16 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
                 execution_id, state, steps, task, step
             )
 
-        await self._coordinate_plan_execution(
-            execution_id, state, steps, task, run_step, running_tasks
-        )
+        try:
+            await self._coordinate_plan_execution(
+                execution_id, state, steps, task, run_step, running_tasks
+            )
+        finally:
+            unfinished = [item for item in running_tasks.values() if not item.done()]
+            for item in unfinished:
+                item.cancel()
+            if unfinished:
+                await asyncio.gather(*unfinished, return_exceptions=True)
 
     async def _coordinate_plan_execution(
         self, execution_id: str, state, steps, task: str, run_step, running_tasks
@@ -1479,7 +1540,7 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
                     ))
 
                 if sub_exec.status in ("pending", "running"):
-                    asyncio.create_task(self.execute_task(sub_id, sub_exec.variables["task"]))
+                    self.start_execution(sub_id, sub_exec.variables["task"])
 
                 # Wait for sub-agent completion
                 while True:
@@ -1514,7 +1575,7 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
                         self.state_engine.transition_execution(
                             sub_state, "running", reason="parent resumed", actor="runtime"
                         )
-                        asyncio.create_task(self.execute_task(sub_id, sub_exec.variables["task"]))
+                        self.start_execution(sub_id, sub_exec.variables["task"])
 
                     if sub_state.status == "paused" and sub_state.variables.get("pending_approval"):
                         pending_child = dict(sub_state.variables["pending_approval"])

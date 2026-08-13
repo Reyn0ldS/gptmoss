@@ -703,6 +703,11 @@ def test_gui_uses_sanitized_markdown_renderer():
     assert "function renderSafeMarkdown" in gui
     assert 'contentHtml = renderSafeMarkdown(msg.content || "");' in gui
     assert 'contentHtml = marked.parse(msg.content || "");' not in gui
+    assert "thinkingLabel.textContent = thinkingText;" in gui
+    assert "${thinkingText}</span>" not in gui
+    assert "escapeHTML(String(msg.name ||" in gui
+    assert 'escapeHTML(String(proj.name || ""))' in gui
+    assert '["assistant", "user", "tool", "system"].includes(msg.role)' in gui
     assert "--bg-card:" in gui
     assert "--text-normal:" in gui
 

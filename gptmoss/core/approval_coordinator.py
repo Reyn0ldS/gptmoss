@@ -1,6 +1,5 @@
 """Human scope and capability approval lifecycle coordination."""
 
-import asyncio
 import time
 from typing import Awaitable, Callable, Optional
 
@@ -17,7 +16,8 @@ class ApprovalCoordinator:
         self.execute = execute
 
     def _resume(self, execution_id: str, task: str) -> None:
-        asyncio.create_task(self.execute(execution_id, task))
+        # ExecutionEngine.start_execution owns and de-duplicates this task.
+        self.execute(execution_id, task)
 
     async def resolve_scope(self, execution_id: str, decision: str,
                             reason: Optional[str] = None) -> None:

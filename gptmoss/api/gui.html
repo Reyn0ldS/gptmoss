@@ -1776,7 +1776,7 @@
                     
                     header.innerHTML = `
                         <div style="font-weight: 600; font-size: 11px; color: var(--accent-secondary); text-transform: uppercase; letter-spacing: 0.5px; display: flex; align-items: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 170px;">
-                            ${projToggleHtml} 📁 ${proj.name}
+                            ${projToggleHtml} 📁 ${escapeHTML(String(proj.name || ""))}
                         </div>
                         <span style="font-size: 10px; background: rgba(255,255,255,0.05); color: var(--text-muted); padding: 1px 6px; border-radius: 10px; font-weight: 500;">
                             ${count}
@@ -1993,9 +1993,11 @@
             const fragment = document.createDocumentFragment();
             (messages || []).forEach(msg => {
                 const msgDiv = document.createElement("div");
-                msgDiv.className = `message ${msg.role}`;
+                const messageRole = ["assistant", "user", "tool", "system"].includes(msg.role)
+                    ? msg.role : "system";
+                msgDiv.className = `message ${messageRole}`;
                 let contentHtml = "";
-                if (msg.role === "tool") {
+                if (messageRole === "tool") {
                     const escaped = (msg.content || "").replace(/[&<>"']/g, m => {
                         return {'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;'}[m];
                     });
@@ -2014,9 +2016,11 @@
                         `;
                     });
                 }
-                let roleDisplayName = msg.role;
-                if (msg.role === "assistant") {
-                    let roleName = msg.sender_role || exec.variables?.role_name || "Coordinateur";
+                let roleDisplayName = escapeHTML(String(messageRole));
+                if (messageRole === "assistant") {
+                    let roleName = String(
+                        msg.sender_role || exec.variables?.role_name || "Coordinateur"
+                    );
                     let icon = "🤖";
                     let color = "var(--accent-primary)";
                     const roleLower = roleName.toLowerCase();
@@ -2043,9 +2047,9 @@
                         color = "var(--accent-primary)";
                     }
                     roleDisplayName = `<span style="display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 9999px; background-color: ${color}20; color: ${color}; border: 1px solid ${color}40; font-size: 11px;">${icon} ${escapeHTML(String(roleName))}</span>`;
-                } else if (msg.role === "tool") {
-                    roleDisplayName = `<span style="display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 9999px; background-color: rgba(255,255,255,0.05); color: #d1d5db; border: 1px solid rgba(255,255,255,0.15); font-family: monospace; font-size: 11px;">📟 OUTIL : ${msg.name || 'exécuté'}</span>`;
-                } else if (msg.role === "user") {
+                } else if (messageRole === "tool") {
+                    roleDisplayName = `<span style="display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 9999px; background-color: rgba(255,255,255,0.05); color: #d1d5db; border: 1px solid rgba(255,255,255,0.15); font-family: monospace; font-size: 11px;">📟 OUTIL : ${escapeHTML(String(msg.name || 'exécuté'))}</span>`;
+                } else if (messageRole === "user") {
                     roleDisplayName = `<span style="display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 9999px; background-color: rgba(255,255,255,0.03); color: #e5e7eb; border: 1px solid rgba(255,255,255,0.1); font-size: 11px;">👤 UTILISATEUR</span>`;
                 }
                 let timeStr = "";
@@ -2055,7 +2059,7 @@
                 }
                 msgDiv.innerHTML = `
                     <div class="message-header">
-                        <span class="message-role ${msg.role}">${roleDisplayName}</span>
+                        <span class="message-role ${messageRole}">${roleDisplayName}</span>
                         ${timeStr ? `<span class="message-time" style="font-size: 10.5px; color: var(--text-muted); opacity: 0.7; font-weight: 400; font-family: var(--font-family);">${timeStr}</span>` : ""}
                     </div>
                     <div class="message-content">${contentHtml}</div>
@@ -2080,8 +2084,12 @@
                         <div class="thinking-dot"></div>
                         <div class="thinking-dot"></div>
                     </div>
-                    <span style="font-size: 13px; color: var(--text-muted);">${thinkingText}</span>
                 `;
+                const thinkingLabel = document.createElement("span");
+                thinkingLabel.style.fontSize = "13px";
+                thinkingLabel.style.color = "var(--text-muted)";
+                thinkingLabel.textContent = thinkingText;
+                thinkingDiv.appendChild(thinkingLabel);
                 chatContainer.appendChild(thinkingDiv);
             }
         }
