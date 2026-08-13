@@ -239,3 +239,114 @@ def test_artifact_store_accepts_valid_image_signatures(
 
     assert Path(metadata["path"]).read_bytes() == payload
     assert metadata["content_type"] == content_type
+
+
+def test_folder_corpus_preserves_relative_paths_deduplicates_and_resumes(tmp_path):
+    store = ArtifactStore(str(tmp_path))
+    corpus, resumed = store.create_corpus(
+        "Dossier métier", root_label="sources", resume=True
+    )
+    assert resumed is False
+    payload = b"# Decision\nUse the local evidence only."
+
+    first = store.save_bytes(
+        "decision.md",
+        payload,
+        "text/markdown",
+        corpus_id=corpus["id"],
+        relative_path="sources/governance/decision.md",
+        last_modified=123,
+    )
+    duplicate = store.save_bytes(
+        "decision.md",
+        payload,
+        "text/markdown",
+        corpus_id=corpus["id"],
+        relative_path="sources/governance/decision.md",
+        last_modified=123,
+    )
+
+    assert duplicate["id"] == first["id"]
+    assert duplicate["deduplicated"] is True
+    assert store.document(first["id"]).filename == "sources/governance/decision.md"
+    finalized = store.finalize_corpus(
+        corpus["id"],
+        present_paths=["sources/governance/decision.md"],
+        skipped=[{"relative_path": "sources/archive.zip", "reason": "unsupported"}],
+    )
+    assert finalized["state"] == "ready"
+    assert finalized["entries"]["sources/governance/decision.md"]["artifact_id"] == first["id"]
+
+    reopened, resumed = ArtifactStore(str(tmp_path)).create_corpus(
+        "Dossier métier", root_label="sources", resume=True
+    )
+    assert resumed is True
+    assert reopened["id"] == corpus["id"]
+    assert len(list(store.root.glob(f"*_{first['filename']}"))) == 1
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    ["../secret.md", "sources/../../secret.md", "C:/secret.md", "", "/", "/secret.md", "\\\\server\\share\\secret.md"],
+)
+def test_folder_corpus_rejects_unsafe_relative_paths(tmp_path, relative_path):
+    store = ArtifactStore(str(tmp_path))
+    corpus, _ = store.create_corpus("Safe", root_label="sources")
+    with pytest.raises(ValueError, match="relative path"):
+        store.save_bytes(
+            "secret.md", b"secret", "text/markdown",
+            corpus_id=corpus["id"], relative_path=relative_path,
+        )
+
+
+def test_folder_corpus_finalization_removes_stale_manifest_entries(tmp_path):
+    store = ArtifactStore(str(tmp_path))
+    corpus, _ = store.create_corpus("Refresh", root_label="sources")
+    artifacts = {}
+    for name in ("keep.md", "removed.md"):
+        artifacts[name] = store.save_bytes(
+            name, name.encode(), "text/markdown", corpus_id=corpus["id"],
+            relative_path=f"sources/{name}",
+        )
+    finalized = store.finalize_corpus(
+        corpus["id"], present_paths=["sources/keep.md"],
+        errors=[{"relative_path": "sources/broken.pdf", "error": "unreadable"}],
+    )
+    assert finalized["state"] == "partial"
+    assert set(finalized["entries"]) == {"sources/keep.md"}
+    assert "corpus_memberships" not in store.get(artifacts["removed.md"]["id"])
+
+
+def test_folder_corpus_replacement_cleans_previous_membership(tmp_path):
+    store = ArtifactStore(str(tmp_path))
+    corpus, _ = store.create_corpus("Refresh", root_label="sources")
+    old = store.save_bytes(
+        "scope.md", b"old", "text/markdown", corpus_id=corpus["id"],
+        relative_path="sources/scope.md",
+    )
+    new = store.save_bytes(
+        "scope.md", b"new", "text/markdown", corpus_id=corpus["id"],
+        relative_path="sources/scope.md",
+    )
+
+    assert old["id"] != new["id"]
+    assert "corpus_memberships" not in store.get(old["id"])
+    assert store.get_corpus(corpus["id"])["entries"]["sources/scope.md"]["artifact_id"] == new["id"]
+
+
+def test_folder_corpus_deletion_retains_evidence_and_removes_membership(tmp_path):
+    store = ArtifactStore(str(tmp_path))
+    corpus, _ = store.create_corpus("Library", root_label="sources")
+    artifact = store.save_bytes(
+        "evidence.md", b"retained evidence", "text/markdown",
+        corpus_id=corpus["id"], relative_path="sources/evidence.md",
+    )
+    store.finalize_corpus(corpus["id"], present_paths=["sources/evidence.md"])
+
+    deleted = store.delete_corpus(corpus["id"])
+
+    assert deleted["id"] == corpus["id"]
+    with pytest.raises(FileNotFoundError):
+        store.get_corpus(corpus["id"])
+    assert Path(store.get(artifact["id"])["path"]).is_file()
+    assert "corpus_memberships" not in store.get(artifact["id"])

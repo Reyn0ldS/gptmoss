@@ -95,6 +95,14 @@ Le constructeur télécharge CPython embeddable depuis Python.org, vérifie son 
 
 Un double-clic sur `prepare-offline-source.bat` conserve désormais la fenêtre ouverte et écrit le diagnostic complet dans `offline-preparation.log`. Le script ignore l'alias factice `python.exe` du Microsoft Store et exige un vrai Python 64 bits avec `pip` uniquement lorsqu'une reconstruction est nécessaire. Si le runtime livré dans l'archive est déjà complet, il le vérifie et indique qu'aucun téléchargement n'est requis. Utilisez `prepare-offline-source.bat --verify-only` pour effectuer seulement cette vérification. Ce constructeur ne télécharge pas le code source GPTMOSS : celui-ci provient du clone Git ou de l'archive ZIP GitHub.
 
+Pendant une reconstruction Windows, le constructeur choisit une racine de build courte
+et inscriptible sur le même volume que le projet (par exemple `D:\.gptmoss-build`), y
+place aussi le répertoire temporaire interne de `pip` et désactive la compilation des
+`.pyc`. Cela évite à la fois la copie récursive inter-disques et les chemins trop longs
+rencontrés dans les modules profonds d'`openai` lorsque le dépôt est lui-même dans une
+arborescence longue. Les répertoires temporaires sont supprimés automatiquement, y
+compris après un échec de wheel.
+
 Ne copiez pas un `venv` entre deux machines : les environnements virtuels ne sont pas portables.
 
 Avec une installation Python complète, une autre solution hors-ligne consiste à créer un dossier `wheelhouse` sur la machine connectée :
@@ -417,6 +425,11 @@ Routes principales :
 | `GET /artifacts/search` | Recherche localement dans les chunks avec filtres de source, format, titre et type. |
 | `GET /artifacts/{id}/preview` | Renvoie un aperçu texte ou image local. |
 | `DELETE /artifacts/{id}` | Supprime la source, sa normalisation et ses entrées d'index. |
+| `POST /corpora` | Crée ou reprend l'import durable d'un dossier source. |
+| `PUT /corpora/{id}/files` | Dépose un fichier binaire avec son chemin relatif et contrôle SHA-256. |
+| `POST /corpora/{id}/finalize` | Finalise le manifeste, les exclusions et les erreurs du corpus. |
+| `GET /corpora` / `GET /corpora/{id}` | Inventorie les corpus locaux et leur couverture. |
+| `DELETE /corpora/{id}` | Retire le manifeste du corpus sans effacer les preuves déjà utilisées. |
 | `GET` / `POST /memory` | Filtre par projet, portée et type, ou crée une proposition de mémoire. |
 | `PUT /memory/{id}` | Modifie valeur, provenance, validation et expiration. |
 | `GET /api/diagnostics` | Capacités, compatibilité vision, métriques, traces et erreurs. |
@@ -579,6 +592,17 @@ Les artefacts sont stockés sous `<workspace>/uploads/`. Un fichier reçoit un i
 Types acceptés : TXT/Markdown, JSON, CSV, HTML local, DOCX, PPTX, PDF texte, PNG, JPEG et WebP. La taille est strictement bornée par `max_upload_bytes` (100 Mio par défaut) et le texte normalisé par `max_attachment_text_chars`. Les noms sont assainis, les images sont contrôlées par signature et le contenu réel des documents est détecté. DOCX et PPTX sont analysés localement avec les modules ZIP/XML standard ; PDF est extrait localement par page avec `pypdf`, inclus dans le runtime offline. Les archives dangereuses sont refusées. L'OCR des PDF numérisés reste différé et les pages sans texte sont signalées explicitement.
 
 Les parseurs ne chargent aucune ressource distante d'un HTML ou d'un document Office. La recherche accent-insensible couvre tout le corpus et conserve fichier, titres, blocs et diapositives dans la provenance. Consultez le [guide complet du workflow documentaire local](docs/local-document-workflow.md) pour les quatre formats prioritaires, l'API de recherche, les références, les politiques qualité, le point d'entrée portable et le diagnostic.
+
+La GUI accepte aussi un **dossier source complet**. Le navigateur transmet récursivement
+les formats pris en charge sans modifier les originaux. GPTMOSS ignore les répertoires
+techniques (`.git`, `node_modules`, environnements virtuels et caches), conserve le chemin
+relatif de chaque preuve, calcule son SHA-256 et limite la concurrence à trois dépôts. Un
+nouvel essai sur le même dossier reprend son manifeste et ne retransmet pas les fichiers
+inchangés. Une tâche laissée vide déclenche une mission professionnelle générique :
+inventaire, classification, recherche transversale, matrice de couverture, rédaction,
+diagrammes et contrôle qualité fondés uniquement sur le corpus local. Un corpus partiel
+reste exploitable, mais ses erreurs sont conservées et doivent être signalées dans le
+livrable.
 
 ### Déposer un fichier puis le joindre à une tâche
 

@@ -1333,7 +1333,16 @@
                     </div>
                 </div>
                 <label class="form-label" for="task-input">Décrivez la tâche à accomplir</label>
-                <input type="file" id="task-attachments" multiple accept=".docx,.pptx,.txt,.md,.json,.csv,.html,.htm,.png,.jpg,.jpeg,.webp" onchange="resetTaskAttachmentUploads()" style="margin-bottom: 10px; width: 100%; color: var(--text-muted);"><textarea class="task-textarea" id="task-input" placeholder="Ex: Crée un fichier de salutations, ou analyse le dossier actuel..."></textarea>
+                <div style="display:grid;gap:8px;margin-bottom:10px;padding:10px;border:1px solid var(--border-color);border-radius:7px;background:rgba(15,23,42,.25)">
+                    <label class="form-label" for="task-attachments" style="margin:0">Fichiers sources</label>
+                    <input type="file" id="task-attachments" multiple accept=".docx,.pptx,.pdf,.txt,.md,.json,.csv,.html,.htm,.png,.jpg,.jpeg,.webp" onchange="resetTaskAttachmentUploads()" style="width:100%;color:var(--text-muted)">
+                    <label class="form-label" for="task-corpus-folder" style="margin:2px 0 0">Ou dossier source complet</label>
+                    <input type="file" id="task-corpus-folder" webkitdirectory directory multiple accept=".docx,.pptx,.pdf,.txt,.md,.json,.csv,.html,.htm,.png,.jpg,.jpeg,.webp" onchange="prepareCorpusFolderSelection()" style="width:100%;color:var(--text-muted)">
+                    <label class="form-label" for="task-corpus-name" style="margin:2px 0 0">Nom du corpus (modifiable pour distinguer deux dossiers homonymes)</label>
+                    <input id="task-corpus-name" maxlength="200" placeholder="Renseigné automatiquement depuis le dossier" class="approval-reason-input" style="margin:0;width:100%">
+                    <label style="font-size:11px;color:var(--text-muted)"><input type="checkbox" id="task-corpus-auto-workflow" checked> Inventorier, organiser et analyser automatiquement le corpus avant la rédaction professionnelle</label>
+                    <div id="task-corpus-progress" role="status" aria-live="polite" style="display:none;font-size:11px;color:var(--text-muted);white-space:pre-wrap"></div>
+                </div><textarea class="task-textarea" id="task-input" placeholder="Décrivez le livrable attendu. Avec un dossier sélectionné, le champ peut rester vide pour lancer l’analyse professionnelle générique."></textarea>
                 <button id="task-submit-btn" class="task-submit-btn" onclick="submitNewTask()">Démarrer l'exécution</button>
             </div>
         </div>
@@ -1428,7 +1437,10 @@
         let lastConversationSignature = "";
         let chatFollowLatest = true;
         const selectedLibraryArtifacts = new Set();
+        const selectedLibraryCorpora = new Set();
         const uploadedTaskAttachments = new Map();
+        const uploadedCorpusFiles = new Map();
+        let selectedCorpusId = null;
         let runtimeControl = null;
         let runtimeStatusTimer = null;
         let pendingServerRedirectPort = null;
@@ -2302,7 +2314,11 @@
         // Submit new task to FastAPI
         async function submitNewTask() {
             const input = document.getElementById("task-input");
-            const task = input.value.trim();
+            const folderFiles = Array.from(document.getElementById("task-corpus-folder")?.files || []);
+            const automaticCorpusWorkflow = document.getElementById("task-corpus-auto-workflow")?.checked !== false;
+            const defaultCorpusTask = "Analyse intégralement le dossier source sélectionné, organise les connaissances extraites, identifie les thèmes, exigences, décisions, risques, contradictions et illustrations utiles, puis produis un dossier professionnel structuré, cohérent et sourcé avec diagrammes pertinents et rapport de couverture du corpus.";
+            const hasCorpus = folderFiles.length > 0 || selectedLibraryCorpora.size > 0;
+            const task = input.value.trim() || (hasCorpus && automaticCorpusWorkflow ? defaultCorpusTask : "");
             if (!task) return;
             const submitButton = document.getElementById("task-submit-btn");
             if (submitButton?.disabled) return;
@@ -2316,19 +2332,26 @@
                     submitButton.textContent = "Création en cours…";
                 }
                 const attachment_ids = await uploadSelectedAttachments();
+                const corpus_ids = await uploadSelectedCorpusFolder();
                 const planningSelect = document.getElementById("task-planning-mode");
                 const planning_mode = planningSelect ? planningSelect.value : "auto";
                 const res = await requestApi("/executions", {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ task, project_id, attachment_ids, planning_mode })
+                    body: JSON.stringify({ task, project_id, attachment_ids, corpus_ids, planning_mode })
                 });
                 const data = await res.json();
                 const newId = data.execution_id;
                 selectedLibraryArtifacts.clear();
+                selectedLibraryCorpora.clear();
                 uploadedTaskAttachments.clear();
+                uploadedCorpusFiles.clear();
+                selectedCorpusId = null;
                 const attachmentInput = document.getElementById("task-attachments");
                 if (attachmentInput) attachmentInput.value = "";
+                const corpusInput = document.getElementById("task-corpus-folder");
+                if (corpusInput) corpusInput.value = "";
+                renderCorpusProgress("");
                 
                 // Instantly select new task
                 activeExecutionId = newId;
@@ -2768,6 +2791,108 @@
             uploadedTaskAttachments.clear();
         }
 
+        const corpusIgnoredDirectories = new Set([".git", ".svn", ".hg", "node_modules", "__pycache__", ".pytest_cache", ".venv", "venv"]);
+        const corpusExtensionTypes = {
+            "docx":"application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "pptx":"application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            "pdf":"application/pdf", "txt":"text/plain", "md":"text/markdown",
+            "json":"application/json", "csv":"text/csv", "html":"text/html", "htm":"text/html",
+            "png":"image/png", "jpg":"image/jpeg", "jpeg":"image/jpeg", "webp":"image/webp"
+        };
+
+        function renderCorpusProgress(message, kind = "info") {
+            const target = document.getElementById("task-corpus-progress");
+            if (!target) return;
+            target.textContent = message;
+            target.style.display = message ? "block" : "none";
+            target.style.color = kind === "error" ? "#fca5a5" : kind === "success" ? "#86efac" : "var(--text-muted)";
+        }
+
+        function corpusRelativePath(file) {
+            return String(file.webkitRelativePath || file.name || "").replaceAll("\\", "/").replace(/^\/+/, "");
+        }
+
+        function classifyCorpusFile(file) {
+            const relativePath = corpusRelativePath(file);
+            const parts = relativePath.split("/");
+            if (parts.some(part => corpusIgnoredDirectories.has(part.toLowerCase()))) return {relativePath, reason:"dossier ignoré"};
+            if (parts.some((part, index) => index < parts.length - 1 && part.startsWith("."))) return {relativePath, reason:"dossier caché"};
+            const extension = file.name.includes(".") ? file.name.split(".").pop().toLowerCase() : "";
+            const contentType = corpusExtensionTypes[extension] || "";
+            if (!contentType) return {relativePath, reason:"format non pris en charge"};
+            if (!file.size) return {relativePath, reason:"fichier vide"};
+            return {relativePath, contentType};
+        }
+
+        function prepareCorpusFolderSelection() {
+            uploadedCorpusFiles.clear();
+            selectedCorpusId = null;
+            const files = Array.from(document.getElementById("task-corpus-folder")?.files || []);
+            const accepted = files.filter(file => classifyCorpusFile(file).contentType).length;
+            const firstPath = files.length ? corpusRelativePath(files[0]) : "";
+            const rootLabel = firstPath.split("/")[0] || "";
+            const corpusName = document.getElementById("task-corpus-name");
+            if (corpusName && rootLabel) corpusName.value = rootLabel;
+            renderCorpusProgress(files.length ? `${accepted} fichier(s) exploitable(s) sur ${files.length} sélectionné(s). Les sources originales resteront inchangées.` : "");
+        }
+
+        async function fileSHA256(file) {
+            const digest = await crypto.subtle.digest("SHA-256", await file.arrayBuffer());
+            return Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, "0")).join("");
+        }
+
+        async function uploadSelectedCorpusFolder() {
+            const files = Array.from(document.getElementById("task-corpus-folder")?.files || []);
+            if (!files.length) return Array.from(selectedLibraryCorpora);
+            const classified = files.map(file => ({file, ...classifyCorpusFile(file)}));
+            const accepted = classified.filter(item => item.contentType);
+            const skipped = classified.filter(item => !item.contentType).map(item => ({relative_path:item.relativePath, reason:item.reason}));
+            if (!accepted.length) throw new Error("Le dossier ne contient aucun format documentaire ou image pris en charge.");
+            if (accepted.length > 10000) throw new Error("Le dossier dépasse la limite de 10 000 fichiers exploitables par corpus.");
+            const rootLabel = accepted[0].relativePath.split("/")[0] || "corpus";
+            const corpusName = document.getElementById("task-corpus-name")?.value.trim() || rootLabel;
+            const response = await requestApi("/corpora", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({name:corpusName, root_label:rootLabel, resume:true})});
+            const corpus = await response.json();
+            selectedCorpusId = corpus.id;
+            const priorEntries = corpus.entries || {};
+            let completed = 0, reused = 0, cursor = 0;
+            const errors = [];
+            const successfulPaths = new Set();
+            const worker = async () => {
+                while (cursor < accepted.length) {
+                    const item = accepted[cursor++];
+                    try {
+                        const digest = await fileSHA256(item.file);
+                        const cacheKey = `${item.relativePath}\u0000${digest}`;
+                        const prior = priorEntries[item.relativePath];
+                        if (prior?.sha256 === digest) {
+                            uploadedCorpusFiles.set(cacheKey, prior.artifact_id); reused++;
+                            successfulPaths.add(item.relativePath);
+                        } else {
+                            const upload = await requestApi(`/corpora/${encodeURIComponent(corpus.id)}/files?relative_path=${encodeURIComponent(item.relativePath)}&last_modified=${Math.max(0, Math.trunc(item.file.lastModified || 0))}`, {
+                                method:"PUT", headers:{"Content-Type":item.contentType, "X-Content-SHA256":digest}, body:item.file
+                            });
+                            const metadata = await upload.json();
+                            uploadedCorpusFiles.set(cacheKey, metadata.id);
+                            successfulPaths.add(item.relativePath);
+                            if (metadata.deduplicated) reused++;
+                        }
+                    } catch (error) {
+                        errors.push({relative_path:item.relativePath, error:error.message});
+                    } finally {
+                        completed++;
+                        renderCorpusProgress(`Import du corpus : ${completed}/${accepted.length} — ${reused} fichier(s) réutilisé(s), ${errors.length} erreur(s).`);
+                    }
+                }
+            };
+            await Promise.all(Array.from({length:Math.min(3, accepted.length)}, () => worker()));
+            const finalizedResponse = await requestApi(`/corpora/${encodeURIComponent(corpus.id)}/finalize`, {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({present_paths:Array.from(successfulPaths), skipped, errors})});
+            const finalized = await finalizedResponse.json();
+            if (!finalized.file_count) throw new Error("Aucun fichier du dossier n'a pu être importé.");
+            renderCorpusProgress(`Corpus prêt : ${finalized.document_count} document(s), ${finalized.image_count} image(s), ${skipped.length} ignoré(s), ${errors.length} erreur(s).`, errors.length ? "error" : "success");
+            return Array.from(new Set([...selectedLibraryCorpora, corpus.id]));
+        }
+
         function taskAttachmentKey(file) {
             return `${file.name}\u0000${file.size}\u0000${file.lastModified}`;
         }
@@ -2789,6 +2914,7 @@
             const extensionTypes = {
                 "docx":"application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                 "pptx":"application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                "pdf":"application/pdf",
                 "txt":"text/plain", "md":"text/markdown", "json":"application/json",
                 "csv":"text/csv", "html":"text/html", "htm":"text/html"
             };
@@ -2827,6 +2953,7 @@
             const memoryProject = document.getElementById("task-project-select")?.value || "proj-default";
             const calls = [
                 requestApi("/artifacts").then(r=>r.json()),
+                requestApi("/corpora").then(r=>r.json()),
                 documentQuery ? requestApi(`/artifacts/search?q=${encodeURIComponent(documentQuery)}&limit=20`).then(r=>r.json()) : Promise.resolve({results:[], index:null}),
                 requestApi("/skills").then(r=>r.json()),
                 requestApi(`/memory?q=${encodeURIComponent(query)}&project_id=${encodeURIComponent(memoryProject)}&include_global=true`).then(r=>r.json()),
@@ -2836,9 +2963,10 @@
                 requestApi("/evolution").then(r=>r.json()),
             ];
             if (activeExecutionId) calls.push(requestApi(`/executions/${activeExecutionId}/subagents`).then(r=>r.json()));
-            const [artifacts, documentSearch, skills, memories, diagnostics, audit, agentProfiles, evolution, subagents=[]] = await Promise.all(calls);
+            const [artifacts, corpora, documentSearch, skills, memories, diagnostics, audit, agentProfiles, evolution, subagents=[]] = await Promise.all(calls);
             librarySkills = skills; libraryMemories = memories;
-            document.getElementById("library-artifacts").innerHTML = artifacts.map(a=>`<div class="library-row"><label><input type="checkbox" ${selectedLibraryArtifacts.has(a.id) ? "checked" : ""} onchange="toggleArtifactAttachment('${a.id}',this.checked)"> ${escapeHTML(a.filename)}<small>${escapeHTML(a.document_title || a.content_type || "")}${Number.isInteger(a.document_blocks) ? ` — ${a.document_blocks} blocs` : ""}</small></label><span>${Math.ceil(a.size_bytes/1024)} Ko</span><span><button onclick="previewArtifact('${a.id}')">Aperçu</button> <button onclick="deleteArtifact('${a.id}')">Supprimer</button></span></div>`).join("") || "Aucun fichier.";
+            document.getElementById("library-corpora").innerHTML = corpora.map(c=>`<div class="library-row"><label><input type="checkbox" ${selectedLibraryCorpora.has(c.id) ? "checked" : ""} onchange="toggleCorpusAttachment('${c.id}',this.checked)"> <b>${escapeHTML(c.name || c.root_label || c.id)}</b><small>${escapeHTML(c.root_label || "")} — ${Number(c.document_count || 0)} document(s), ${Number(c.image_count || 0)} image(s) — ${escapeHTML(c.state || "")}</small></label><span>${Number(c.file_count || 0)} fichier(s) — ${Math.ceil(Number(c.size_bytes || 0)/1024)} Ko</span><span><button onclick="deleteCorpus('${c.id}')">Retirer</button></span></div>`).join("") || "Aucun corpus importé.";
+            document.getElementById("library-artifacts").innerHTML = artifacts.map(a=>`<div class="library-row"><label><input type="checkbox" ${selectedLibraryArtifacts.has(a.id) ? "checked" : ""} onchange="toggleArtifactAttachment('${a.id}',this.checked)"> ${escapeHTML(a.source_name || a.filename)}<small>${escapeHTML(a.document_title || a.content_type || "")}${Number.isInteger(a.document_blocks) ? ` — ${a.document_blocks} blocs` : ""}</small></label><span>${Math.ceil(a.size_bytes/1024)} Ko</span><span><button onclick="previewArtifact('${a.id}')">Aperçu</button> <button onclick="deleteArtifact('${a.id}')">Supprimer</button></span></div>`).join("") || "Aucun fichier.";
             const documentSearchBox = document.getElementById("library-document-results");
             documentSearchBox.innerHTML = documentQuery
                 ? (documentSearch.results.map(result=>`<div class="library-row"><span><b>${escapeHTML(result.filename || result.title || result.artifact_id)}</b><small>${escapeHTML((result.heading_path || []).join(" › ") || result.title || "Document")}</small><small>${escapeHTML(String(result.text || "").slice(0,500))}</small></span><span>blocs ${Number(result.start_order)+1}–${Number(result.end_order)+1}</span><span><button onclick="previewArtifact('${result.artifact_id}')">Aperçu</button></span></div>`).join("") || "Aucun passage trouvé.")
@@ -2852,6 +2980,8 @@
             document.getElementById("library-subagents").innerHTML = subagents.map(s=>`<div class="library-row"><span><b>${escapeHTML(s.role_name)}</b><small>${s.execution_id}</small></span><span>${escapeHTML(s.status)}</span><span><button onclick="controlSubagent('${s.execution_id}','pause')">Pause</button> <button onclick="controlSubagent('${s.execution_id}','resume')">Reprendre</button> <button onclick="controlSubagent('${s.execution_id}','cancel')">Annuler</button></span></div>`).join("") || (activeExecutionId ? "Aucun sous-agent." : "Sélectionnez une exécution parente.");
         }
         function toggleArtifactAttachment(id, checked) { checked ? selectedLibraryArtifacts.add(id) : selectedLibraryArtifacts.delete(id); showToast(`${selectedLibraryArtifacts.size} fichier(s) rattaché(s) à la prochaine tâche.`, "info"); }
+        function toggleCorpusAttachment(id, checked) { checked ? selectedLibraryCorpora.add(id) : selectedLibraryCorpora.delete(id); showToast(`${selectedLibraryCorpora.size} corpus rattaché(s) à la prochaine tâche.`, "info"); }
+        async function deleteCorpus(id) { if (!confirm("Retirer ce corpus de la bibliothèque ? Les fichiers déjà utilisés par des exécutions sont conservés.")) return; await requestApi(`/corpora/${id}`, {method:"DELETE"}); selectedLibraryCorpora.delete(id); refreshLibrary(); }
         async function previewArtifact(id) {
             try {
                 const data = await requestApi(`/artifacts/${id}/preview`).then(r=>r.json());
@@ -3184,7 +3314,7 @@
     <div id="library-modal" class="modal-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.8);z-index:1100;justify-content:center;align-items:center;">
       <div class="settings-container" style="background:var(--bg-card);width:min(1100px,96vw);max-height:94vh;overflow:auto;padding:22px;">
         <div class="library-header" style="display:flex;justify-content:space-between;position:sticky;top:0;background:var(--bg-card);z-index:2"><h3>Centre de contrôle GPTMOSS</h3><button class="btn-control" onclick="closeLibraryModal()">Fermer</button></div>
-        <section class="library-panel"><h4>Documents et images</h4><p style="font-size:11px;color:var(--text-muted)">Cochez un fichier pour le rattacher à la prochaine tâche. Les aperçus et la recherche restent locaux.</p><input id="library-document-search" placeholder="Rechercher dans le contenu des documents" oninput="clearTimeout(this._timer);this._timer=setTimeout(refreshLibrary,250)"><div id="library-document-results" style="margin:8px 0 14px"></div><div id="library-artifacts"></div><div id="library-preview" style="margin-top:10px;max-height:480px;overflow:auto"></div></section>
+        <section class="library-panel"><h4>Corpus, documents et images</h4><p style="font-size:11px;color:var(--text-muted)">Cochez un corpus complet ou des fichiers isolés pour les rattacher à la prochaine tâche. Les aperçus et la recherche restent locaux.</p><h5>Corpus persistants</h5><div id="library-corpora" style="margin-bottom:14px"></div><input id="library-document-search" placeholder="Rechercher dans le contenu des documents" oninput="clearTimeout(this._timer);this._timer=setTimeout(refreshLibrary,250)"><div id="library-document-results" style="margin:8px 0 14px"></div><h5>Fichiers</h5><div id="library-artifacts"></div><div id="library-preview" style="margin-top:10px;max-height:480px;overflow:auto"></div></section>
         <section class="library-panel"><h4>Skills</h4><div id="library-skills"></div><div class="library-grid"><div><input type="file" accept=".md,text/markdown" onchange="importLibrarySkill(this)"><small>Importer un fichier SKILL.md (262 Ko maximum).</small></div><div><input id="library-skill-name" placeholder="nom-du-skill"><input id="library-skill-description" placeholder="Description"><textarea id="library-skill-instructions" placeholder="Instructions du skill"></textarea><div><label><input type="checkbox" name="library-cap" value="filesystem"> Fichiers</label> <label><input type="checkbox" name="library-cap" value="shell"> Shell</label> <label><input type="checkbox" name="library-cap" value="agent"> Agents</label> <label><input type="checkbox" name="library-cap" value="devteam"> Équipe</label></div><button class="btn-control resume" onclick="createLibrarySkill()">Créer / mettre à jour</button> <button class="btn-control" onclick="resetSkillForm()">Réinitialiser</button></div></div></section>
         <section class="library-panel"><h4>Mémoire persistante</h4><input id="library-memory-search" placeholder="Filtrer les mémoires" oninput="clearTimeout(this._timer);this._timer=setTimeout(refreshLibrary,250)"><div id="library-memory"></div><div class="library-grid"><textarea id="library-memory-value" placeholder="Information à mémoriser"></textarea><div><select id="library-memory-kind"><option value="fact">Fait</option><option value="decision">Décision</option><option value="preference">Préférence</option><option value="constraint">Contrainte</option><option value="lesson">Leçon</option></select><select id="library-memory-scope"><option value="project">Projet courant</option><option value="global">Global (explicite)</option></select><input id="library-memory-source" value="gui" placeholder="Provenance"><input id="library-memory-ttl" type="number" min="1" max="365" placeholder="Expiration en jours (facultatif)"><label><input id="library-memory-validated" type="checkbox"> Valider immédiatement</label><br><button id="library-memory-save" class="btn-control resume" onclick="saveMemory()">Créer</button> <button class="btn-control" onclick="resetMemoryForm()">Réinitialiser</button></div></div></section>
         <section class="library-panel"><h4>Sous-agents</h4><p style="font-size:11px;color:var(--text-muted)">Le parent est l'exécution actuellement sélectionnée.</p><div id="library-subagents"></div><div class="library-grid"><input id="subagent-role" placeholder="Rôle (ex. Relecteur sécurité)"><textarea id="subagent-task" placeholder="Tâche du sous-agent"></textarea><textarea id="subagent-prompt" placeholder="Instruction système facultative"></textarea></div><button class="btn-control resume" onclick="createSubagent()">Créer le sous-agent</button></section>

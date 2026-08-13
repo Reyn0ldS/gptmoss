@@ -736,6 +736,99 @@ def test_runtime_control_only_exposes_a_managed_loopback_supervisor(monkeypatch)
     }
 
 
+def test_folder_corpus_api_import_finalize_and_execution_scope(tmp_path):
+    from gptmoss.capabilities.filesystem import FilesystemCapability
+
+    event_bus = EventBus()
+    state_engine = StateEngine()
+    llm = MockLLMProvider()
+    engine = ExecutionEngine(
+        event_bus, state_engine,
+        ContextEngine(state_engine, RAMMemoryProvider()), llm,
+        SimplePlanner(llm), SimplePolicyProvider(),
+    )
+    engine.register_capability("filesystem", FilesystemCapability(str(tmp_path)))
+    engine.execute_task = AsyncMock()
+    kernel = RuntimeKernel(event_bus, state_engine, engine)
+    init_app(kernel, engine, state_engine, event_bus)
+    client = ASGIClient(app)
+
+    created = client.post("/corpora", json={
+        "name": "sources", "root_label": "sources", "resume": True,
+    })
+    assert created.status_code == 201
+    corpus_id = created.json()["id"]
+    payload = b"# REQ-001\nThe professional report must be traceable."
+    imported = client.request(
+        "PUT",
+        f"/corpora/{corpus_id}/files?relative_path=sources%2Frequirements%2Fscope.md&last_modified=123",
+        content=payload,
+        headers={"Content-Type": "text/markdown"},
+    )
+    assert imported.status_code == 201
+    artifact_id = imported.json()["id"]
+    assert imported.json()["source_name"] == "sources/requirements/scope.md"
+
+    finalized = client.post(f"/corpora/{corpus_id}/finalize", json={
+        "present_paths": ["sources/requirements/scope.md"],
+        "skipped": [{"relative_path": "sources/program.exe", "reason": "unsupported"}],
+        "errors": [],
+    })
+    assert finalized.status_code == 200
+    assert finalized.json()["state"] == "ready"
+    assert finalized.json()["document_count"] == 1
+    assert finalized.json()["attachment_ids"] == [artifact_id]
+    assert client.get(f"/corpora/{corpus_id}").json()["file_count"] == 1
+    assert any(item["id"] == corpus_id for item in client.get("/corpora").json())
+
+    submitted = client.post("/executions", json={
+        "task": "Produce the requested professional report.",
+        "corpus_ids": [corpus_id],
+        "planning_mode": "auto",
+    })
+    assert submitted.status_code == 201
+    state = state_engine.get_execution(submitted.json()["execution_id"])
+    assert state.variables["corpus_ids"] == [corpus_id]
+    assert state.variables["attachment_ids"] == [artifact_id]
+    assert state.variables["corpus_summaries"][0]["file_count"] == 1
+    assert "Mandatory local corpus workflow" in state.variables["task"]
+    public = client.get(f"/executions/{submitted.json()['execution_id']}").json()
+    assert public["variables"]["corpus_summaries"][0]["root_label"] == "sources"
+    deleted = client.delete(f"/corpora/{corpus_id}")
+    assert deleted.status_code == 200
+    assert deleted.json()["retained_artifacts"] == 1
+    assert client.get(f"/corpora/{corpus_id}").status_code == 404
+    assert engine.artifact_store.get(artifact_id)["id"] == artifact_id
+
+
+def test_folder_corpus_api_rejects_traversal_and_unfinalized_submission(tmp_path):
+    from gptmoss.capabilities.filesystem import FilesystemCapability
+
+    event_bus = EventBus()
+    state_engine = StateEngine()
+    llm = MockLLMProvider()
+    engine = ExecutionEngine(
+        event_bus, state_engine,
+        ContextEngine(state_engine, RAMMemoryProvider()), llm,
+        SimplePlanner(llm), SimplePolicyProvider(),
+    )
+    engine.register_capability("filesystem", FilesystemCapability(str(tmp_path)))
+    kernel = RuntimeKernel(event_bus, state_engine, engine)
+    init_app(kernel, engine, state_engine, event_bus)
+    client = ASGIClient(app)
+    corpus_id = client.post("/corpora", json={
+        "name": "unsafe", "root_label": "sources", "resume": False,
+    }).json()["id"]
+
+    traversal = client.request(
+        "PUT", f"/corpora/{corpus_id}/files?relative_path=..%2Fsecret.md",
+        content=b"secret", headers={"Content-Type": "text/markdown"},
+    )
+    assert traversal.status_code == 400
+    blocked = client.post("/executions", json={"task": "Analyze", "corpus_ids": [corpus_id]})
+    assert blocked.status_code == 409
+
+
 def test_professional_delivery_download_route_is_scoped_to_execution(tmp_path):
     from gptmoss.capabilities.filesystem import FilesystemCapability
 
@@ -991,6 +1084,10 @@ def test_gui_contains_complete_management_controls():
         "resumableFailure", "Authentification LLM refusée",
         'id="task-planning-mode"', "appendLlmStream", "clearLlmStream",
         "planning_mode", "task_title",
+        'id="task-corpus-folder"', "webkitdirectory", "uploadSelectedCorpusFolder",
+        'id="task-corpus-name"',
+        '"pdf":"application/pdf"', 'requestApi("/corpora"',
+        'id="library-corpora"', "toggleCorpusAttachment", "selectedLibraryCorpora", "deleteCorpus",
         "applyConversationScroll", "scheduleFetchExecutionDetails",
         "lastConversationSignature", "chatFollowLatest",
     ):

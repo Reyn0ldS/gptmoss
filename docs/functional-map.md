@@ -88,14 +88,23 @@ exécution empêche deux boucles simultanées.
 
 ## Documents et corpus local
 
-1. `POST /artifacts` décode et stocke le fichier avec un nom sûr.
-2. La signature effective détermine le parseur, pas seulement l'extension annoncée.
-3. TXT/Markdown/CSV/JSON/XML/HTML, DOCX, PPTX et PDF sont normalisés en blocs avec
+1. La GUI accepte des fichiers isolés ou un dossier récursif (`webkitdirectory`). Pour un
+   dossier, `POST /corpora` crée/reprend un manifeste durable ; chaque source passe en
+   binaire par `PUT /corpora/{id}/files`, avec chemin relatif et empreinte SHA-256.
+2. Le navigateur filtre les répertoires techniques et limite l'import à trois fichiers
+   simultanés. Le serveur revalide chemin, type, taille, signature et empreinte, puis
+   déduplique un contenu déjà importé sous le même chemin logique.
+3. `POST /corpora/{id}/finalize` enregistre l'instantané courant, les exclusions et les
+   erreurs. La reprise ne renvoie que les fichiers modifiés ; un manifeste partiel reste
+   explicite et auditable.
+4. `POST /artifacts` décode et stocke un fichier isolé avec un nom sûr.
+5. La signature effective détermine le parseur, pas seulement l'extension annoncée.
+6. TXT/Markdown/CSV/JSON/XML/HTML, DOCX, PPTX et PDF sont normalisés en blocs avec
    provenance ; les archives sont soumises aux limites de taille et de ratio.
-4. L'index documentaire est reconstruit/synchronisé puis devient interrogeable.
-5. L'exécution ne voit que les artefacts explicitement attachés. La capacité `documents`
+7. L'index documentaire est reconstruit/synchronisé puis devient interrogeable.
+8. L'exécution ne voit que les artefacts explicitement attachés. La capacité `documents`
    impose l'ordre inventaire, recherche, lecture ciblée et chunks si nécessaire.
-6. Les citations internes se fondent sur les identifiants, fichiers et positions locales ;
+9. Les citations internes se fondent sur les identifiants, fichiers et positions locales ;
    aucune preuve Internet n'est fabriquée pour un mode corpus local.
 
 Un upload invalide renvoie une erreur client ; une indisponibilité de stockage renvoie un

@@ -14,7 +14,7 @@ modules et tests est dans `application-map.json` ; le présent document apporte 
 | Exécution/outils | `core/execution.py`, `core/execution_plan.py`, `core/execution_progress.py`, `core/execution_rescue.py`, capacités | timeline, feed, WebSocket | budgets, skills, permissions | `test_execution`, `test_adaptive_autonomy` |
 | Politique/shell | policy, shell/filesystem | approbation, pause/reprise | denied/approval, safe shell, autonomie | `test_policy`, `test_runtime_improvements` |
 | Sous-agents | agent, devteam, kernel | bibliothèque et endpoints subagents | profondeur/délégation | `test_agent_and_memory`, `test_devteam` |
-| Pièces jointes | artifacts, documents | upload, liste, recherche, aperçu | limites upload/texte | `test_documents`, `test_document_capability`, `test_skills_and_artifacts` |
+| Pièces jointes et dossiers | artifacts, corpora, documents | upload, import récursif, reprise, progression, liste, recherche, aperçu | limites upload/texte/fichiers, chemins sûrs, SHA-256 | `test_documents`, `test_document_capability`, `test_skills_and_artifacts`, `test_api` |
 | Mémoire | JSON store, context, memory cap | bibliothèque `/memory` | scope projet implicite | `test_memory_v2` |
 | Skills/évolution | skills, evolution | bibliothèque, profils, évolution | skills par défaut, création/amélioration | `test_autonomous_evolution`, `test_skills_and_artifacts` |
 | Fournisseur LLM | qwen, reprise execution | test de connexion, diagnostics | URL, clé, modèle, TLS, vision | `test_provider_integration`, `test_api` |

@@ -9,7 +9,8 @@ import re
 import time
 import uuid
 from contextlib import suppress
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+from threading import RLock
 from typing import Any, Dict, List
 
 from gptmoss.core.corpus import LocalDocumentIndex
@@ -30,16 +31,22 @@ class ArtifactStore:
     TEXT_TYPES = {"text/plain", "text/markdown", "application/json", "text/csv"}
     DOCUMENT_TYPES = set(SUPPORTED_DOCUMENT_TYPES)
     IMAGE_TYPES = {"image/png", "image/jpeg", "image/webp"}
+    MAX_CORPUS_FILES = 10_000
+    MAX_RELATIVE_PATH_CHARS = 1_000
 
     def __init__(self, workspace_root: str, max_bytes: int = 0, max_text_chars: int = 0):
         self.root = Path(workspace_root).resolve() / "uploads"
         self.max_bytes = max(0, int(max_bytes))
         self.max_text_chars = max(0, int(max_text_chars))
         self.root.mkdir(parents=True, exist_ok=True)
+        self.corpora_root = self.root / "corpora"
+        self._lock = RLock()
+        self._digest_artifacts: dict[tuple[str, str], str] = {}
         self.document_index = LocalDocumentIndex(
             self.root / "document-index.json"
         )
         self._synchronize_document_index()
+        self._refresh_digest_index()
 
     def update_limits(self, max_bytes: int = 0, max_text_chars: int = 0) -> None:
         """Use zero to remove the upload ceiling or select text budgets per task."""
@@ -51,12 +58,229 @@ class ArtifactStore:
         name = re.sub(r"[^A-Za-z0-9._-]", "_", Path(filename).name)
         return name or "upload.bin"
 
+    @classmethod
+    def _safe_relative_path(cls, value: str) -> str:
+        raw = str(value or "").strip()
+        if raw.startswith(("/", "\\")):
+            raise ValueError("Corpus relative path must not be absolute.")
+        normalized = raw.replace("\\", "/")
+        if not normalized or len(normalized) > cls.MAX_RELATIVE_PATH_CHARS:
+            raise ValueError("Corpus relative path is empty or too long.")
+        path = PurePosixPath(normalized)
+        if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
+            raise ValueError("Corpus relative path is invalid.")
+        if any("\x00" in part or ":" in part for part in path.parts):
+            raise ValueError("Corpus relative path contains a forbidden character.")
+        return path.as_posix()
+
+    def _artifact_metadata_records(self) -> list[dict[str, Any]]:
+        records: list[dict[str, Any]] = []
+        for metadata_path in self.root.glob("*.json"):
+            try:
+                metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if isinstance(metadata, dict) and metadata.get("id") and metadata.get("sha256"):
+                records.append(metadata)
+        return records
+
+    def _refresh_digest_index(self) -> None:
+        self._digest_artifacts = {
+            (
+                str(metadata["sha256"]),
+                str(metadata.get("source_name") or metadata.get("filename") or ""),
+            ): str(metadata["id"])
+            for metadata in self._artifact_metadata_records()
+        }
+
+    def _corpus_path(self, corpus_id: str) -> Path:
+        if not re.fullmatch(r"[0-9a-f-]{36}", str(corpus_id or "")):
+            raise ValueError("Invalid corpus id.")
+        return self.corpora_root / f"{corpus_id}.json"
+
+    def get_corpus(self, corpus_id: str) -> Dict[str, Any]:
+        path = self._corpus_path(corpus_id)
+        if not path.exists():
+            raise FileNotFoundError("Corpus not found.")
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict) or payload.get("id") != corpus_id:
+            raise ValueError("Corpus manifest is invalid.")
+        return payload
+
+    def list_corpora(self) -> list[Dict[str, Any]]:
+        items: list[Dict[str, Any]] = []
+        for path in self.corpora_root.glob("*.json"):
+            try:
+                item = self.get_corpus(path.stem)
+            except (OSError, ValueError, FileNotFoundError, json.JSONDecodeError):
+                continue
+            items.append(item)
+        return sorted(items, key=lambda item: float(item.get("updated_at") or 0), reverse=True)
+
+    def create_corpus(
+        self,
+        name: str,
+        *,
+        root_label: str = "",
+        source_kind: str = "browser_folder",
+        resume: bool = True,
+    ) -> tuple[Dict[str, Any], bool]:
+        clean_name = str(name or "").strip()[:200]
+        clean_root = self._safe_relative_path(root_label or clean_name).split("/", 1)[0]
+        if not clean_name:
+            raise ValueError("Corpus name is required.")
+        with self._lock:
+            if resume:
+                for item in self.list_corpora():
+                    if (
+                        item.get("source_kind") == source_kind
+                        and str(item.get("root_label") or "").casefold() == clean_root.casefold()
+                        and str(item.get("name") or "").casefold() == clean_name.casefold()
+                    ):
+                        item["state"] = "importing"
+                        item["updated_at"] = time.time()
+                        write_text_atomic(self._corpus_path(str(item["id"])), json.dumps(item, ensure_ascii=False))
+                        return item, True
+            now = time.time()
+            corpus = {
+                "id": str(uuid.uuid4()),
+                "name": clean_name,
+                "root_label": clean_root,
+                "source_kind": source_kind,
+                "state": "importing",
+                "created_at": now,
+                "updated_at": now,
+                "entries": {},
+                "skipped": [],
+                "errors": [],
+            }
+            write_text_atomic(self._corpus_path(corpus["id"]), json.dumps(corpus, ensure_ascii=False))
+            return corpus, False
+
+    def _record_corpus_entry(
+        self,
+        corpus_id: str,
+        relative_path: str,
+        metadata: Dict[str, Any],
+        *,
+        last_modified: int = 0,
+    ) -> Dict[str, Any]:
+        corpus = self.get_corpus(corpus_id)
+        entries = dict(corpus.get("entries") or {})
+        if relative_path not in entries and len(entries) >= self.MAX_CORPUS_FILES:
+            raise ValueError(f"Corpus cannot contain more than {self.MAX_CORPUS_FILES} files.")
+        previous = entries.get(relative_path)
+        entries[relative_path] = {
+            "artifact_id": metadata["id"],
+            "sha256": metadata["sha256"],
+            "size_bytes": metadata["size_bytes"],
+            "content_type": metadata["content_type"],
+            "last_modified": max(0, int(last_modified or 0)),
+        }
+        corpus.update({"entries": entries, "state": "importing", "updated_at": time.time()})
+        write_text_atomic(self._corpus_path(corpus_id), json.dumps(corpus, ensure_ascii=False))
+        if previous and previous.get("artifact_id") != metadata.get("id"):
+            self._remove_corpus_membership(
+                str(previous.get("artifact_id") or ""), corpus_id, relative_path
+            )
+        return corpus
+
+    def _remove_corpus_membership(
+        self,
+        artifact_id: str,
+        corpus_id: str,
+        relative_path: str = "",
+    ) -> None:
+        if not artifact_id:
+            return
+        try:
+            metadata = self.get(artifact_id)
+        except (OSError, ValueError, FileNotFoundError, KeyError, json.JSONDecodeError):
+            return
+        memberships = []
+        for membership in list(metadata.get("corpus_memberships") or []):
+            matches_corpus = str(membership.get("corpus_id") or "") == corpus_id
+            matches_path = not relative_path or str(membership.get("relative_path") or "") == relative_path
+            if matches_corpus and matches_path:
+                continue
+            memberships.append(membership)
+        if memberships:
+            metadata["corpus_memberships"] = memberships
+        else:
+            metadata.pop("corpus_memberships", None)
+        write_text_atomic(
+            self.root / f"{artifact_id}.json",
+            json.dumps(metadata, ensure_ascii=False),
+        )
+
+    def finalize_corpus(
+        self,
+        corpus_id: str,
+        *,
+        present_paths: List[str],
+        skipped: List[Dict[str, Any]] | None = None,
+        errors: List[Dict[str, Any]] | None = None,
+    ) -> Dict[str, Any]:
+        with self._lock:
+            corpus = self.get_corpus(corpus_id)
+            present = {self._safe_relative_path(path) for path in present_paths}
+            previous_entries = dict(corpus.get("entries") or {})
+            entries = {
+                path: value
+                for path, value in previous_entries.items()
+                if path in present
+            }
+            corpus.update({
+                "entries": entries,
+                "skipped": list(skipped or [])[:1_000],
+                "errors": list(errors or [])[:1_000],
+                "state": "partial" if errors else "ready",
+                "updated_at": time.time(),
+            })
+            write_text_atomic(self._corpus_path(corpus_id), json.dumps(corpus, ensure_ascii=False))
+            for relative_path, entry in previous_entries.items():
+                if relative_path not in entries:
+                    self._remove_corpus_membership(
+                        str(entry.get("artifact_id") or ""), corpus_id, relative_path
+                    )
+            return corpus
+
+    def delete_corpus(self, corpus_id: str) -> Dict[str, Any]:
+        """Remove a corpus manifest while retaining immutable uploaded evidence."""
+        with self._lock:
+            corpus = self.get_corpus(corpus_id)
+            for entry in dict(corpus.get("entries") or {}).values():
+                artifact_id = str(entry.get("artifact_id") or "")
+                if not artifact_id:
+                    continue
+                try:
+                    metadata = self.get(artifact_id)
+                except (OSError, ValueError, FileNotFoundError, KeyError, json.JSONDecodeError):
+                    continue
+                self._remove_corpus_membership(artifact_id, corpus_id)
+            unlink_resilient(self._corpus_path(corpus_id))
+            return corpus
+
     def save_base64(self, filename: str, content_base64: str, content_type: str) -> Dict[str, Any]:
         declared_type = (content_type or "").split(";", 1)[0].strip().lower()
         try:
             data = base64.b64decode(content_base64, validate=True)
         except (ValueError, TypeError) as exc:
             raise ValueError("Invalid base64 upload payload.") from exc
+        return self.save_bytes(filename, data, content_type)
+
+    def save_bytes(
+        self,
+        filename: str,
+        data: bytes,
+        content_type: str,
+        *,
+        corpus_id: str = "",
+        relative_path: str = "",
+        last_modified: int = 0,
+        expected_sha256: str = "",
+    ) -> Dict[str, Any]:
+        declared_type = (content_type or "").split(";", 1)[0].strip().lower()
         if not data or (self.max_bytes and len(data) > self.max_bytes):
             maximum = self.max_bytes if self.max_bytes else "the available infrastructure capacity"
             raise ValueError(f"Upload must contain between 1 byte and {maximum}.")
@@ -66,6 +290,30 @@ class ArtifactStore:
             raise ValueError("Invalid JPEG data.")
         if declared_type == "image/webp" and not (data.startswith(b"RIFF") and data[8:12] == b"WEBP"):
             raise ValueError("Invalid WebP data.")
+        digest = hashlib.sha256(data).hexdigest()
+        if expected_sha256 and not re.fullmatch(r"[0-9a-f]{64}", expected_sha256.lower()):
+            raise ValueError("Invalid expected SHA-256 digest.")
+        if expected_sha256 and digest != expected_sha256.lower():
+            raise ValueError("Uploaded content does not match its expected SHA-256 digest.")
+        safe_relative = self._safe_relative_path(relative_path) if corpus_id else ""
+        source_name = safe_relative or self._safe_name(filename)
+        with self._lock:
+            existing_id = self._digest_artifacts.get((digest, source_name))
+            if existing_id:
+                try:
+                    metadata = self.get(existing_id)
+                except (OSError, ValueError, FileNotFoundError, KeyError, json.JSONDecodeError):
+                    self._digest_artifacts.pop((digest, source_name), None)
+                else:
+                    if corpus_id:
+                        memberships = list(metadata.get("corpus_memberships") or [])
+                        membership = {"corpus_id": corpus_id, "relative_path": safe_relative}
+                        if membership not in memberships:
+                            memberships.append(membership)
+                            metadata["corpus_memberships"] = memberships
+                            write_text_atomic(self.root / f"{existing_id}.json", json.dumps(metadata, ensure_ascii=False))
+                        self._record_corpus_entry(corpus_id, safe_relative, metadata, last_modified=last_modified)
+                    return {**metadata, "deduplicated": True}
         artifact_id = str(uuid.uuid4())
         safe_name = self._safe_name(filename)
         path = self.root / f"{artifact_id}_{safe_name}"
@@ -80,16 +328,21 @@ class ArtifactStore:
                 "content_type": declared_type,
                 "path": str(path),
                 "size_bytes": len(data),
-                "sha256": hashlib.sha256(data).hexdigest(),
+                "sha256": digest,
+                "source_name": source_name,
                 "created_at": time.time(),
             }
+            if corpus_id:
+                metadata["corpus_memberships"] = [
+                    {"corpus_id": corpus_id, "relative_path": safe_relative}
+                ]
             if declared_type in self.IMAGE_TYPES:
                 pass
             else:
                 document = parse_document(
                     path,
                     supplied_content_type=declared_type or None,
-                ).with_filename(safe_name)
+                ).with_filename(source_name)
                 document_path = self.root / f"{artifact_id}.document.json"
                 write_text_atomic(document_path, document.to_json())
                 metadata.update(
@@ -112,6 +365,12 @@ class ArtifactStore:
                 metadata_path,
                 json.dumps(metadata, ensure_ascii=False),
             )
+            with self._lock:
+                self._digest_artifacts[(digest, source_name)] = artifact_id
+                if corpus_id:
+                    self._record_corpus_entry(
+                        corpus_id, safe_relative, metadata, last_modified=last_modified
+                    )
             return metadata
         except (OSError, ValueError):
             try:
@@ -242,6 +501,27 @@ class ArtifactStore:
             if document_path.parent == self.root:
                 document_path.unlink(missing_ok=True)
         (self.root / f"{artifact_id}.json").unlink(missing_ok=True)
+        self._digest_artifacts.pop(
+            (
+                str(metadata.get("sha256") or ""),
+                str(metadata.get("source_name") or metadata.get("filename") or ""),
+            ),
+            None,
+        )
+        for corpus in self.list_corpora():
+            entries = {
+                path: value
+                for path, value in dict(corpus.get("entries") or {}).items()
+                if value.get("artifact_id") != artifact_id
+            }
+            if len(entries) != len(corpus.get("entries") or {}):
+                corpus["entries"] = entries
+                corpus["state"] = "partial"
+                corpus["updated_at"] = time.time()
+                write_text_atomic(
+                    self._corpus_path(str(corpus["id"])),
+                    json.dumps(corpus, ensure_ascii=False),
+                )
         return metadata
 
     @staticmethod

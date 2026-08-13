@@ -43,6 +43,7 @@ class SubmitTaskRequest(BaseModel):
     project_id: Optional[str] = None
     planning_mode: str = "auto"
     attachment_ids: List[str] = Field(default_factory=list)
+    corpus_ids: List[str] = Field(default_factory=list)
     delay_seconds: float = Field(default=0, ge=0, le=31_536_000)
     run_at: Optional[float] = Field(default=None, ge=0)
 
@@ -56,6 +57,21 @@ class UploadArtifactRequest(BaseModel):
     filename: str
     content_base64: str
     content_type: str
+
+class CreateCorpusRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    root_label: str = Field(min_length=1, max_length=1_000)
+    resume: bool = True
+
+class CorpusIssue(BaseModel):
+    relative_path: str = Field(min_length=1, max_length=1_000)
+    reason: Optional[str] = Field(default=None, max_length=1_000)
+    error: Optional[str] = Field(default=None, max_length=2_000)
+
+class FinalizeCorpusRequest(BaseModel):
+    present_paths: List[str] = Field(default_factory=list, max_length=10_000)
+    skipped: List[CorpusIssue] = Field(default_factory=list, max_length=1_000)
+    errors: List[CorpusIssue] = Field(default_factory=list, max_length=1_000)
 
 class DecisionRequest(BaseModel):
     reason: Optional[str] = None
@@ -157,6 +173,8 @@ PUBLIC_EXECUTION_VARIABLE_KEYS = (
     "project_path",
     "project_domains",
     "attachment_ids",
+    "corpus_ids",
+    "corpus_summaries",
     "role_name",
     "parent_execution_id",
     "pending_approval",
@@ -396,9 +414,26 @@ async def submit_task(req: SubmitTaskRequest):
         raise HTTPException(status_code=404, detail=f"Project '{project_id}' does not exist.")
 
     filesystem = _filesystem_capability()
-    if req.attachment_ids and (not filesystem or not app_state.execution_engine.artifact_store):
+    requested_attachments = list(dict.fromkeys(req.attachment_ids))
+    requested_corpora = list(dict.fromkeys(req.corpus_ids))
+    if (requested_attachments or requested_corpora) and (
+        not filesystem or not app_state.execution_engine.artifact_store
+    ):
         raise HTTPException(status_code=500, detail="Artifact storage not initialized.")
-    for attachment_id in dict.fromkeys(req.attachment_ids):
+    for corpus_id in requested_corpora:
+        try:
+            corpus = app_state.execution_engine.artifact_store.get_corpus(corpus_id)
+        except (ValueError, FileNotFoundError, OSError, KeyError, json.JSONDecodeError) as exc:
+            raise HTTPException(status_code=404, detail=f"Corpus '{corpus_id}' does not exist.") from exc
+        if corpus.get("state") not in {"ready", "partial"}:
+            raise HTTPException(status_code=409, detail=f"Corpus '{corpus_id}' is not finalized.")
+        requested_attachments.extend(
+            str(entry["artifact_id"])
+            for entry in dict(corpus.get("entries") or {}).values()
+            if isinstance(entry, dict) and entry.get("artifact_id")
+        )
+    requested_attachments = list(dict.fromkeys(requested_attachments))
+    for attachment_id in requested_attachments:
         try:
             app_state.execution_engine.artifact_store.get(attachment_id)
         except (ValueError, FileNotFoundError, OSError, KeyError) as exc:
@@ -410,9 +445,26 @@ async def submit_task(req: SubmitTaskRequest):
     planning_mode = normalize_planning_mode(
         req.planning_mode or variables.get("planning_mode") or agent_config.get("planning_mode")
     )
+    corpus_summaries = []
+    for corpus_id in requested_corpora:
+        corpus = app_state.execution_engine.artifact_store.get_corpus(corpus_id)
+        corpus_summaries.append(_public_corpus(corpus))
+    effective_task = req.task.strip()
+    if corpus_summaries:
+        effective_task += (
+            "\n\nMandatory local corpus workflow: inventory every attached source before "
+            "drawing conclusions; preserve relative source paths in citations; classify "
+            "themes, requirements, decisions, risks, contradictions, images, and evidence; "
+            "search every decision topic across the whole corpus; build a source-to-section "
+            "coverage matrix; produce the requested professional deliverable from local "
+            "evidence only; and report unsupported claims or unreadable files explicitly. "
+            "Do not modify, move, or rename source files."
+        )
     variables.update({
         "project_id": project_id,
-        "attachment_ids": list(dict.fromkeys(req.attachment_ids)),
+        "attachment_ids": requested_attachments,
+        "corpus_ids": requested_corpora,
+        "corpus_summaries": corpus_summaries,
         "planning_mode": planning_mode,
         "task_title": task_title_from_text(req.task.strip()),
     })
@@ -423,7 +475,7 @@ async def submit_task(req: SubmitTaskRequest):
         variables["project_domains"] = project["domains"]
     agent_config["variables"] = variables
     exec_id = await app_state.kernel.submit_task(
-        req.task.strip(), agent_config,
+        effective_task, agent_config,
         delay_seconds=req.delay_seconds, run_at=req.run_at,
     )
     state = app_state.state_engine.get_execution(exec_id)
@@ -501,11 +553,144 @@ async def upload_artifact(req: UploadArtifactRequest):
             ),
         ) from exc
     public_fields = (
-        "id", "filename", "content_type", "size_bytes", "sha256", "created_at",
+        "id", "filename", "source_name", "content_type", "size_bytes", "sha256", "created_at",
         "document_title", "document_blocks", "document_parser",
         "document_parser_version", "document_chunks",
     )
     return {key: metadata[key] for key in public_fields if key in metadata}
+
+
+def _public_corpus(corpus: Dict[str, Any], *, include_entries: bool = False) -> Dict[str, Any]:
+    entries = dict(corpus.get("entries") or {})
+    result = {
+        key: corpus.get(key)
+        for key in (
+            "id", "name", "root_label", "source_kind", "state",
+            "created_at", "updated_at", "skipped", "errors",
+        )
+    }
+    result["file_count"] = len(entries)
+    result["document_count"] = sum(
+        1 for entry in entries.values()
+        if str(entry.get("content_type") or "") in ArtifactStore.DOCUMENT_TYPES
+    )
+    result["image_count"] = sum(
+        1 for entry in entries.values()
+        if str(entry.get("content_type") or "") in ArtifactStore.IMAGE_TYPES
+    )
+    result["size_bytes"] = sum(int(entry.get("size_bytes") or 0) for entry in entries.values())
+    result["attachment_ids"] = list(dict.fromkeys(
+        str(entry["artifact_id"]) for entry in entries.values() if entry.get("artifact_id")
+    ))
+    if include_entries:
+        result["entries"] = entries
+    return result
+
+
+@app.post("/corpora", status_code=201)
+async def create_corpus(req: CreateCorpusRequest):
+    store = _artifact_store()
+    if not store:
+        raise HTTPException(status_code=500, detail="Artifact storage not initialized.")
+    try:
+        corpus, resumed = store.create_corpus(
+            req.name, root_label=req.root_label, resume=req.resume
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    result = _public_corpus(corpus, include_entries=True)
+    result["resumed"] = resumed
+    return result
+
+
+@app.get("/corpora")
+async def list_corpora():
+    store = _artifact_store()
+    if not store:
+        raise HTTPException(status_code=500, detail="Artifact storage not initialized.")
+    return [_public_corpus(corpus) for corpus in store.list_corpora()]
+
+
+@app.get("/corpora/{corpus_id}")
+async def get_corpus(corpus_id: str):
+    store = _artifact_store()
+    if not store:
+        raise HTTPException(status_code=500, detail="Artifact storage not initialized.")
+    try:
+        return _public_corpus(store.get_corpus(corpus_id), include_entries=True)
+    except (ValueError, FileNotFoundError, OSError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=404, detail="Corpus not found.") from exc
+
+
+@app.delete("/corpora/{corpus_id}")
+async def delete_corpus(corpus_id: str):
+    store = _artifact_store()
+    if not store:
+        raise HTTPException(status_code=500, detail="Artifact storage not initialized.")
+    try:
+        corpus = store.delete_corpus(corpus_id)
+    except (ValueError, FileNotFoundError, OSError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=404, detail="Corpus not found.") from exc
+    return {"status": "deleted", "id": corpus["id"], "retained_artifacts": len(corpus.get("entries") or {})}
+
+
+@app.put("/corpora/{corpus_id}/files", status_code=201)
+async def upload_corpus_file(
+    corpus_id: str,
+    request: Request,
+    relative_path: str,
+    last_modified: int = 0,
+):
+    store = _artifact_store()
+    if not store:
+        raise HTTPException(status_code=500, detail="Artifact storage not initialized.")
+    try:
+        store.get_corpus(corpus_id)
+        payload = await request.body()
+        metadata = await asyncio.to_thread(
+            store.save_bytes,
+            Path(relative_path.replace("\\", "/")).name,
+            payload,
+            request.headers.get("content-type", "application/octet-stream"),
+            corpus_id=corpus_id,
+            relative_path=relative_path,
+            last_modified=last_modified,
+            expected_sha256=request.headers.get("x-content-sha256", ""),
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Corpus not found.") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except OSError as exc:
+        raise HTTPException(status_code=503, detail="Corpus storage is temporarily unavailable.") from exc
+    return {
+        key: metadata[key]
+        for key in (
+            "id", "filename", "source_name", "content_type", "size_bytes", "sha256",
+            "document_title", "document_blocks", "document_parser", "document_chunks",
+            "deduplicated",
+        )
+        if key in metadata
+    }
+
+
+@app.post("/corpora/{corpus_id}/finalize")
+async def finalize_corpus(corpus_id: str, req: FinalizeCorpusRequest):
+    store = _artifact_store()
+    if not store:
+        raise HTTPException(status_code=500, detail="Artifact storage not initialized.")
+    try:
+        corpus = store.finalize_corpus(
+            corpus_id,
+            present_paths=req.present_paths,
+            skipped=[item.model_dump(exclude_none=True) for item in req.skipped],
+            errors=[item.model_dump(exclude_none=True) for item in req.errors],
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Corpus not found.") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return _public_corpus(corpus, include_entries=True)
 
 
 @app.get("/artifacts")
@@ -525,7 +710,7 @@ async def list_artifacts():
             if not required_fields.issubset(metadata):
                 continue
             public_fields = (
-                "id", "filename", "content_type", "size_bytes", "sha256",
+                "id", "filename", "source_name", "content_type", "size_bytes", "sha256",
                 "created_at", "document_title", "document_blocks",
                 "document_parser", "document_parser_version",
                 "document_chunks",

@@ -45,7 +45,7 @@ pas un ordonnanceur distribué ni une implémentation de cron.
 | Domaines projet | `core/domains.py` | Catégories génériques et extensions de marqueurs propres à chaque projet, sans hypothèse métier globale. |
 | Contexte et mémoire | `core/context.py`, `memory/json_store.py`, `capabilities/memory.py` | Contexte borné et mémoire gouvernée par projet, validation, provenance, TTL, déduplication et supersession. |
 | Capacités | `capabilities/*` | Actions outillées exposées au modèle et contrôlées par la politique. |
-| Documents | `core/documents.py`, `core/artifacts.py`, `capabilities/documents.py` | Détection sûre, normalisation, indexation, inventaire, recherche et lecture locale des pièces jointes. |
+| Documents | `core/documents.py`, `core/artifacts.py`, `capabilities/documents.py` | Détection sûre, manifestes de corpus par dossier, déduplication SHA-256, normalisation, indexation, inventaire, recherche et lecture locale des pièces jointes. |
 | Qualité et livraison | `core/delivery.py`, `document_quality.py`, `professional_delivery.py`, `delivery_package.py` | Contrat gelé, preuves indépendantes, réparations et paquet professionnel DOCX/ZIP signé par empreintes. |
 | Évolution | `core/skills.py`, `core/evolution.py` | Découverte de procédures, profils de spécialistes et évolution locale traçable. |
 | Configuration | `core/settings.py` | Contrat Pydantic unique partagé par bootstrap, API, GUI et tests ; valeurs sûres et limites strictes. |
