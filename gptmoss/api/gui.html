@@ -2371,7 +2371,10 @@
                 const res = await requestApi("/executions", {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ task, project_id, attachment_ids, corpus_ids, planning_mode })
+                    body: JSON.stringify({
+                        task, project_id, attachment_ids, corpus_ids, planning_mode,
+                        corpus_auto_workflow: automaticCorpusWorkflow,
+                    })
                 });
                 const data = await res.json();
                 const newId = data.execution_id;

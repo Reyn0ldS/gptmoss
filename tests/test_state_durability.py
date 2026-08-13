@@ -133,6 +133,29 @@ def test_partitioned_state_writes_only_changed_generations(tmp_path, monkeypatch
     assert before["first"] != after["first"]
 
 
+def test_unreferenced_generation_files_are_removed_after_index_commit(tmp_path):
+    path = tmp_path / "state.json"
+    state = StateEngine(str(path))
+    state.get_execution("keep").results["revision"] = 1
+    assert state.save_to_disk()
+    executions_dir = tmp_path / "state_executions"
+    leftover = executions_dir / "orphan-generation.json"
+    leftover.write_text("{}", encoding="utf-8")
+    assert leftover.is_file()
+
+    state.get_execution("keep").results["revision"] = 2
+    assert state.save_to_disk()
+
+    retained = {
+        item["file"]
+        for item in json.loads(path.read_text(encoding="utf-8"))["execution_records"].values()
+    }
+    remaining = {item.name for item in executions_dir.glob("*.json")}
+    assert leftover.name not in remaining
+    assert remaining == retained
+    assert StateEngine(str(path)).get_execution("keep").results["revision"] == 2
+
+
 def test_index_failure_keeps_previous_consistent_generation(tmp_path, monkeypatch):
     path = tmp_path / "state.json"
     state = StateEngine(str(path))

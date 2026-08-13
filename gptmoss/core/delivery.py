@@ -12,6 +12,7 @@ import shlex
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 from gptmoss.core.artifact_validation import validate_artifact
+from gptmoss.core.plan_obligations import collect_plan_obligations, unsatisfied_obligations
 
 
 SCHEMA_VERSION = 1
@@ -542,6 +543,22 @@ def build_delivery_contract(plan: Dict[str, Any], task: str) -> Dict[str, Any]:
         ) for command in _strings(step.get("verification_commands")))
         for step in plan.get("steps", [])
     )
+    obligations = plan.get("plan_obligations")
+    if not isinstance(obligations, list):
+        obligations = collect_plan_obligations(
+            task=task,
+            planning_mode=str(plan.get("planning_mode") or "auto"),
+            analysis=plan.get("analysis") if isinstance(plan.get("analysis"), dict) else None,
+            workload_profile=(
+                plan.get("workload_profile")
+                if isinstance(plan.get("workload_profile"), dict) else None
+            ),
+            corpus_auto_workflow=bool(
+                (plan.get("analysis") or {}).get("corpus_auto_workflow")
+                if isinstance(plan.get("analysis"), dict) else False
+            ),
+        )
+        plan["plan_obligations"] = obligations
     contract = {
         "schema_version": SCHEMA_VERSION,
         "task_sha256": hashlib.sha256(str(task).encode("utf-8")).hexdigest(),
@@ -558,6 +575,7 @@ def build_delivery_contract(plan: Dict[str, Any], task: str) -> Dict[str, Any]:
         "execution_routines": execution_routines,
         "normalization_warnings": _strings(plan.get("normalization_warnings")),
         "software_delivery": software_delivery,
+        "plan_obligations": obligations,
     }
     frozen = json.dumps(contract, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
     contract["contract_sha256"] = hashlib.sha256(frozen.encode("utf-8")).hexdigest()
@@ -793,6 +811,19 @@ def evaluate_delivery(
                 and row.get("mandatory") and not row.get("validation_steps")):
             failures.append(f"{row.get('requirement_id')} has no independent validation")
     checks.append({"name": "requirements_traceability", "passed": not failures})
+
+    missing_obligations = unsatisfied_obligations(
+        steps, contract.get("plan_obligations") or [],
+    )
+    if missing_obligations:
+        failures.append(
+            "missing delivery obligations: " + ", ".join(missing_obligations)
+        )
+    checks.append({
+        "name": "plan_obligations",
+        "passed": not missing_obligations,
+        "missing": missing_obligations,
+    })
 
     missing_artifacts = []
     for step in steps:

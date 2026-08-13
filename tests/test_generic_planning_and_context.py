@@ -7,6 +7,7 @@ from gptmoss.core.artifacts import ArtifactStore
 from gptmoss.core.delivery import build_delivery_contract
 from gptmoss.core.execution import ExecutionEngine, normalize_plan
 from gptmoss.core.workload import (
+    MAX_SOURCE_PARTITIONS,
     build_workload_profile,
     compile_work_graph,
     partition_attachment_ids,
@@ -86,7 +87,8 @@ def test_large_workload_profile_is_bounded_and_does_not_load_source_content():
     assert profile["image_count"] == 4_370
     assert profile["ignored_count"] == 9_011
     assert profile["failed_count"] == 92
-    assert 1 < profile["suggested_partitions"] <= 12
+    assert profile["suggested_partitions"] > 12
+    assert profile["suggested_partitions"] <= MAX_SOURCE_PARTITIONS
     assert not any("path" in key or "content" in key for key in profile)
 
 

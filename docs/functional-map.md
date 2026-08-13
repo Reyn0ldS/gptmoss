@@ -38,10 +38,14 @@ superviseur avec son jeton. Un port occupé est signalé avant de démarrer l'en
 5. Le contexte rassemble conversation, état, mémoire validée du projet, schémas d'outils
    et pièces jointes bornées ; `ContextBuilt` est publié.
 6. Le planner produit exigences, interfaces, dépendances, validations et opérations sans
-   nombre d'étapes imposé. Le plan est normalisé, les exigences héritées sont fusionnées,
-   puis `workload.py` compile le graphe selon les métriques réelles. Un gros corpus est
-   distribué en partitions bornées, rejoint par une consolidation ; une petite tâche
-   conserve son graphe minimal.
+   quota d'étapes. Il doit seulement couvrir les obligations sémantiques du livrable
+   (inventaire source, implémentation, validation indépendante, réparation, audit). Un
+   travail de 24 h peut donc produire des dizaines d'étapes. Le texte utilisateur n'est
+   jamais réécrit : le workflow corpus est un booléen `corpus_auto_workflow`. Le plan est
+   normalisé, les exigences héritées sont fusionnées, puis `workload.py` compile le graphe
+   selon les métriques réelles. Un gros corpus est distribué en autant de partitions que
+   la charge le justifie, rejoint par une consolidation ; une petite tâche conserve son
+   graphe minimal.
 7. Une réduction de périmètre requiert `ScopeApprovalRequested` avant toute exécution.
 
 ## Ordonnancement et exécution d'une étape
@@ -95,9 +99,11 @@ exécution empêche deux boucles simultanées.
 
 ## Documents et corpus local
 
-1. La GUI accepte des fichiers isolés ou un dossier récursif (`webkitdirectory`). Pour un
-   dossier, `POST /corpora` crée/reprend un manifeste durable ; chaque source passe en
-   binaire par `PUT /corpora/{id}/files`, avec chemin relatif et empreinte SHA-256.
+1. La GUI accepte des fichiers isolés ou un dossier récursif (`webkitdirectory`). La case
+   d'inventaire automatique envoie `corpus_auto_workflow` sans modifier le texte de la
+   tâche. Pour un dossier, `POST /corpora` crée/reprend un manifeste durable ; chaque
+   source passe en binaire par `PUT /corpora/{id}/files`, avec chemin relatif et empreinte
+   SHA-256.
 2. Le navigateur filtre les répertoires techniques et limite l'import à trois fichiers
    simultanés. Le serveur revalide chemin, type, taille, signature et empreinte, puis
    déduplique un contenu déjà importé sous le même chemin logique.

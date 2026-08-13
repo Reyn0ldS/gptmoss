@@ -31,6 +31,7 @@ from gptmoss.core.delivery import (
     path_is_owned,
 )
 from gptmoss.core.adaptive import AdaptiveRuntimePolicy, tool_call_fingerprint
+from gptmoss.core.plan_obligations import attach_plan_obligations
 from gptmoss.core.professional_delivery import apply_professional_profile
 from gptmoss.core.delivery_package import build_delivery_package
 from gptmoss.core.delivery_coordinator import DeliveryCoordinator
@@ -1105,6 +1106,7 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
                     project_domains=state.variables.get("project_domains"),
                     planning_mode=state.variables.get("planning_mode"),
                     workload_profile=state.variables.get("workload_profile"),
+                    corpus_auto_workflow=bool(state.variables.get("corpus_auto_workflow")),
                 )
             except ProviderUnavailableError:
                 raise
@@ -1185,6 +1187,14 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
                     plan_result,
                     state.variables.get("workload_profile"),
                     planning_mode=str(state.variables.get("planning_mode") or "auto"),
+                )
+                attach_plan_obligations(
+                    plan_result,
+                    task=task,
+                    planning_mode=str(state.variables.get("planning_mode") or "auto"),
+                    analysis=plan_result.get("analysis"),
+                    workload_profile=state.variables.get("workload_profile"),
+                    corpus_auto_workflow=bool(state.variables.get("corpus_auto_workflow")),
                 )
             plan_result = normalize_plan(plan_result)
             self.telemetry.record("plan_generated", execution_id, duration_ms=round((time.perf_counter() - planning_started) * 1000, 2), steps=len(plan_result.get("steps", [])))

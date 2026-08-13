@@ -10,6 +10,7 @@ from gptmoss.interfaces.llm import LLMProvider
 from gptmoss.interfaces.planner import PlannerProvider
 from gptmoss.core.document_planning import adapt_document_steps
 from gptmoss.core.domains import ProjectDomainRegistry
+from gptmoss.core.plan_obligations import attach_plan_obligations, collect_plan_obligations
 from gptmoss.core.workload import planning_profile
 from gptmoss.planners.complexity import analyze_task_complexity, normalize_planning_mode
 from gptmoss.planners.fallbacks import (
@@ -24,7 +25,7 @@ from gptmoss.planners.fallbacks import (
 logger = logging.getLogger("gptmoss.planners.simple")
 
 class SimplePlanner(PlannerProvider):
-    """Generate an adaptive specialist DAG and reject undersized plans."""
+    """Generate an adaptive specialist DAG and reject plans missing delivery obligations."""
 
     def __init__(self, llm_provider: LLMProvider,
                  domain_registry: ProjectDomainRegistry | None = None):
@@ -348,6 +349,10 @@ class SimplePlanner(PlannerProvider):
         plan: Dict[str, Any],
         analysis: Dict[str, Any],
         planning_mode: str = "auto",
+        *,
+        task: str = "",
+        workload_profile: Dict[str, Any] | None = None,
+        corpus_auto_workflow: bool = False,
     ) -> None:
         steps = plan.get("steps")
         if not isinstance(steps, list) or not steps:
@@ -382,9 +387,15 @@ class SimplePlanner(PlannerProvider):
         if mode == "direct" and len(steps) != 1:
             raise ValueError("Direct planning mode must contain exactly one execution step.")
 
-        # Plan size is deliberately not validated against a fixed step count.
-        # Requirement normalization, ownership and independent validation are
-        # centralized in build_delivery_contract after graph compilation.
+        # Size is unbounded. Only semantic delivery obligations are enforced.
+        attach_plan_obligations(
+            plan,
+            task=task,
+            planning_mode=mode,
+            analysis=analysis,
+            workload_profile=workload_profile or plan.get("workload_profile"),
+            corpus_auto_workflow=corpus_auto_workflow,
+        )
 
         binary_model_suffixes = (".pth", ".pt", ".ckpt", ".safetensors", ".onnx")
         generated_model_assets = [artifact for step in steps for artifact in step.get("required_artifacts", [])
@@ -449,6 +460,17 @@ class SimplePlanner(PlannerProvider):
             kwargs.get("workload_profile")
             or (context or {}).get("variables", {}).get("workload_profile")
         )
+        variables = (context or {}).get("variables", {}) if isinstance(context, dict) else {}
+        corpus_auto_workflow = bool(
+            kwargs.get("corpus_auto_workflow", variables.get("corpus_auto_workflow"))
+        )
+        obligations = collect_plan_obligations(
+            task=task,
+            planning_mode=planning_mode,
+            analysis=analysis,
+            workload_profile=workload,
+            corpus_auto_workflow=corpus_auto_workflow,
+        )
         if planning_mode == "full_team" and analysis["level"] in {"low", "moderate"}:
             analysis = {
                 **analysis,
@@ -471,9 +493,9 @@ class SimplePlanner(PlannerProvider):
                 "and a final coordinator even if the wording looks small."
             ),
             "auto": (
-                "Planning mode is auto: derive the smallest complete DAG from the requested "
-                "outcomes, real workload, dependencies, risk and validation needs. No fixed "
-                "role list or fixed step count applies."
+                "Planning mode is auto: derive a complete DAG from the requested outcomes, "
+                "real workload, dependencies, risk and validation needs. No fixed role list "
+                "or fixed step count applies. A day-long assignment may need dozens of steps."
             ),
         }[planning_mode]
         capabilities_list = [schema["function"]["name"] for schema in capabilities_schemas]
@@ -483,6 +505,9 @@ class SimplePlanner(PlannerProvider):
             f"{mode_instructions}\n"
             f"Deterministic task hints (signals, never a mandated step count): {json.dumps(analysis, ensure_ascii=False)}\n"
             f"Bounded local workload profile (counts only, never source content): {json.dumps(workload, ensure_ascii=False)}\n"
+            "Required semantic delivery obligations (satisfy each with one or more real "
+            "steps; never pad with dummy steps; there is no maximum step count): "
+            f"{json.dumps(obligations, ensure_ascii=False)}\n"
             f"User task: {task}\nAvailable capabilities: {json.dumps(capabilities_list)}\n"
             f"Detected capability gaps: {json.dumps((context or {}).get('variables', {}).get('capability_gaps', []), ensure_ascii=False)}\n\n"
             f"Delivery environment: platform={os.name}; dependencies and model weights may not be downloaded during offline execution. "
@@ -490,7 +515,7 @@ class SimplePlanner(PlannerProvider):
             "Use canonical roles only from architect, security, developer, qa, debugger, writer, coordinator, but create as many distinct domain specialists as required. "
             "A delegated specialist is bounded to its own assignment by default. Set allow_nested_delegation=true on a step only when that specialist genuinely requires a subordinate team and explain why in the rationale; never use it to duplicate sibling steps. "
             "Multiple differently specialized developers and testers are expected.\n"
-            "Choose the number of steps dynamically. Create a step only for a distinct operation, owner, dependency boundary, artifact contract, or independent validation gate; merge redundant work. The runtime may partition source work from the measured workload after this semantic plan is accepted. "
+            "Choose the number of steps dynamically from the real work. Create a step only for a distinct operation, owner, dependency boundary, artifact contract, or independent validation gate; merge redundant work. Do not shrink a large assignment to look small. The runtime may partition source work from the measured workload after this semantic plan is accepted. "
             "Parallelize independent work and depend on existing outputs so work is not repeated.\n"
             "Extract a top-level requirements array from the user's exact request before planning. Preserve every distinct requested outcome; never merge or truncate requirements merely to reduce plan size. Each requirement has id, statement, priority, mandatory, source='user', and acceptance. "
             "Every step must contain id, role, specialist, description, dependencies, expertise, required_artifacts, acceptance_criteria, verification_commands, requirement_ids, owned_paths, and status='pending'. "
@@ -539,11 +564,27 @@ class SimplePlanner(PlannerProvider):
                     role_title = str(step.get("role") or "Task").replace("_", " ").title()
                     step["specialist"] = f"{role_title} Specialist"
                 step["status"] = "pending"
-            self._validate_generated_plan(plan_data, analysis, planning_mode)
+            self._validate_generated_plan(
+                plan_data, analysis, planning_mode,
+                task=task,
+                workload_profile=workload,
+                corpus_auto_workflow=corpus_auto_workflow,
+            )
             if _document_deliverable_task(task):
                 plan_data["delivery_profile"] = "professional-local"
             plan_data["planning_mode"] = planning_mode
             return plan_data
         except Exception as exc:
-            logger.warning("Error or undersized LLM plan; using adaptive fallback: %s", exc)
-            return self._fallback_plan(task, analysis, planning_mode)
+            logger.warning("Error or incomplete LLM plan; using adaptive fallback: %s", exc)
+            fallback = self._fallback_plan(task, analysis, planning_mode)
+            fallback["planning_mode"] = planning_mode
+            attach_plan_obligations(
+                fallback,
+                task=task,
+                planning_mode=planning_mode,
+                analysis=analysis,
+                workload_profile=workload,
+                corpus_auto_workflow=corpus_auto_workflow,
+                validate=False,
+            )
+            return fallback

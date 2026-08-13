@@ -30,8 +30,8 @@ Les fichiers, représentations normalisées, index et rapports restent sous le w
 1. Lancez GPTMOSS avec `start.bat` sous Windows ou `./start.sh` sous Linux/macOS.
 2. Ouvrez l'interface locale, choisissez le projet cible et ajoutez les fichiers sous la zone de tâche.
 3. Ouvrez **Bibliothèque > Documents et images** pour vérifier le nom, le format détecté, le nombre de blocs et l'aperçu normalisé.
-4. Cochez uniquement les sources nécessaires à l'exécution.
-5. Décrivez le public, la décision attendue, les sections obligatoires, les exigences et le niveau de preuve souhaité.
+4. Cochez uniquement les sources nécessaires à l'exécution. La case d'inventaire automatique impose les obligations corpus au plan, sans réécrire votre texte.
+5. Décrivez le public, la décision attendue, les sections obligatoires, les exigences et le niveau de preuve souhaité. Si la case est décochée, votre consigne reste le seul contrat textuel.
 6. Sélectionnez au besoin `document-analysis`, `documentation` et `project-architecture`. La sélection automatique les choisit également à partir de la mission.
 7. Démarrez l'exécution, surveillez le plan, les références et les validations, puis refusez toute demande d'approbation qui sortirait du workspace prévu.
 

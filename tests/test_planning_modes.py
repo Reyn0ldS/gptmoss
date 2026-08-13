@@ -75,27 +75,51 @@ def test_explicit_planning_modes_override_complexity_sizing():
     assert any(step["role"] == "debugger" for step in full["steps"])
 
 
-@pytest.mark.parametrize(
-    "level,minimum",
-    [("low", 1), ("moderate", 5), ("high", 9), ("very_high", 12)],
-)
-def test_generated_plan_validation_uses_dynamic_complexity_floor(level, minimum):
+def test_generated_plan_validation_uses_obligations_not_a_step_floor():
+    from gptmoss.planners.fallbacks import _step
+
     analysis = {
-        "level": level,
-        "score": 0,
+        "level": "very_high",
+        "score": 20,
         "domains": ["software-engineering"],
-        "requested_outcomes": 1,
-        "suggested_min_steps": minimum,
+        "requested_outcomes": 4,
+        "suggested_min_steps": 12,
     }
-    mode = "direct" if level == "low" else "auto"
-    plan = SimplePlanner._fallback_plan(
-        "Build a software application with tests.", analysis, mode,
-    )
-    if level != "low" and len(plan["steps"]) < minimum:
-        with pytest.raises(ValueError, match="undersized"):
-            SimplePlanner._validate_generated_plan(plan, analysis, mode)
-    else:
-        SimplePlanner._validate_generated_plan(plan, analysis, mode)
+    task = "Build a software application with tests."
+    compact = {
+        "analysis": analysis,
+        "steps": [
+            _step(0, "developer", "Implementation Engineer",
+                  "Implement the requested software.", [], ["implementation"], [],
+                  ["The change is runnable."]),
+            _step(1, "qa", "Independent Test Engineer",
+                  "Add independent tests.", [0], ["test engineering"],
+                  ["tests/test_acceptance.py"], ["Tests cover the change."],
+                  ["python -m pytest --collect-only -q"]),
+            _step(2, "debugger", "Autonomous Repair Engineer",
+                  "Repair root causes and rerun.", [1], ["debugging"], [],
+                  ["The suite exits with code 0."], ["python -m pytest -q"]),
+            _step(3, "coordinator", "Final Requirement Traceability Auditor",
+                  "Audit the requested outcome.", [2], ["delivery audit"], [],
+                  ["No unsupported completion claim remains."]),
+        ],
+    }
+    SimplePlanner._validate_generated_plan(compact, analysis, "auto", task=task)
+    assert len(compact["steps"]) < analysis["suggested_min_steps"]
+    assert {item["id"] for item in compact["plan_obligations"]} >= {
+        "implementation", "independent_validation", "autonomous_repair", "final_audit",
+    }
+
+    incomplete = {
+        "analysis": analysis,
+        "steps": [
+            _step(0, "coordinator", "Task Specialist",
+                  "Perform the user task.", [], ["general"], [],
+                  ["The requested outcome is delivered."]),
+        ],
+    }
+    with pytest.raises(ValueError, match="missing required delivery obligations"):
+        SimplePlanner._validate_generated_plan(incomplete, analysis, "auto", task=task)
 
 
 def test_thirteen_steps_are_a_fallback_shape_not_a_global_fixed_count():

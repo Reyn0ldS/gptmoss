@@ -45,6 +45,7 @@ class SubmitTaskRequest(BaseModel):
     planning_mode: str = "auto"
     attachment_ids: List[str] = Field(default_factory=list)
     corpus_ids: List[str] = Field(default_factory=list)
+    corpus_auto_workflow: bool = True
     delay_seconds: float = Field(default=0, ge=0, le=31_536_000)
     run_at: Optional[float] = Field(default=None, ge=0)
 
@@ -177,6 +178,7 @@ PUBLIC_EXECUTION_VARIABLE_KEYS = (
     "project_domains",
     "attachment_ids",
     "corpus_ids",
+    "corpus_auto_workflow",
     "corpus_summaries",
     "role_name",
     "parent_execution_id",
@@ -453,21 +455,15 @@ async def submit_task(req: SubmitTaskRequest):
         corpus = app_state.execution_engine.artifact_store.get_corpus(corpus_id)
         corpus_summaries.append(_public_corpus(corpus))
     effective_task = req.task.strip()
-    if corpus_summaries:
-        effective_task += (
-            "\n\nMandatory local corpus workflow: inventory every attached source before "
-            "drawing conclusions; preserve relative source paths in citations; classify "
-            "themes, requirements, decisions, risks, contradictions, images, and evidence; "
-            "search every decision topic across the whole corpus; build a source-to-section "
-            "coverage matrix; produce the requested professional deliverable from local "
-            "evidence only; and report unsupported claims or unreadable files explicitly. "
-            "Do not modify, move, or rename source files."
-        )
+    corpus_auto_workflow = bool(req.corpus_auto_workflow) and bool(
+        requested_corpora or requested_attachments
+    )
     variables.update({
         "project_id": project_id,
         "attachment_ids": requested_attachments,
         "corpus_ids": requested_corpora,
         "corpus_summaries": corpus_summaries,
+        "corpus_auto_workflow": corpus_auto_workflow,
         "planning_mode": planning_mode,
         "task_title": task_title_from_text(req.task.strip()),
     })

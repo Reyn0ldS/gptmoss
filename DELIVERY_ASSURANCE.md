@@ -12,7 +12,10 @@ Le coordinateur fige dans `variables.delivery_contract` :
 - la matrice exigence → implémentation → validation indépendante ;
 - les changements de périmètre proposés ;
 - les chemins possédés par chaque spécialiste ;
-- les interfaces publiques, commandes de vérification et commandes de lancement.
+- les interfaces publiques, commandes de vérification et commandes de lancement ;
+- les obligations sémantiques (`plan_obligations`) : inventaire source, implémentation,
+  validation indépendante, réparation autonome et audit final, selon la mission réelle.
+  Le nombre d'étapes n'est pas un quota.
 
 Les plans anciens sans ces champs sont enrichis de façon déterministe et hors
 ligne. Les nouveaux plans doivent déclarer `requirements`, `scope_changes`,
@@ -112,6 +115,6 @@ industrielle) :
 python scripts/run_delivery_benchmarks.py
 ```
 
-Il échoue si un plan complexe est sous-dimensionné, réutilise trop de profils
-génériques, oublie la réparation autonome ou l'auditeur final, laisse une
+Il échoue si un plan complexe omet une obligation de livraison, réutilise trop de
+profils génériques, oublie la réparation autonome ou l'auditeur final, laisse une
 exigence sans implémentation/validation, ou crée un artefact sans propriétaire.

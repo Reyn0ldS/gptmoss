@@ -46,6 +46,7 @@
     "gptmoss/core/kernel.py": "runtime",
     "gptmoss/core/long_document_engine.py": "documents",
     "gptmoss/core/observability.py": "observability",
+    "gptmoss/core/plan_obligations.py": "planning",
     "gptmoss/core/professional_delivery.py": "delivery",
     "gptmoss/core/provider_recovery.py": "runtime",
     "gptmoss/core/scheduler.py": "planning",
@@ -303,7 +304,7 @@
     },
     {
       "id": "planning-execution-lifecycle",
-      "tests": ["tests/test_execution.py", "tests/test_lifecycle_chronology.py", "tests/test_planning_modes.py", "tests/test_generic_planning_and_context.py", "tests/test_general_runtime_adaptation.py", "tests/test_adaptive_autonomy.py", "tests/test_execution_services.py", "tests/test_scheduler_and_legacy_state.py", "tests/test_state_durability.py", "tests/test_runtime_ux.py"]
+      "tests": ["tests/test_execution.py", "tests/test_lifecycle_chronology.py", "tests/test_planning_modes.py", "tests/test_plan_obligations.py", "tests/test_generic_planning_and_context.py", "tests/test_general_runtime_adaptation.py", "tests/test_adaptive_autonomy.py", "tests/test_execution_services.py", "tests/test_scheduler_and_legacy_state.py", "tests/test_state_durability.py", "tests/test_runtime_ux.py"]
     },
     {
       "id": "provider-recovery",

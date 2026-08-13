@@ -61,4 +61,5 @@ def analyze_task_complexity(
     else:
         level, minimum = "low", 1
     return {"level": level, "score": score, "domains": domains,
-            "requested_outcomes": requested_outcomes, "suggested_min_steps": minimum}
+            "requested_outcomes": requested_outcomes,
+            "suggested_min_steps": minimum}  # hint for the LLM, never a hard floor

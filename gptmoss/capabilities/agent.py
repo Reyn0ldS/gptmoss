@@ -10,6 +10,8 @@ INHERITED_VARIABLE_KEYS = (
     "project_path",
     "project_domains",
     "attachment_ids",
+    "corpus_ids",
+    "corpus_auto_workflow",
     "planning_mode",
 )
 TERMINAL_EXECUTION_STATUSES = frozenset({"completed", "failed", "cancelled"})

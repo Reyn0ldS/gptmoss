@@ -16,6 +16,9 @@ SOURCE_MARKERS = (
     "corpus", "source", "attachment", "document", "evidence", "inventory",
     "fichier", "pièce jointe", "piece jointe", "preuve", "inventor",
 )
+SINGLE_PARTITION_USABLE = 48
+PARTITION_LOAD_UNIT = 96
+MAX_SOURCE_PARTITIONS = 128
 
 
 def build_workload_profile(
@@ -49,15 +52,19 @@ def build_workload_profile(
     ignored = sum(max(0, int(item.get("skipped_count") or len(item.get("skipped") or []))) for item in summaries)
     failed = sum(max(0, int(item.get("error_count") or len(item.get("errors") or []))) for item in summaries)
     usable = documents + images
-    # A partition is a bounded execution unit, not a prompt dump.  Documents
+    # A partition is a bounded retrieval unit, not a prompt dump. Documents
     # are costlier than image metadata and indexed chunks increase retrieval work.
     load_units = documents + math.ceil(images / 4) + math.ceil(total_chunks / 200)
-    # Keep the DAG adaptive without launching an unbounded wave of provider
-    # calls.  Each shard uses indexed retrieval, so a dozen bounded partitions
-    # is enough even for very large local corpora.
-    partition_count = max(1, min(12, math.ceil(max(1, load_units) / 512)))
-    if usable <= 128:
+    # Scale with measured load. There is no small quality cap: a day-long
+    # corpus job may legitimately need dozens of shards. The ceiling is only
+    # an operational bound so the compiled DAG stays persistable.
+    if usable <= SINGLE_PARTITION_USABLE:
         partition_count = 1
+    else:
+        partition_count = max(1, min(
+            MAX_SOURCE_PARTITIONS,
+            math.ceil(max(1, load_units) / PARTITION_LOAD_UNIT),
+        ))
     return {
         "schema_version": 1,
         "attachment_count": len(identifiers),

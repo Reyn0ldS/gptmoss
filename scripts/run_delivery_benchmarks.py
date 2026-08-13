@@ -14,6 +14,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from gptmoss.core.delivery import build_delivery_contract
 from gptmoss.core.execution import normalize_plan
+from gptmoss.core.plan_obligations import collect_plan_obligations, unsatisfied_obligations
 from gptmoss.planners.simple import SimplePlanner, analyze_task_complexity
 
 
@@ -28,8 +29,11 @@ def evaluate_prompt(identifier: str, prompt: str) -> Dict[str, Any]:
     ]
     violations: List[str] = []
     if analysis["level"] in {"high", "very_high"}:
-        if len(steps) < analysis["suggested_min_steps"]:
-            violations.append("undersized_plan")
+        obligations = collect_plan_obligations(
+            task=prompt, planning_mode="auto", analysis=analysis,
+        )
+        missing = unsatisfied_obligations(steps, obligations)
+        violations.extend(f"missing_obligation:{item}" for item in missing)
         if len(set(specialists)) < max(6, len(steps) * 3 // 4):
             violations.append("generic_specialist_reuse")
         if not any(step.get("role") == "debugger" for step in steps):

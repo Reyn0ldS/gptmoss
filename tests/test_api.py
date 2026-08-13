@@ -795,7 +795,20 @@ def test_folder_corpus_api_import_finalize_and_execution_scope(tmp_path):
     assert state.variables["corpus_ids"] == [corpus_id]
     assert state.variables["attachment_ids"] == [artifact_id]
     assert state.variables["corpus_summaries"][0]["file_count"] == 1
-    assert "Mandatory local corpus workflow" in state.variables["task"]
+    assert state.variables["task"] == "Produce the requested professional report."
+    assert state.variables["corpus_auto_workflow"] is True
+    assert "Mandatory local corpus workflow" not in state.variables["task"]
+
+    disabled = client.post("/executions", json={
+        "task": "Fix the attached source bug only.",
+        "corpus_ids": [corpus_id],
+        "planning_mode": "auto",
+        "corpus_auto_workflow": False,
+    })
+    assert disabled.status_code == 201
+    disabled_state = state_engine.get_execution(disabled.json()["execution_id"])
+    assert disabled_state.variables["task"] == "Fix the attached source bug only."
+    assert disabled_state.variables["corpus_auto_workflow"] is False
     public = client.get(f"/executions/{submitted.json()['execution_id']}").json()
     assert public["variables"]["corpus_summaries"][0]["root_label"] == "sources"
     deleted = client.delete(f"/corpora/{corpus_id}")
@@ -1121,7 +1134,7 @@ def test_gui_contains_complete_management_controls():
         'id="task-planning-mode"', "appendLlmStream", "clearLlmStream",
         "planning_mode", "task_title",
         'id="task-corpus-folder"', "webkitdirectory", "uploadSelectedCorpusFolder",
-        'id="task-corpus-name"',
+        'id="task-corpus-name"', 'id="task-corpus-auto-workflow"', "corpus_auto_workflow",
         '"pdf":"application/pdf"', 'requestApi("/corpora"',
         'id="library-corpora"', "toggleCorpusAttachment", "selectedLibraryCorpora", "deleteCorpus",
         "applyConversationScroll", "scheduleFetchExecutionDetails",
