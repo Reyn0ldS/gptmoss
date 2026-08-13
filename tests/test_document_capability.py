@@ -94,6 +94,21 @@ def test_document_capability_inventory_is_scoped_to_explicit_attachments(tmp_pat
     assert "zero-based" in inventory["addressing_convention"]
 
 
+def test_document_inventory_accepts_a_model_supplied_query_without_narrowing_scope(tmp_path: Path):
+    store = ArtifactStore(str(tmp_path))
+    attached = _upload_text(store, "decision.txt", "# Decision\n\nLocal evidence.")
+    capability = DocumentCapability(store)
+
+    inventory = json.loads(capability.inventory(
+        context=_context(attached["id"]),
+        query="inventory every decision source",
+    ))
+
+    assert inventory["count"] == 1
+    assert inventory["documents"][0]["artifact_id"] == attached["id"]
+    assert inventory["requested_query"] == "inventory every decision source"
+
+
 def test_document_capability_inventory_separates_pptx_blocks_from_slides(
     tmp_path: Path,
     monkeypatch,

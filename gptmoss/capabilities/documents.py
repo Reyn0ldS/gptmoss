@@ -126,7 +126,12 @@ class DocumentCapability:
             "their identifiers, formats, block counts, chunk counts, and parser versions."
         ),
     )
-    def inventory(self, context: Optional[Dict[str, Any]] = None) -> str:
+    def inventory(
+        self,
+        context: Optional[Dict[str, Any]] = None,
+        query: str = "",
+    ) -> str:
+        """Inventory all attachments; tolerate a model-supplied descriptive query."""
         attached = self._attached_ids(context)
         items = [
             self._inventory_item(item)
@@ -138,6 +143,7 @@ class DocumentCapability:
                 "documents": items,
                 "count": len(items),
                 "scope": "explicitly attached local files",
+                "requested_query": str(query or "").strip(),
                 "addressing_convention": (
                     "documents.read start_block uses zero-based normalized-block offsets. "
                     "Local citations use one-based bounds from citation_bounds. PPTX "

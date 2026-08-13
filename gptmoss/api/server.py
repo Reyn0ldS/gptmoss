@@ -70,8 +70,10 @@ class CorpusIssue(BaseModel):
 
 class FinalizeCorpusRequest(BaseModel):
     present_paths: List[str] = Field(default_factory=list, max_length=10_000)
-    skipped: List[CorpusIssue] = Field(default_factory=list, max_length=1_000)
-    errors: List[CorpusIssue] = Field(default_factory=list, max_length=1_000)
+    # Keep the finalization limits aligned with the documented folder limit.
+    # Otherwise a successful import can fail only when its manifest is closed.
+    skipped: List[CorpusIssue] = Field(default_factory=list, max_length=10_000)
+    errors: List[CorpusIssue] = Field(default_factory=list, max_length=10_000)
 
 class DecisionRequest(BaseModel):
     reason: Optional[str] = None
@@ -567,8 +569,15 @@ def _public_corpus(corpus: Dict[str, Any], *, include_entries: bool = False) -> 
         for key in (
             "id", "name", "root_label", "source_kind", "state",
             "created_at", "updated_at", "skipped", "errors",
+            "skipped_count", "error_count",
         )
     }
+    result["skipped_count"] = int(
+        corpus.get("skipped_count", len(corpus.get("skipped") or [])) or 0
+    )
+    result["error_count"] = int(
+        corpus.get("error_count", len(corpus.get("errors") or [])) or 0
+    )
     result["file_count"] = len(entries)
     result["document_count"] = sum(
         1 for entry in entries.values()

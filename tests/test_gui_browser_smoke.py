@@ -194,3 +194,24 @@ def test_live_gui_escapes_project_markup_in_edge(tmp_path):
     finally:
         server.should_exit = True
         thread.join(timeout=5)
+
+
+def test_live_gui_formats_structured_fastapi_errors_in_edge():
+    try:
+        edge = find_edge()
+    except FileNotFoundError:
+        pytest.skip("Microsoft Edge is required for the live DOM dump")
+
+    _gui_app()
+    port = _free_port()
+    server, thread = _serve(port)
+    try:
+        dumped = _dump_dom(edge, f"http://127.0.0.1:{port}/?layout_audit=api-error", 1024, 768)
+        assert "data-api-error-audit=" in dumped
+        assert "HTTP 422" in dumped
+        assert "task" in dumped
+        assert "Input should be a valid string" in dumped
+        assert "[object Object]" not in dumped
+    finally:
+        server.should_exit = True
+        thread.join(timeout=5)

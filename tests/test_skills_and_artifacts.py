@@ -317,6 +317,23 @@ def test_folder_corpus_finalization_removes_stale_manifest_entries(tmp_path):
     assert "corpus_memberships" not in store.get(artifacts["removed.md"]["id"])
 
 
+def test_folder_corpus_finalization_keeps_complete_issue_totals_with_bounded_samples(tmp_path):
+    store = ArtifactStore(str(tmp_path))
+    corpus, _ = store.create_corpus("Large diagnostics", root_label="sources")
+    skipped = [
+        {"relative_path": f"sources/cache/{index}.bin", "reason": "unsupported"}
+        for index in range(1_005)
+    ]
+
+    finalized = store.finalize_corpus(
+        corpus["id"], present_paths=[], skipped=skipped,
+    )
+
+    assert finalized["skipped_count"] == 1_005
+    assert len(finalized["skipped"]) == 1_000
+    assert finalized["error_count"] == 0
+
+
 def test_folder_corpus_replacement_cleans_previous_membership(tmp_path):
     store = ArtifactStore(str(tmp_path))
     corpus, _ = store.create_corpus("Refresh", root_label="sources")

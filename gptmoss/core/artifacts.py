@@ -153,6 +153,8 @@ class ArtifactStore:
                 "entries": {},
                 "skipped": [],
                 "errors": [],
+                "skipped_count": 0,
+                "error_count": 0,
             }
             write_text_atomic(self._corpus_path(corpus["id"]), json.dumps(corpus, ensure_ascii=False))
             return corpus, False
@@ -232,8 +234,11 @@ class ArtifactStore:
             }
             corpus.update({
                 "entries": entries,
+                # Preserve the complete totals while bounding persisted samples.
                 "skipped": list(skipped or [])[:1_000],
                 "errors": list(errors or [])[:1_000],
+                "skipped_count": len(skipped or []),
+                "error_count": len(errors or []),
                 "state": "partial" if errors else "ready",
                 "updated_at": time.time(),
             })

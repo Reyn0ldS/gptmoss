@@ -71,8 +71,14 @@ class FilesystemCapability:
         return full_path
 
     @action(name="read", description="Read the content of a file. Path is relative to the workspace.")
-    def read(self, path: str, context: Optional[Dict[str, Any]] = None) -> str:
-        """Reads contents of a file."""
+    def read(
+        self,
+        path: str,
+        context: Optional[Dict[str, Any]] = None,
+        offset: int = 0,
+        limit: int = 0,
+    ) -> str:
+        """Read text, optionally using bounded character offsets for large files."""
         execution_id = context.get("execution_id") if context else None
         resolved = self._resolve_path(path, execution_id)
         if not os.path.exists(resolved):
@@ -80,7 +86,12 @@ class FilesystemCapability:
         if os.path.isdir(resolved):
             return f"Error: '{path}' is a directory. Use list_dir to view its contents."
         with open(resolved, "r", encoding="utf-8") as f:
-            return f.read()
+            content = f.read()
+        start = max(0, int(offset or 0))
+        if start >= len(content):
+            return ""
+        count = max(0, int(limit or 0))
+        return content[start : start + count] if count else content[start:]
 
     @action(name="write", description="Create or overwrite a file with contents. Path is relative to the workspace.")
     def write(self, path: str, content: str, context: Optional[Dict[str, Any]] = None) -> str:

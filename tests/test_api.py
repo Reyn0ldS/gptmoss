@@ -829,6 +829,38 @@ def test_folder_corpus_api_rejects_traversal_and_unfinalized_submission(tmp_path
     assert blocked.status_code == 409
 
 
+def test_folder_corpus_api_finalizes_more_than_one_thousand_skipped_files(tmp_path):
+    from gptmoss.capabilities.filesystem import FilesystemCapability
+
+    event_bus = EventBus()
+    state_engine = StateEngine()
+    llm = MockLLMProvider()
+    engine = ExecutionEngine(
+        event_bus, state_engine,
+        ContextEngine(state_engine, RAMMemoryProvider()), llm,
+        SimplePlanner(llm), SimplePolicyProvider(),
+    )
+    engine.register_capability("filesystem", FilesystemCapability(str(tmp_path)))
+    init_app(RuntimeKernel(event_bus, state_engine, engine), engine, state_engine, event_bus)
+    client = ASGIClient(app)
+    corpus_id = client.post("/corpora", json={
+        "name": "large", "root_label": "sources", "resume": False,
+    }).json()["id"]
+
+    response = client.post(f"/corpora/{corpus_id}/finalize", json={
+        "present_paths": [],
+        "skipped": [
+            {"relative_path": f"sources/cache/{index}.bin", "reason": "unsupported"}
+            for index in range(1_005)
+        ],
+        "errors": [],
+    })
+
+    assert response.status_code == 200
+    assert response.json()["skipped_count"] == 1_005
+    assert len(response.json()["skipped"]) == 1_000
+
+
 def test_professional_delivery_download_route_is_scoped_to_execution(tmp_path):
     from gptmoss.capabilities.filesystem import FilesystemCapability
 

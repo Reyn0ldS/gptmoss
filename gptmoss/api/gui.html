@@ -1588,17 +1588,46 @@
             }
         }
 
-        async function requestApi(url, options = {}) {
-            const response = await fetch(url, options);
-            if (response.ok) return response;
-            let detail = `HTTP ${response.status}`;
-            try {
-                const payload = await response.json();
-                detail = payload.detail || payload.message || detail;
-            } catch (_) {
-                // A non-JSON error still has a useful HTTP status.
+        function formatApiErrorDetail(value) {
+            if (value === null || value === undefined || value === "") return "";
+            if (typeof value === "string") return value;
+            if (Array.isArray(value)) {
+                return value.map(item => {
+                    if (typeof item === "string") return item;
+                    if (!item || typeof item !== "object") return String(item);
+                    const location = Array.isArray(item.loc)
+                        ? item.loc.filter(part => part !== "body").join(".")
+                        : "";
+                    const message = formatApiErrorDetail(
+                        item.msg ?? item.message ?? item.error ?? item.detail ?? item
+                    );
+                    return location && message ? `${location} : ${message}` : (message || location);
+                }).filter(Boolean).join(" ; ");
             }
-            throw new Error(detail);
+            if (typeof value === "object") {
+                const nested = value.detail ?? value.message ?? value.error;
+                if (nested !== undefined && nested !== value) return formatApiErrorDetail(nested);
+                try { return JSON.stringify(value); } catch (_) { return "Erreur structurée non lisible"; }
+            }
+            return String(value);
+        }
+
+        async function requestApi(url, options = {}) {
+            let response;
+            try {
+                response = await fetch(url, options);
+            } catch (error) {
+                throw new Error(`Serveur injoignable pour ${url} : ${formatApiErrorDetail(error?.message || error)}`);
+            }
+            if (response.ok) return response;
+            let detail = "";
+            try {
+                detail = formatApiErrorDetail(await response.json());
+            } catch (_) {
+                try { detail = (await response.text()).trim(); } catch (_) { /* status remains useful */ }
+            }
+            const status = `HTTP ${response.status}${response.statusText ? ` ${response.statusText}` : ""}`;
+            throw new Error(`${status}${detail ? ` — ${detail}` : ""}`);
         }
 
         let globalProjects = [];
@@ -2325,16 +2354,20 @@
             
             const projSelect = document.getElementById("task-project-select");
             const project_id = projSelect ? projSelect.value : "proj-default";
-            
+
+            let submissionStage = "préparation de la tâche";
             try {
                 if (submitButton) {
                     submitButton.disabled = true;
                     submitButton.textContent = "Création en cours…";
                 }
+                submissionStage = "import des fichiers joints";
                 const attachment_ids = await uploadSelectedAttachments();
+                submissionStage = "import et validation du dossier source";
                 const corpus_ids = await uploadSelectedCorpusFolder();
                 const planningSelect = document.getElementById("task-planning-mode");
                 const planning_mode = planningSelect ? planningSelect.value : "auto";
+                submissionStage = "création de l'exécution";
                 const res = await requestApi("/executions", {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
@@ -2358,7 +2391,15 @@
                 selectExecution(newId);
                 fetchExecutions();
             } catch (err) {
-                alert(`Erreur lors de la soumission de la tâche : ${err.message}`);
+                const diagnostic = formatApiErrorDetail(err?.message || err) || "Erreur inconnue";
+                if (selectedCorpusId) {
+                    renderCorpusProgress(
+                        `Import interrompu pendant ${submissionStage}. Le corpus ${selectedCorpusId.slice(0, 8)} est conservé et sera repris au prochain essai. ${diagnostic}`,
+                        "error"
+                    );
+                }
+                showToast(`Échec pendant ${submissionStage} : ${diagnostic}`, "error");
+                alert(`Échec pendant ${submissionStage}.\n\n${diagnostic}\n\nLes fichiers déjà importés sont conservés pour une reprise.`);
             } finally {
                 if (submitButton) {
                     submitButton.disabled = false;
@@ -2889,7 +2930,7 @@
             const finalizedResponse = await requestApi(`/corpora/${encodeURIComponent(corpus.id)}/finalize`, {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({present_paths:Array.from(successfulPaths), skipped, errors})});
             const finalized = await finalizedResponse.json();
             if (!finalized.file_count) throw new Error("Aucun fichier du dossier n'a pu être importé.");
-            renderCorpusProgress(`Corpus prêt : ${finalized.document_count} document(s), ${finalized.image_count} image(s), ${skipped.length} ignoré(s), ${errors.length} erreur(s).`, errors.length ? "error" : "success");
+            renderCorpusProgress(`Corpus prêt : ${finalized.document_count} document(s), ${finalized.image_count} image(s), ${finalized.skipped_count ?? skipped.length} ignoré(s), ${finalized.error_count ?? errors.length} erreur(s).`, errors.length ? "error" : "success");
             return Array.from(new Set([...selectedLibraryCorpora, corpus.id]));
         }
 
@@ -3511,6 +3552,16 @@
                 const modal = document.getElementById("server-modal");
                 if (modal) modal.style.display = "flex";
                 renderServerStatus({state:"error", port:65535, app_url:"http://127.0.0.1:65535", error:longToken});
+            }
+            if (mode === "api-error") {
+                document.body.dataset.apiErrorAudit = "pending";
+                requestApi("/executions", {
+                    method:"POST",
+                    headers:{"Content-Type":"application/json"},
+                    body:JSON.stringify({task:{invalid:true}}),
+                }).catch(error => {
+                    document.body.dataset.apiErrorAudit = formatApiErrorDetail(error?.message || error);
+                });
             }
         }
 

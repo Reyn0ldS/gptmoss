@@ -10,6 +10,16 @@ from gptmoss.policies.simple import SimplePolicyProvider
 from gptmoss.capabilities.filesystem import FilesystemCapability
 from tests.mock_llm import MockLLMProvider
 
+
+def test_filesystem_read_accepts_bounded_model_offsets(tmp_path):
+    path = tmp_path / "large.txt"
+    path.write_text("0123456789", encoding="utf-8")
+    filesystem = FilesystemCapability(str(tmp_path))
+
+    assert filesystem.read("large.txt", offset=3, limit=4) == "3456"
+    assert filesystem.read("large.txt", offset=8) == "89"
+    assert filesystem.read("large.txt", offset=99, limit=3) == ""
+
 @pytest.fixture
 def test_workspace():
     workspace_dir = "./test_execution_workspace"

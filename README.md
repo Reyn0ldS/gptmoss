@@ -602,7 +602,17 @@ inchangés. Une tâche laissée vide déclenche une mission professionnelle gén
 inventaire, classification, recherche transversale, matrice de couverture, rédaction,
 diagrammes et contrôle qualité fondés uniquement sur le corpus local. Un corpus partiel
 reste exploitable, mais ses erreurs sont conservées et doivent être signalées dans le
-livrable.
+livrable. La finalisation accepte autant d'entrées ignorées ou en échec que la limite du
+corpus (10 000) ; le manifeste conserve les totaux complets et un échantillon borné de
+diagnostics. Si l'import ou la création de la tâche échoue, la GUI indique désormais
+l'étape exacte, traduit les erreurs structurées de l'API en texte lisible et conserve le
+corpus déjà transmis pour une reprise sans retransfert.
+
+Les capacités de lecture tolèrent aussi les variantes d'appel courantes émises pendant
+une analyse autonome : `documents.inventory` peut recevoir une requête descriptive sans
+réduire l'inventaire exhaustif, et `filesystem.read` accepte des bornes `offset`/`limit`
+en caractères. Ces paramètres sont exposés par le schéma d'outils et restent strictement
+en lecture dans le workspace autorisé.
 
 ### Déposer un fichier puis le joindre à une tâche
 
