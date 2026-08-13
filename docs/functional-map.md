@@ -37,9 +37,11 @@ superviseur avec son jeton. Un port occupé est signalé avant de démarrer l'en
    passe à `running` avec `ExecutionStarted`.
 5. Le contexte rassemble conversation, état, mémoire validée du projet, schémas d'outils
    et pièces jointes bornées ; `ContextBuilt` est publié.
-6. Le planner produit exigences, interfaces, dépendances, validations et étapes. Le plan
-   est normalisé, les exigences héritées sont fusionnées et le profil professionnel est
-   appliqué aux travaux documentaires.
+6. Le planner produit exigences, interfaces, dépendances, validations et opérations sans
+   nombre d'étapes imposé. Le plan est normalisé, les exigences héritées sont fusionnées,
+   puis `workload.py` compile le graphe selon les métriques réelles. Un gros corpus est
+   distribué en partitions bornées, rejoint par une consolidation ; une petite tâche
+   conserve son graphe minimal.
 7. Une réduction de périmètre requiert `ScopeApprovalRequested` avant toute exécution.
 
 ## Ordonnancement et exécution d'une étape
@@ -82,6 +84,11 @@ temporisations indépendantes. Une
 erreur d'authentification ou de configuration permanente devient `failed` avec un
 diagnostic exploitable : elle ne doit pas boucler comme une panne réseau.
 
+Avant chaque appel, le fournisseur réserve des jetons de sortie, estime messages et
+schémas d'outils, puis compacte sous la fenêtre configurée ou apprise. Une erreur donnant
+une limite exacte (par exemple 262144 jetons) met à jour l'enveloppe et déclenche une
+nouvelle tentative bornée sans perdre l'état durable de l'exécution.
+
 Au redémarrage, les exécutions interrompues, planifiées et celles en attente fournisseur
 sont normalisées puis réinscrites sans dupliquer la tâche initiale. Le verrou par
 exécution empêche deux boucles simultanées.
@@ -103,7 +110,8 @@ exécution empêche deux boucles simultanées.
    provenance ; les archives sont soumises aux limites de taille et de ratio.
 7. L'index documentaire est reconstruit/synchronisé puis devient interrogeable.
 8. L'exécution ne voit que les artefacts explicitement attachés. La capacité `documents`
-   impose l'ordre inventaire, recherche, lecture ciblée et chunks si nécessaire.
+   pagine l'inventaire, recherche/lit le texte par chunks et charge les images ciblées par
+   lots bornés via `read_image`/`read_images`.
 9. Les citations internes se fondent sur les identifiants, fichiers et positions locales ;
    aucune preuve Internet n'est fabriquée pour un mode corpus local.
 

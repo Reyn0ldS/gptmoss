@@ -52,6 +52,7 @@
     "gptmoss/core/settings.py": "configuration",
     "gptmoss/core/skills.py": "skills",
     "gptmoss/core/state.py": "persistence",
+    "gptmoss/core/workload.py": "planning",
     "gptmoss/interfaces/capability.py": "contract",
     "gptmoss/interfaces/llm.py": "contract",
     "gptmoss/interfaces/memory.py": "contract",
@@ -93,7 +94,7 @@
     },
     "documents": {
       "module": "gptmoss/capabilities/documents.py",
-      "actions": ["inventory", "search", "read", "read_chunk"]
+      "actions": ["inventory", "read_image", "read_images", "search", "read", "read_chunk"]
     },
     "filesystem": {
       "module": "gptmoss/capabilities/filesystem.py",
@@ -236,6 +237,8 @@
     "restrict_to_workspace",
     "allow_subfolders",
     "max_context_chars",
+    "context_window_tokens",
+    "context_output_reserve_tokens",
     "max_upload_bytes",
     "max_attachment_text_chars",
     "max_transitions_per_execution",
@@ -300,11 +303,11 @@
     },
     {
       "id": "planning-execution-lifecycle",
-      "tests": ["tests/test_execution.py", "tests/test_lifecycle_chronology.py", "tests/test_planning_modes.py", "tests/test_general_runtime_adaptation.py", "tests/test_adaptive_autonomy.py", "tests/test_execution_services.py", "tests/test_scheduler_and_legacy_state.py", "tests/test_state_durability.py", "tests/test_runtime_ux.py"]
+      "tests": ["tests/test_execution.py", "tests/test_lifecycle_chronology.py", "tests/test_planning_modes.py", "tests/test_generic_planning_and_context.py", "tests/test_general_runtime_adaptation.py", "tests/test_adaptive_autonomy.py", "tests/test_execution_services.py", "tests/test_scheduler_and_legacy_state.py", "tests/test_state_durability.py", "tests/test_runtime_ux.py"]
     },
     {
       "id": "provider-recovery",
-      "tests": ["tests/test_provider_integration.py", "tests/test_runtime_improvements.py", "tests/test_provider_and_shell_services.py"]
+      "tests": ["tests/test_provider_integration.py", "tests/test_runtime_improvements.py", "tests/test_provider_and_shell_services.py", "tests/test_generic_planning_and_context.py"]
     },
     {
       "id": "policy-tools-delegation",

@@ -56,6 +56,11 @@ from gptmoss.core.execution_plan import (
 )
 from gptmoss.core.execution_progress import ExecutionProgressMixin
 from gptmoss.core.execution_rescue import ExecutionRescueMixin
+from gptmoss.core.workload import (
+    build_workload_profile,
+    compile_work_graph,
+    partition_attachment_ids,
+)
 
 
 
@@ -169,6 +174,33 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
         # Ensure standard action methods are populated on instance
         instance.actions = get_actions(instance.__class__)
         logger.info(f"Registered capability: {capability_name}")
+
+    @staticmethod
+    def _bounded_dependency_results(
+        results: List[Dict[str, Any]], budget: int = 8_000
+    ) -> List[Dict[str, Any]]:
+        """Keep every prerequisite visible while bounding its delivery payload."""
+        if not results:
+            return []
+        allowance = max(80, max(1, int(budget)) // len(results) - 400)
+        bounded: List[Dict[str, Any]] = []
+        for item in results:
+            copy = dict(item)
+            delivery = json.dumps(
+                copy.get("delivery"), ensure_ascii=False, default=str
+            )
+            if len(delivery) > allowance:
+                notice = "… [prerequisite delivery compacted] …"
+                payload = max(0, allowance - len(notice))
+                head = (payload * 2) // 3
+                tail = payload - head
+                delivery = (
+                    delivery[:head] + notice + (delivery[-tail:] if tail else "")
+                )
+                copy["delivery_compacted"] = True
+            copy["delivery"] = delivery
+            bounded.append(copy)
+        return bounded
 
     def get_capability(self, capability_name: str) -> Optional[Any]:
         """Retrieve a registered capability by name."""
@@ -745,6 +777,25 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
             "capability": capability.lower(), "action": action.lower(),
             "arguments": dict(arguments), "result": str(result),
         })
+        if capability.lower() == "documents" and action.lower() in {
+            "read_image", "read_images",
+        }:
+            try:
+                payload = json.loads(str(result))
+            except (TypeError, ValueError):
+                return
+            requested = []
+            if action.lower() == "read_image" and payload.get("artifact_id"):
+                requested = [payload["artifact_id"]]
+            elif isinstance(payload.get("images"), list):
+                requested = [
+                    item.get("artifact_id") for item in payload["images"]
+                    if isinstance(item, dict) and item.get("artifact_id")
+                ]
+            pending = state.variables.setdefault("pending_visual_artifact_ids", [])
+            for artifact_id in requested:
+                if artifact_id not in pending:
+                    pending.append(artifact_id)
 
     def _can_engine_finalize(self, execution_id: str, step: Dict[str, Any]) -> bool:
         """Detect converged work even when a model keeps calling tools or formats its finale badly."""
@@ -1018,6 +1069,15 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
         # 2. Plan generation (if not already planned)
         if not state.current_plan:
             is_sub_agent = state.variables.get("parent_execution_id") is not None
+            if not is_sub_agent and self.artifact_store:
+                state.variables["workload_profile"] = build_workload_profile(
+                    self.artifact_store,
+                    state.variables.get("attachment_ids", []),
+                    corpus_summaries=state.variables.get("corpus_summaries", []),
+                    supports_vision=bool(
+                        getattr(self.llm_provider, "supports_vision", False)
+                    ),
+                )
             schemas = self.get_capabilities_schemas(
                 is_sub_agent=is_sub_agent,
                 allowed_capabilities=allowed_capabilities,
@@ -1044,6 +1104,7 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
                     delegated_step=state.variables.get("delegated_step"),
                     project_domains=state.variables.get("project_domains"),
                     planning_mode=state.variables.get("planning_mode"),
+                    workload_profile=state.variables.get("workload_profile"),
                 )
             except ProviderUnavailableError:
                 raise
@@ -1119,6 +1180,13 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
                 self.artifact_store,
                 state.variables.get("attachment_ids", []),
             )
+            if not is_sub_agent:
+                plan_result = compile_work_graph(
+                    plan_result,
+                    state.variables.get("workload_profile"),
+                    planning_mode=str(state.variables.get("planning_mode") or "auto"),
+                )
+            plan_result = normalize_plan(plan_result)
             self.telemetry.record("plan_generated", execution_id, duration_ms=round((time.perf_counter() - planning_started) * 1000, 2), steps=len(plan_result.get("steps", [])))
             state.current_plan = plan_result
             self._initialize_document_state(execution_id, task, plan_result, state)
@@ -1447,6 +1515,9 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
                         "description": dependency_step.get("description"),
                         "delivery": dependency_step.get("delivery") or dependency_step.get("result"),
                     })
+                dependency_results = self._bounded_dependency_results(
+                    dependency_results
+                )
                 handoff = json.dumps(dependency_results, ensure_ascii=False)
                 if len(handoff) > 8_000:
                     handoff = handoff[:8_000] + "\n… [dependency handoff truncated]"
@@ -1499,7 +1570,13 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
                     key: value for key, value in step.items()
                     if key not in {"id", "dependencies", "status", "assigned_execution_id", "delivery", "result", "error"}
                 }
-                sub_exec.variables["attachment_ids"] = state.variables.get("attachment_ids", [])
+                sub_exec.variables["attachment_ids"] = partition_attachment_ids(
+                    state.variables.get("attachment_ids", []),
+                    step.get("source_partition"),
+                )
+                sub_exec.variables["workload_profile"] = state.variables.get(
+                    "workload_profile", {}
+                )
                 owned_artifacts = {
                     str(path).replace("\\", "/")
                     for path in step.get("required_artifacts", [])
@@ -2233,9 +2310,23 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
                 capabilities_schemas=schemas
             )
             if self.artifact_store and state.variables.get("attachment_ids"):
-                attachment_text_budget = self.artifact_store.max_text_chars
-                if not attachment_text_budget and self.adaptive_resource_management:
-                    attachment_text_budget = int(context.get("context_budget_chars") or 0)
+                provider_budget = int(
+                    getattr(self.llm_provider, "context_input_budget_chars", 0) or 0
+                )
+                history_used = sum(
+                    len(str(item.get("content") or ""))
+                    for item in context.get("conversation_history", [])
+                )
+                reserved_prompt = max(12_000, provider_budget // 3) if provider_budget else 12_000
+                available_for_sources = max(
+                    4_000,
+                    provider_budget - history_used - reserved_prompt,
+                ) if provider_budget else int(context.get("context_budget_chars") or 12_000)
+                configured_attachment_budget = int(self.artifact_store.max_text_chars or 0)
+                attachment_text_budget = min(
+                    available_for_sources,
+                    configured_attachment_budget or available_for_sources,
+                )
                 attachment_query = "\n".join(
                     str(value)
                     for value in (
@@ -2250,11 +2341,36 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
                     )
                     if value
                 )[:8_000]
+                pending_images = list(dict.fromkeys(
+                    str(item) for item in state.variables.get(
+                        "pending_visual_artifact_ids", []
+                    ) if item
+                ))
+                provider_input_tokens = int(
+                    getattr(self.llm_provider, "context_input_budget_tokens", 0) or 0
+                )
+                visual_slots = (
+                    max(0, min(4, (provider_input_tokens - 4_096) // 4_096))
+                    if provider_input_tokens else 4
+                )
+                automatic_images = (
+                    visual_slots if iteration == 1 and not pending_images else 0
+                )
                 context["attachments"] = self.artifact_store.context_items(
                     state.variables["attachment_ids"],
                     getattr(self.llm_provider, "supports_vision", False),
                     max_text_chars=attachment_text_budget,
                     query=attachment_query,
+                    max_items=max(8, min(96, attachment_text_budget // 2_000)),
+                    max_images=(
+                        min(visual_slots, max(automatic_images, len(pending_images)))
+                        if getattr(self.llm_provider, "supports_vision", False) else 0
+                    ),
+                    max_image_bytes=min(
+                        8 * 1024 * 1024,
+                        max(256 * 1024, available_for_sources * 8),
+                    ),
+                    preferred_artifact_ids=pending_images,
                 )
 
             # Request LLM completion
@@ -2291,7 +2407,8 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
                     "without Internet access. Initial excerpts are selected from the whole corpus "
                     "for this assignment and include source, section, block range, and chunk ID. "
                     "Use documents.inventory, documents.search, documents.read, and "
-                    "documents.read_chunk to verify coverage or retrieve omitted sections. "
+                    "documents.read_chunk to retrieve text; use documents.read_image or "
+                    "documents.read_images to load specific images in bounded batches. "
                     "The documents.read start_block parameter is a zero-based normalized-block "
                     "offset, while local citation locators are one-based. A PPTX commonly has "
                     "multiple normalized blocks per slide: cite its provenance slide_number "
@@ -2387,6 +2504,7 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
                         + source_contracts
                     )
             llm_messages.append({"role": "system", "content": role_prompt})
+            visual_attachments = []
             for attachment in context.get("attachments", []):
                 if attachment.get("text") is not None:
                     llm_messages.append({
@@ -2400,10 +2518,7 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
                         ),
                     })
                 elif attachment.get("image_url"):
-                    llm_messages.append({"role": "user", "content": [
-                        {"type": "text", "text": f"Attached image: {attachment['filename']}"},
-                        {"type": "image_url", "image_url": {"url": attachment["image_url"]}},
-                    ]})
+                    visual_attachments.append(attachment)
                 else:
                     llm_messages.append({"role": "system", "content": f"Attachment {attachment['filename']}: {attachment['note']}"})
             if context.get("context_summary"):
@@ -2416,6 +2531,16 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
                     )[:8_000],
                 })
             llm_messages.extend(context["conversation_history"])
+            # Requested images are deliberately the most recent messages so
+            # provider compaction preserves them ahead of older conversation.
+            for attachment in visual_attachments:
+                llm_messages.append({"role": "user", "content": [
+                    {"type": "text", "text": (
+                        f"Attached image: {attachment['filename']} "
+                        f"[artifact_id:{attachment['id']}]"
+                    )},
+                    {"type": "image_url", "image_url": {"url": attachment["image_url"]}},
+                ]})
 
             await self.event_bus.publish(Event(
                 type="LLMRequest",
@@ -2433,12 +2558,48 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
                 ))
 
             llm_started = time.perf_counter()
+            submitted_visual_ids: set[str] = set()
+
+            def record_fitted_context(messages: List[Dict[str, Any]]) -> None:
+                submitted_visual_ids.clear()
+                for message in messages:
+                    content = message.get("content")
+                    if not isinstance(content, list):
+                        continue
+                    has_image = any(
+                        isinstance(part, dict) and part.get("type") == "image_url"
+                        for part in content
+                    )
+                    if not has_image:
+                        continue
+                    text = " ".join(
+                        str(part.get("text") or "") for part in content
+                        if isinstance(part, dict) and part.get("type") == "text"
+                    )
+                    submitted_visual_ids.update(
+                        re.findall(r"\[artifact_id:([^\]]+)\]", text)
+                    )
+
             llm_response = await self._completion_with_recovery(
                 execution_id,
                 messages=llm_messages,
                 tools=schemas if schemas else None,
                 on_text_delta=on_text_delta,
+                on_context_fitted=record_fitted_context,
             )
+            if visual_attachments:
+                visualized = state.variables.setdefault(
+                    "visualized_artifact_ids", []
+                )
+                delivered_ids = set(submitted_visual_ids)
+                for artifact_id in delivered_ids:
+                    if artifact_id not in visualized:
+                        visualized.append(artifact_id)
+                state.variables["pending_visual_artifact_ids"] = [
+                    item for item in state.variables.get(
+                        "pending_visual_artifact_ids", []
+                    ) if item not in delivered_ids
+                ]
             self.telemetry.record("llm_completed", execution_id, duration_ms=round((time.perf_counter() - llm_started) * 1000, 2), message_count=len(llm_messages), tool_calls=len(llm_response.get("tool_calls") or []))
 
             await self.event_bus.publish(Event(

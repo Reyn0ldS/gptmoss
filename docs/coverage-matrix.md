@@ -10,14 +10,14 @@ modules et tests est dans `application-map.json` ; le présent document apporte 
 | Supervision serveur | `server_supervisor.py` | centre Serveur, `/api/runtime-control`, API :8765 | ports CLI/environnement | `test_server_supervisor`, `test_functional_coverage_contract` |
 | Soumission/projets | kernel, API, filesystem, domains | compositeur, `/executions`, `/projects` | `projects`, domaines projet, `workspace_path` | `test_api`, `test_end_to_end_workflow`, `test_adaptive_autonomy` |
 | Planification temporelle | scheduler, kernel, reprise fournisseur | `delay_seconds`, `run_at`, statuts | échéance persistée | `test_scheduler_and_legacy_state`, `test_api`, `test_lifecycle_chronology` |
-| Planification fonctionnelle | `planners/simple.py`, `planners/complexity.py`, `planners/fallbacks.py`, domains, execution | mode auto/direct/équipe, plan et titres | contexte, autonomie, délégation | `test_planning_modes`, `test_lifecycle_chronology`, `test_runtime_ux` |
+| Planification fonctionnelle | `planners/simple.py`, `core/workload.py`, `planners/complexity.py`, `planners/fallbacks.py`, domains, execution | mode auto/direct/équipe, graphe opérationnel, partitions et titres | contexte, autonomie, délégation | `test_generic_planning_and_context`, `test_planning_modes`, `test_lifecycle_chronology`, `test_runtime_ux` |
 | Exécution/outils | `core/execution.py`, `core/execution_plan.py`, `core/execution_progress.py`, `core/execution_rescue.py`, capacités | timeline, feed, WebSocket | budgets, skills, permissions | `test_execution`, `test_adaptive_autonomy` |
 | Politique/shell | policy, shell/filesystem | approbation, pause/reprise | denied/approval, safe shell, autonomie | `test_policy`, `test_runtime_improvements` |
 | Sous-agents | agent, devteam, kernel | bibliothèque et endpoints subagents | profondeur/délégation | `test_agent_and_memory`, `test_devteam` |
 | Pièces jointes et dossiers | artifacts, corpora, documents | upload, import récursif, reprise, progression, liste, recherche, aperçu | limites upload/texte/fichiers, chemins sûrs, SHA-256 | `test_documents`, `test_document_capability`, `test_skills_and_artifacts`, `test_api` |
 | Mémoire | JSON store, context, memory cap | bibliothèque `/memory` | scope projet implicite | `test_memory_v2` |
 | Skills/évolution | skills, evolution | bibliothèque, profils, évolution | skills par défaut, création/amélioration | `test_autonomous_evolution`, `test_skills_and_artifacts` |
-| Fournisseur LLM | qwen, reprise execution | test de connexion, diagnostics | URL, clé, modèle, TLS, vision | `test_provider_integration`, `test_api` |
+| Fournisseur LLM | qwen, politique de fenêtre, reprise execution | test de connexion, diagnostics | URL, clé, modèle, TLS, vision, fenêtre/réserve de contexte | `test_generic_planning_and_context`, `test_provider_integration`, `test_api` |
 | Qualité documentaire | corpus, document_quality | résultats d'exécution | profil professionnel | `test_document_quality`, `test_quality_benchmarks`, `test_corpus` |
 | Assurance logiciel | delivery, artifact_validation | plan, métriques, feed | contrat produit par plan | `test_delivery_assurance`, `test_delivery_benchmarks` |
 | Paquet professionnel | professional_delivery, delivery_package | bouton Télécharger | profil professionnel | `test_professional_delivery` |
@@ -29,13 +29,13 @@ modules et tests est dans `application-map.json` ; le présent document apporte 
 
 | Groupe | Champs | Application effective |
 |---|---|---|
-| Fournisseur | `api_key`, `base_url`, `model_name`, `vision_mode`, `ssl_verify`, `ssl_cert_path` | QwenProvider ; test catalogue et chat ; clé non réaffichée par défaut. |
+| Fournisseur | `api_key`, `base_url`, `model_name`, `vision_mode`, `ssl_verify`, `ssl_cert_path`, `context_window_tokens`, `context_output_reserve_tokens` | QwenProvider ; préflight borné, apprentissage de limite, test catalogue et chat ; clé non réaffichée par défaut. |
 | Politique | `denied_capabilities`, `approval_required_capabilities`, `workspace_full_autonomy` | `SimplePolicyProvider` avant chaque outil ; refus prioritaire sur autonomie. |
 | Orchestration | `continue_while_progress`, `adaptive_resource_management`, `max_step_iterations`, `max_step_retries` | Budgets de stagnation/reprise et compilation adaptative. |
 | Délégation | `allow_nested_delegation`, `max_delegation_depth` | Schémas d'outils, lignée et contrôles du noyau. |
 | Évolution | `autonomous_specialization`, création/amélioration, seuil/cap | Registres de profils et cycle de vie des skills. |
 | Workspace | chemin, restriction, sous-dossiers, projets | Filesystem, shell, artifacts et résolveur par exécution. |
-| Documents | `max_upload_bytes`, `max_attachment_text_chars`, `max_context_chars` | Dépôt, normalisation et compilation contextuelle. |
+| Documents | `max_upload_bytes`, `max_attachment_text_chars`, `max_context_chars` | Dépôt, normalisation, recherche bornée et compilation contextuelle ; la fenêtre fournisseur reste le plafond final. |
 | Shell | `safe_shell_mode`, timeout, sortie maximale | Validation de commande, processus et rendu de résultat. |
 | Skills | `strict_skill_capabilities`, `default_skills` | Sélection procédurale ; restriction des outils seulement en mode strict. |
 

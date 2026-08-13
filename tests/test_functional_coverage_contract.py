@@ -94,7 +94,7 @@ FEATURE_CONTRACTS = {
 
 CAPABILITY_MODES = {
     "filesystem": {"read": "sync-read", "write": "sync-mutation", "list_dir": "sync-read", "delete": "sync-mutation"},
-    "documents": {"inventory": "sync-read", "search": "sync-read", "read": "sync-read", "read_chunk": "sync-read"},
+    "documents": {"inventory": "sync-read", "search": "sync-read", "read": "sync-read", "read_chunk": "sync-read", "read_image": "sync-read", "read_images": "sync-read"},
     "shell": {"execute": "sync-process"},
     "agent": {"spawn": "async-background", "status": "sync-observation", "execute_subtask": "async-blocking"},
     "devteam": {"approve_quality_gate": "human-gate", "build_project": "async-sequential-pipeline"},
@@ -112,7 +112,8 @@ CONFIGURATION_OWNERS = {
     "autonomous_skill_improvement": "skills", "skill_coverage_threshold": "skills",
     "max_autonomous_skills_per_execution": "skills", "workspace_path": "capabilities+artifacts",
     "restrict_to_workspace": "filesystem", "allow_subfolders": "filesystem",
-    "max_context_chars": "context", "max_upload_bytes": "artifacts",
+    "max_context_chars": "context", "context_window_tokens": "llm+context",
+    "context_output_reserve_tokens": "llm+context", "max_upload_bytes": "artifacts",
     "max_attachment_text_chars": "artifacts", "max_transitions_per_execution": "state",
     "max_step_iterations": "execution",
     "max_step_retries": "execution", "safe_shell_mode": "shell",

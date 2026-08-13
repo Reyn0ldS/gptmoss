@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import inspect
 import json
 import logging
 import os
@@ -1136,6 +1137,11 @@ async def get_diagnostics():
         "vision_mode": getattr(engine.llm_provider, "vision_mode", "auto"),
         "native_tool_calling": getattr(engine.llm_provider, "_native_tools_supported", None),
         "learned_context_chars": getattr(engine.llm_provider, "_learned_context_chars", None),
+        "configured_context_window_tokens": getattr(engine.llm_provider, "context_window_tokens", 0),
+        "learned_context_window_tokens": getattr(engine.llm_provider, "_learned_context_tokens", None),
+        "effective_context_window_tokens": getattr(engine.llm_provider, "effective_context_window_tokens", None),
+        "context_input_budget_tokens": getattr(engine.llm_provider, "context_input_budget_tokens", None),
+        "context_output_reserve_tokens": getattr(engine.llm_provider, "context_output_reserve_tokens", None),
         "capabilities": capabilities,
         "execution_statuses": statuses,
         "metrics": engine.telemetry.metrics(),
@@ -1503,6 +1509,8 @@ async def get_settings():
         config.setdefault("vision_mode", "auto")
         config.setdefault("max_step_retries", 2)
         config.setdefault("max_context_chars", 12_000)
+        config.setdefault("context_window_tokens", 0)
+        config.setdefault("context_output_reserve_tokens", 8_192)
         config.setdefault("max_upload_bytes", DEFAULT_MAX_UPLOAD_BYTES)
         config.setdefault("max_attachment_text_chars", DEFAULT_MAX_ATTACHMENT_TEXT_CHARS)
         config.setdefault("max_transitions_per_execution", DEFAULT_MAX_TRANSITIONS_PER_EXECUTION)
@@ -1563,6 +1571,8 @@ async def get_settings():
         "max_step_iterations": getattr(app_state.execution_engine, "max_step_iterations", 30),
         "max_step_retries": getattr(app_state.execution_engine, "max_step_retries", 2),
         "max_context_chars": getattr(app_state.execution_engine.context_engine, "max_history_chars", 12_000),
+        "context_window_tokens": getattr(llm, "context_window_tokens", 0),
+        "context_output_reserve_tokens": getattr(llm, "context_output_reserve_tokens", 8_192),
         "max_upload_bytes": getattr(_artifact_store(), "max_bytes", 0),
         "max_attachment_text_chars": getattr(_artifact_store(), "max_text_chars", 0),
         "max_transitions_per_execution": getattr(
@@ -1694,6 +1704,8 @@ async def update_settings(req: SettingsRequest):
         "max_step_iterations": req.max_step_iterations,
         "max_step_retries": req.max_step_retries,
         "max_context_chars": req.max_context_chars,
+        "context_window_tokens": req.context_window_tokens,
+        "context_output_reserve_tokens": req.context_output_reserve_tokens,
         "max_upload_bytes": req.max_upload_bytes,
         "max_attachment_text_chars": req.max_attachment_text_chars,
         "max_transitions_per_execution": req.max_transitions_per_execution,
@@ -1706,13 +1718,20 @@ async def update_settings(req: SettingsRequest):
     _write_runtime_config(config_data)
         
     if hasattr(llm, "update_config"):
-        llm.update_config(
-            api_key=api_key,
-            base_url=req.base_url,
-            ssl_verify=req.ssl_verify,
-            ssl_cert_path=req.ssl_cert_path,
-            model_name=req.model_name
-        )
+        provider_values = {
+            "api_key": api_key,
+            "base_url": req.base_url,
+            "ssl_verify": req.ssl_verify,
+            "ssl_cert_path": req.ssl_cert_path,
+            "model_name": req.model_name,
+            "context_window_tokens": req.context_window_tokens,
+            "context_output_reserve_tokens": req.context_output_reserve_tokens,
+        }
+        parameters = inspect.signature(llm.update_config).parameters
+        llm.update_config(**{
+            key: value for key, value in provider_values.items()
+            if key in parameters
+        })
     if hasattr(llm, "set_vision_mode"):
         llm.set_vision_mode(req.vision_mode)
     if hasattr(policy, "update_policy"):

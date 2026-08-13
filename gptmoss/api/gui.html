@@ -2714,6 +2714,8 @@
                 document.getElementById("settings-max-step-iterations").value = data.max_step_iterations || 30;
                 document.getElementById("settings-max-step-retries").value = data.max_step_retries ?? 2;
                 document.getElementById("settings-max-context-chars").value = data.max_context_chars || 12000;
+                document.getElementById("settings-context-window-tokens").value = data.context_window_tokens ?? 0;
+                document.getElementById("settings-context-output-reserve").value = data.context_output_reserve_tokens ?? 8192;
                 document.getElementById("settings-max-upload-bytes").value = data.max_upload_bytes ?? 0;
                 document.getElementById("settings-max-attachment-text-chars").value = data.max_attachment_text_chars ?? 0;
                 document.getElementById("settings-safe-shell-mode").checked = data.safe_shell_mode !== false;
@@ -2768,6 +2770,8 @@
                 max_step_iterations: parseInt(document.getElementById("settings-max-step-iterations").value, 10) || 30,
                 max_step_retries: Math.max(0, parseInt(document.getElementById("settings-max-step-retries").value, 10) || 0),
                 max_context_chars: parseInt(document.getElementById("settings-max-context-chars").value, 10) || 12000,
+                context_window_tokens: Math.max(0, parseInt(document.getElementById("settings-context-window-tokens").value, 10) || 0),
+                context_output_reserve_tokens: Math.max(256, parseInt(document.getElementById("settings-context-output-reserve").value, 10) || 8192),
                 max_upload_bytes: Math.max(0, parseInt(document.getElementById("settings-max-upload-bytes").value, 10) || 0),
                 max_attachment_text_chars: Math.max(0, parseInt(document.getElementById("settings-max-attachment-text-chars").value, 10) || 0),
                 safe_shell_mode: document.getElementById("settings-safe-shell-mode").checked,
@@ -3016,7 +3020,7 @@
             document.getElementById("library-memory").innerHTML = memories.map(m=>`<div class="library-row"><span>${escapeHTML(String(m.value))}<small>${escapeHTML(String(m.kind||"fact"))} · ${escapeHTML(String(m.scope||"project"))} · source : ${escapeHTML(String((m.provenance||{}).source||"inconnue"))}</small></span><span>${m.validated ? "validée" : "en attente"}</span><span>${m.validated ? "" : `<button onclick="validateMemory('${m.id}')">Valider</button>`} <button onclick="editMemory('${m.id}')">Modifier</button> <button onclick="deleteMemory('${m.id}')">Supprimer</button></span></div>`).join("") || "Aucune mémoire.";
             document.getElementById("library-agent-profiles").innerHTML = agentProfiles.map(profile=>`<div class="library-row"><span><b>${escapeHTML(profile.name || profile.id)}</b><small>${escapeHTML(profile.canonical_role || "spécialiste")} — révision ${Number(profile.revision || 1)}</small></span><span>${(profile.expertise || []).map(escapeHTML).join(", ") || "expertise en apprentissage"}</span><span>${Number((profile.outcomes || {}).success || 0)} succès / ${Number((profile.outcomes || {}).failure || 0)} échec(s)</span></div>`).join("") || "Aucun profil spécialisé créé.";
             document.getElementById("library-evolution").textContent = JSON.stringify(evolution, null, 2);
-            document.getElementById("library-diagnostics").textContent = JSON.stringify({model:diagnostics.model, vision:diagnostics.supports_vision, capabilities:diagnostics.capabilities, executions:diagnostics.execution_statuses, metrics:diagnostics.metrics, errors:diagnostics.errors, traces:diagnostics.recent_events}, null, 2);
+            document.getElementById("library-diagnostics").textContent = JSON.stringify({model:diagnostics.model, vision:diagnostics.supports_vision, context:{configured_window_tokens:diagnostics.configured_context_window_tokens, learned_window_tokens:diagnostics.learned_context_window_tokens, effective_window_tokens:diagnostics.effective_context_window_tokens, input_budget_tokens:diagnostics.context_input_budget_tokens, output_reserve_tokens:diagnostics.context_output_reserve_tokens}, capabilities:diagnostics.capabilities, executions:diagnostics.execution_statuses, metrics:diagnostics.metrics, errors:diagnostics.errors, traces:diagnostics.recent_events}, null, 2);
             document.getElementById("library-audit").textContent = audit.slice(-30).reverse().map(e=>`${new Date(e.timestamp*1000).toLocaleString()} — ${e.action} — ${e.changed_fields.join(", ")}${e.secret_changed ? " — secret modifié" : ""}`).join("\n") || "Aucun changement sensible audité.";
             document.getElementById("library-subagents").innerHTML = subagents.map(s=>`<div class="library-row"><span><b>${escapeHTML(s.role_name)}</b><small>${s.execution_id}</small></span><span>${escapeHTML(s.status)}</span><span><button onclick="controlSubagent('${s.execution_id}','pause')">Pause</button> <button onclick="controlSubagent('${s.execution_id}','resume')">Reprendre</button> <button onclick="controlSubagent('${s.execution_id}','cancel')">Annuler</button></span></div>`).join("") || (activeExecutionId ? "Aucun sous-agent." : "Sélectionnez une exécution parente.");
         }
@@ -3283,6 +3287,10 @@
                 <div style="display: flex; flex-direction: column; gap: 4px; margin-top: 6px;">
                     <label style="font-size: 11px; color: var(--text-normal);">Budget de contexte (caractères)</label>
                     <input type="number" id="settings-max-context-chars" class="approval-reason-input" style="margin: 0;" placeholder="12000" min="1">
+                    <label style="font-size:11px;color:var(--text-muted)">Fenêtre modèle en jetons (0 = automatique)</label>
+                    <input type="number" id="settings-context-window-tokens" class="approval-reason-input" style="margin:0" value="0" min="0">
+                    <label style="font-size:11px;color:var(--text-muted)">Réserve de sortie en jetons</label>
+                    <input type="number" id="settings-context-output-reserve" class="approval-reason-input" style="margin:0" value="8192" min="256">
                 </div>
                 <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:6px">
                     <label style="font-size:11px;flex:1 1 180px">Taille de dépôt max. en octets (0 = sans plafond applicatif)<input type="number" id="settings-max-upload-bytes" class="approval-reason-input" min="0" style="margin:4px 0 0;width:100%"></label>

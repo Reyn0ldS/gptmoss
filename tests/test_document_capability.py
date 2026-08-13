@@ -191,6 +191,47 @@ def test_document_capability_refuses_unattached_document_access(tmp_path: Path):
         )
 
 
+def test_document_capability_paginates_inventory_and_selects_attached_images(tmp_path: Path):
+    store = ArtifactStore(str(tmp_path))
+    documents = [
+        _upload_text(store, f"document-{index}.txt", f"# Source {index}")
+        for index in range(3)
+    ]
+    images = [
+        store.save_bytes(
+            f"image-{index}.png",
+            b"\x89PNG\r\n\x1a\n" + bytes([index]) * 20,
+            "image/png",
+        )
+        for index in range(2)
+    ]
+    context = _context(*(item["id"] for item in [*documents, *images]))
+    capability = DocumentCapability(store)
+
+    first = json.loads(capability.inventory(context=context, limit=2))
+    second = json.loads(
+        capability.inventory(context=context, offset=first["next_offset"], limit=10)
+    )
+    selected = json.loads(
+        capability.read_images([item["id"] for item in images], context=context)
+    )
+
+    assert first["count"] == 5
+    assert first["returned_count"] == 2
+    assert first["has_more"] is True
+    assert second["returned_count"] == 3
+    assert second["image_count"] == 2
+    assert {item["artifact_id"] for item in selected["images"]} == {
+        item["id"] for item in images
+    }
+
+    hidden = store.save_bytes(
+        "hidden.png", b"\x89PNG\r\n\x1a\nhidden", "image/png"
+    )
+    with pytest.raises(PermissionError, match="not attached"):
+        capability.read_image(hidden["id"], context=context)
+
+
 def test_document_capability_resolves_attached_filename_and_document_digest(tmp_path: Path):
     store = ArtifactStore(str(tmp_path))
     attached = _upload_text(store, "vision.pptx.txt", "# Vision\n\nContenu local.")
@@ -297,6 +338,8 @@ def test_document_capability_exposes_read_only_action_schemas(tmp_path: Path):
         for name, method in actions.items()
     }
 
-    assert set(schemas) == {"inventory", "search", "read", "read_chunk"}
+    assert set(schemas) == {
+        "inventory", "search", "read", "read_chunk", "read_image", "read_images"
+    }
     assert schemas["search"]["function"]["name"] == "documents__search"
     assert schemas["read"]["function"]["parameters"]["required"] == ["artifact_id"]

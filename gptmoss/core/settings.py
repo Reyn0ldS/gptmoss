@@ -45,6 +45,10 @@ class RuntimeSettings(BaseModel):
     max_step_iterations: int = Field(default=30, ge=1)
     max_step_retries: int = Field(default=2, ge=0)
     max_context_chars: int = Field(default=12_000, ge=1)
+    # Zero discovers/learns a safe provider envelope automatically.  The
+    # output reserve is always kept outside the prompt budget.
+    context_window_tokens: int = Field(default=0, ge=0)
+    context_output_reserve_tokens: int = Field(default=8_192, ge=256)
     max_upload_bytes: int = Field(default=DEFAULT_MAX_UPLOAD_BYTES, ge=1)
     max_attachment_text_chars: int = Field(
         default=DEFAULT_MAX_ATTACHMENT_TEXT_CHARS, ge=1

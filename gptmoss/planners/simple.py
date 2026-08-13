@@ -10,6 +10,7 @@ from gptmoss.interfaces.llm import LLMProvider
 from gptmoss.interfaces.planner import PlannerProvider
 from gptmoss.core.document_planning import adapt_document_steps
 from gptmoss.core.domains import ProjectDomainRegistry
+from gptmoss.core.workload import planning_profile
 from gptmoss.planners.complexity import analyze_task_complexity, normalize_planning_mode
 from gptmoss.planners.fallbacks import (
     _assign_document_requirements,
@@ -355,19 +356,15 @@ class SimplePlanner(PlannerProvider):
         identifiers = {str(step.get("id", index)) for index, step in enumerate(steps) if isinstance(step, dict)}
         if len(identifiers) != len(steps):
             raise ValueError("Planner returned invalid or duplicate step identifiers.")
-        specialists = set()
-        roles = []
         for index, step in enumerate(steps):
             if not isinstance(step, dict) or not str(step.get("description") or "").strip():
                 raise ValueError(f"Planner step {index} has no actionable description.")
             role = str(step.get("role") or "").lower()
             if role not in allowed_roles:
                 raise ValueError(f"Planner step {index} uses unsupported role '{role}'.")
-            roles.append(role)
             specialist = str(step.get("specialist") or "").strip()
             if not specialist:
                 raise ValueError(f"Planner step {index} has no specialist profile.")
-            specialists.add(specialist.lower())
             dependencies = step.get("dependencies", [])
             if not isinstance(dependencies, list) or any(not isinstance(item, (str, int)) for item in dependencies):
                 raise ValueError(f"Planner step {index} has invalid dependencies.")
@@ -382,21 +379,12 @@ class SimplePlanner(PlannerProvider):
                 raise ValueError(f"Planner step {index} references an unknown dependency.")
 
         mode = normalize_planning_mode(planning_mode)
-        apply_complex_gates = mode not in {"direct", "short_team"} and (
-            analysis["level"] in {"high", "very_high"} or mode == "full_team"
-        )
-        if apply_complex_gates:
-            minimum = int(analysis.get("suggested_min_steps") or 1)
-            if mode == "full_team":
-                minimum = max(minimum, 9)
-            if len(steps) < minimum:
-                raise ValueError(
-                    f"Planner undersized a {analysis['level']} task: {len(steps)} < {minimum} steps."
-                )
-            if len(specialists) < max(6, len(steps) * 3 // 4):
-                raise ValueError("Planner reused too many generic specialist profiles.")
-            if "debugger" not in roles or roles[-1] != "coordinator":
-                raise ValueError("Complex plan lacks autonomous repair or final delivery audit.")
+        if mode == "direct" and len(steps) != 1:
+            raise ValueError("Direct planning mode must contain exactly one execution step.")
+
+        # Plan size is deliberately not validated against a fixed step count.
+        # Requirement normalization, ownership and independent validation are
+        # centralized in build_delivery_contract after graph compilation.
 
         binary_model_suffixes = (".pth", ".pt", ".ckpt", ".safetensors", ".onnx")
         generated_model_assets = [artifact for step in steps for artifact in step.get("required_artifacts", [])
@@ -457,6 +445,10 @@ class SimplePlanner(PlannerProvider):
             kwargs.get("planning_mode")
             or (context or {}).get("variables", {}).get("planning_mode")
         )
+        workload = planning_profile(
+            kwargs.get("workload_profile")
+            or (context or {}).get("variables", {}).get("workload_profile")
+        )
         if planning_mode == "full_team" and analysis["level"] in {"low", "moderate"}:
             analysis = {
                 **analysis,
@@ -479,7 +471,9 @@ class SimplePlanner(PlannerProvider):
                 "and a final coordinator even if the wording looks small."
             ),
             "auto": (
-                "Planning mode is auto: size the DAG to the deterministic complexity hints."
+                "Planning mode is auto: derive the smallest complete DAG from the requested "
+                "outcomes, real workload, dependencies, risk and validation needs. No fixed "
+                "role list or fixed step count applies."
             ),
         }[planning_mode]
         capabilities_list = [schema["function"]["name"] for schema in capabilities_schemas]
@@ -487,7 +481,8 @@ class SimplePlanner(PlannerProvider):
             "You are GPTMOSS's adaptive planning engine. Produce a realistic specialist DAG, not a generic seven-role checklist.\n"
             "First assess the final deliverable's true size, domains, workstreams, dependencies, unavailable assets, risks, and MVP boundary.\n"
             f"{mode_instructions}\n"
-            f"Deterministic complexity hints (minimum safeguards, not a ceiling): {json.dumps(analysis, ensure_ascii=False)}\n"
+            f"Deterministic task hints (signals, never a mandated step count): {json.dumps(analysis, ensure_ascii=False)}\n"
+            f"Bounded local workload profile (counts only, never source content): {json.dumps(workload, ensure_ascii=False)}\n"
             f"User task: {task}\nAvailable capabilities: {json.dumps(capabilities_list)}\n"
             f"Detected capability gaps: {json.dumps((context or {}).get('variables', {}).get('capability_gaps', []), ensure_ascii=False)}\n\n"
             f"Delivery environment: platform={os.name}; dependencies and model weights may not be downloaded during offline execution. "
@@ -495,7 +490,7 @@ class SimplePlanner(PlannerProvider):
             "Use canonical roles only from architect, security, developer, qa, debugger, writer, coordinator, but create as many distinct domain specialists as required. "
             "A delegated specialist is bounded to its own assignment by default. Set allow_nested_delegation=true on a step only when that specialist genuinely requires a subordinate team and explain why in the rationale; never use it to duplicate sibling steps. "
             "Multiple differently specialized developers and testers are expected.\n"
-            f"For {analysis['level']} complexity, provide at least {analysis['suggested_min_steps']} substantive steps unless a smaller complete DAG is explicitly justified. "
+            "Choose the number of steps dynamically. Create a step only for a distinct operation, owner, dependency boundary, artifact contract, or independent validation gate; merge redundant work. The runtime may partition source work from the measured workload after this semantic plan is accepted. "
             "Parallelize independent work and depend on existing outputs so work is not repeated.\n"
             "Extract a top-level requirements array from the user's exact request before planning. Preserve every distinct requested outcome; never merge or truncate requirements merely to reduce plan size. Each requirement has id, statement, priority, mandatory, source='user', and acceptance. "
             "Every step must contain id, role, specialist, description, dependencies, expertise, required_artifacts, acceptance_criteria, verification_commands, requirement_ids, owned_paths, and status='pending'. "

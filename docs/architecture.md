@@ -41,7 +41,7 @@ pas un ordonnanceur distribué ni une implémentation de cron.
 | Contrôle du processus | `scripts/server_supervisor.py` | Conserve un point de contrôle local lorsque l'application est arrêtée ; vérifie port, santé et jeton éphémère. |
 | Interface | `gptmoss/api/gui.html` | Composition des tâches, suivi temps réel, bibliothèque, mémoire, skills, réglages, livraisons et contrôle serveur. |
 | API | `gptmoss/api/server.py` | Contrats HTTP/WebSocket, validation Pydantic, cycle de vie, réglages, diagnostics et téléchargements bornés. |
-| Orchestration | `core/kernel.py`, `core/execution.py`, `core/execution_plan.py`, `core/execution_progress.py`, `core/execution_rescue.py`, `core/scheduler.py`, `planners/simple.py`, `planners/complexity.py`, `planners/fallbacks.py` | Création/exécution planifiée, plan adaptatif, dépendances, spécialistes, reprises, approbations et convergence. |
+| Orchestration | `core/kernel.py`, `core/execution.py`, `core/execution_plan.py`, `core/execution_progress.py`, `core/execution_rescue.py`, `core/workload.py`, `core/scheduler.py`, `planners/simple.py`, `planners/complexity.py`, `planners/fallbacks.py` | Création/exécution planifiée, plan sémantique sans cardinalité fixe, compilation selon le volume réel, dépendances, spécialistes, reprises, approbations et convergence. |
 | Domaines projet | `core/domains.py` | Catégories génériques et extensions de marqueurs propres à chaque projet, sans hypothèse métier globale. |
 | Contexte et mémoire | `core/context.py`, `memory/json_store.py`, `capabilities/memory.py` | Contexte borné et mémoire gouvernée par projet, validation, provenance, TTL, déduplication et supersession. |
 | Capacités | `capabilities/*` | Actions outillées exposées au modèle et contrôlées par la politique. |
@@ -50,7 +50,7 @@ pas un ordonnanceur distribué ni une implémentation de cron.
 | Évolution | `core/skills.py`, `core/evolution.py` | Découverte de procédures, profils de spécialistes et évolution locale traçable. |
 | Configuration | `core/settings.py` | Contrat Pydantic unique partagé par bootstrap, API, GUI et tests ; valeurs sûres et limites strictes. |
 | Persistance | `core/state.py`, `core/durable_io.py`, `core/observability.py` | Index `state_store.json` plus sidecars par exécution/conversation, migration/quarantaine, historique borné et télémétrie locale. |
-| Fournisseur | `providers/qwen.py` | Adaptateur OpenAI-compatible, TLS sûr, vision, classification/reprise d'erreurs et fermeture des clients remplacés. |
+| Fournisseur | `providers/qwen.py`, `providers/qwen_support.py` | Adaptateur OpenAI-compatible, TLS sûr, vision, préflight jetons/outils, réserve de sortie, apprentissage de la fenêtre réelle, compactage et reprise. |
 
 Les interfaces abstraites de `gptmoss/interfaces/` séparent capacités, LLM, mémoire,
 planification et politique de leurs implémentations actuelles.
@@ -60,7 +60,7 @@ planification et politique de leurs implémentations actuelles.
 | Capacité | Actions | Frontière principale |
 |---|---|---|
 | `filesystem` | `read`, `write`, `list_dir`, `delete` | Résolution dans le workspace de l'exécution ; sous-dossiers et suppression configurables. |
-| `documents` | `inventory`, `search`, `read`, `read_chunk` | Pièces explicitement jointes uniquement ; formats locaux normalisés. |
+| `documents` | `inventory`, `search`, `read`, `read_chunk`, `read_image`, `read_images` | Pièces explicitement jointes uniquement ; texte normalisé et images sélectionnées par lots multimodaux bornés. |
 | `memory` | `search`, `propose` | Lecture validée du projet ; une proposition agent reste non validée et non globale. |
 | `shell` | `execute` | Répertoire du projet, blocage destructif, timeout, sortie bornée et approbation selon politique. |
 | `agent` | `spawn`, `status`, `execute_subtask` | Lignée et profondeur de délégation, refus des cycles exacts. |

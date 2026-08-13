@@ -69,6 +69,36 @@ class DocumentCapability:
             f"Use documents.inventory and retry with a filename or artifact_id. Attached: {detail}."
         )
 
+    def _resolve_attached_image(
+        self,
+        reference: str,
+        context: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        attached = self._attached_ids(context)
+        candidate = str(reference or "").strip().casefold()
+        matches = []
+        for artifact_id in attached:
+            try:
+                metadata = self.artifact_store.get(artifact_id)
+            except (FileNotFoundError, KeyError, OSError, ValueError):
+                continue
+            if metadata.get("content_type") not in self.artifact_store.IMAGE_TYPES:
+                continue
+            aliases = {
+                str(metadata.get("id") or "").casefold(),
+                str(metadata.get("filename") or "").casefold(),
+                str(metadata.get("source_name") or "").casefold(),
+                str(metadata.get("sha256") or "").casefold(),
+            }
+            if candidate in aliases:
+                matches.append(metadata)
+        if len(matches) == 1:
+            return matches[0]
+        raise PermissionError(
+            "Image reference is not attached or is ambiguous. Use "
+            "documents.inventory and retry with its artifact_id."
+        )
+
     def _inventory_item(self, item: Dict[str, Any]) -> Dict[str, Any]:
         """Describe tool offsets and human-facing citation bounds separately."""
         document = self.artifact_store.document(str(item["artifact_id"]))
@@ -130,6 +160,8 @@ class DocumentCapability:
         self,
         context: Optional[Dict[str, Any]] = None,
         query: str = "",
+        offset: int = 0,
+        limit: int = 50,
     ) -> str:
         """Inventory all attachments; tolerate a model-supplied descriptive query."""
         attached = self._attached_ids(context)
@@ -138,19 +170,110 @@ class DocumentCapability:
             for item in self.artifact_store.document_index.inventory()
             if item["artifact_id"] in attached
         ]
+        images = []
+        for artifact_id in sorted(attached):
+            try:
+                metadata = self.artifact_store.get(artifact_id)
+            except (FileNotFoundError, KeyError, OSError, ValueError):
+                continue
+            if metadata.get("content_type") not in self.artifact_store.IMAGE_TYPES:
+                continue
+            images.append({
+                key: metadata.get(key)
+                for key in (
+                    "id", "filename", "source_name", "content_type",
+                    "size_bytes", "sha256",
+                )
+            })
+        document_count = len(items)
+        image_count = len(images)
+        start = max(0, int(offset))
+        page_size = max(1, min(int(limit), 500))
+        records = [
+            {"kind": "document", **item} for item in items
+        ] + [
+            {"kind": "image", **item} for item in images
+        ]
+        selected = records[start : start + page_size]
+        next_offset = start + len(selected)
         return self._json(
             {
-                "documents": items,
-                "count": len(items),
+                "documents": [item for item in selected if item["kind"] == "document"],
+                "images": [item for item in selected if item["kind"] == "image"],
+                "count": len(records),
+                "document_count": document_count,
+                "image_count": image_count,
+                "offset": start,
+                "returned_count": len(selected),
+                "has_more": next_offset < len(records),
+                "next_offset": next_offset if next_offset < len(records) else None,
                 "scope": "explicitly attached local files",
                 "requested_query": str(query or "").strip(),
                 "addressing_convention": (
                     "documents.read start_block uses zero-based normalized-block offsets. "
                     "Local citations use one-based bounds from citation_bounds. PPTX "
-                    "citations use slide_number, never normalized block count."
+                    "citations use slide_number, never normalized block count. Use "
+                    "next_offset until has_more is false; use read_image for image content."
                 ),
             }
         )
+
+    @action(
+        name="read_image",
+        description=(
+            "Select one explicitly attached local image for visual analysis. The runtime "
+            "injects its binary as a multimodal message on the next model turn; the tool "
+            "result itself contains metadata only. Use every required image artifact_id."
+        ),
+    )
+    def read_image(
+        self,
+        artifact_id: str,
+        context: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        metadata = self._resolve_attached_image(artifact_id, context)
+        return self._json({
+            "artifact_id": metadata["id"],
+            "filename": metadata["filename"],
+            "content_type": metadata["content_type"],
+            "size_bytes": metadata["size_bytes"],
+            "sha256": metadata["sha256"],
+            "status": "scheduled_for_multimodal_context",
+        })
+
+    @action(
+        name="read_images",
+        description=(
+            "Select a batch of up to 4 explicitly attached local images for visual "
+            "analysis on following model turns. Use this for efficient image corpus "
+            "coverage; repeat with the next batch until all required IDs are analyzed."
+        ),
+    )
+    def read_images(
+        self,
+        artifact_ids: list[str],
+        context: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        requested = list(dict.fromkeys(
+            str(item) for item in artifact_ids if str(item).strip()
+        ))
+        if not requested or len(requested) > 4:
+            raise ValueError("read_images requires between 1 and 4 unique artifact_ids.")
+        images = []
+        for artifact_id in requested:
+            metadata = self._resolve_attached_image(artifact_id, context)
+            images.append({
+                "artifact_id": metadata["id"],
+                "filename": metadata["filename"],
+                "content_type": metadata["content_type"],
+                "size_bytes": metadata["size_bytes"],
+                "sha256": metadata["sha256"],
+            })
+        return self._json({
+            "images": images,
+            "count": len(images),
+            "status": "scheduled_for_multimodal_context",
+        })
 
     @action(
         name="search",

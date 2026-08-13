@@ -165,6 +165,8 @@ La configuration active est `workspace/config.json`. Au démarrage, GPTMOSS la n
   "restrict_to_workspace": true,
   "allow_subfolders": true,
   "max_context_chars": 12000,
+  "context_window_tokens": 0,
+  "context_output_reserve_tokens": 8192,
   "max_upload_bytes": 104857600,
   "max_attachment_text_chars": 5000000,
   "max_transitions_per_execution": 2000,
@@ -208,7 +210,9 @@ La configuration active est `workspace/config.json`. Au démarrage, GPTMOSS la n
 | `workspace_path` | Racine de travail des agents. | Un dossier dédié. |
 | `restrict_to_workspace` | Empêche les accès de fichiers hors de la racine. | `true`. |
 | `allow_subfolders` | Autorise les opérations dans les sous-dossiers. | `true`. |
-| `max_context_chars` | Plancher du contexte. En mode adaptatif, il grandit avec la tâche et le plan puis s'ajuste à la limite réelle du fournisseur. | `12000`, sans plafond applicatif fixe. |
+| `max_context_chars` | Plancher de l'historique conversationnel ; le préflight fournisseur applique toujours son plafond final. | `12000`. |
+| `context_window_tokens` | Fenêtre totale du modèle. `0` utilise une enveloppe initiale prudente puis apprend les limites exactes renvoyées par le backend. | `0`, ou `262144` si ce contrat est garanti par le serveur. |
+| `context_output_reserve_tokens` | Jetons gardés hors du prompt pour que la réponse ne tombe jamais implicitement à zéro. | `8192`. |
 | `max_upload_bytes` | Plafond applicatif strict d’un dépôt, validé par le contrat commun `RuntimeSettings`. | `104857600` (100 Mio). |
 | `max_attachment_text_chars` | Maximum de texte normalisé conservé par pièce jointe avant sélection contextuelle. | `5000000`. |
 | `max_transitions_per_execution` | Historique chronologique conservé par exécution ; les plus anciennes transitions sont élaguées. | `2000`. |
@@ -294,7 +298,9 @@ Invoke-RestMethod http://127.0.0.1:8000/api/settings
 | Modèle par défaut | Modèle utilisé pour les nouvelles étapes. | Utiliser le nom exact fourni par l’API. |
 | Capacité vision | `auto` détecte les modèles vision/omni/VL ; les modes forcés reflètent la capacité réelle du serveur. | `auto`, puis vérifier le diagnostic. |
 | Vérifier le certificat SSL | Active la validation TLS ; le chemin de certificat apparaît si nécessaire. | Laisser activé. |
-| Budget de contexte | Plancher adaptatif ; le runtime le développe avec le plan et apprend les erreurs de limite du fournisseur. | 12 000 est un bon départ. |
+| Budget d'historique | Plancher adaptatif de conversation ; il reste subordonné à la fenêtre totale du modèle. | 12 000 est un bon départ. |
+| Fenêtre totale du modèle | `0` sélectionne automatiquement une enveloppe prudente et apprend une limite exacte après un refus du backend. | `0`, ou la valeur contractuelle du serveur. |
+| Réserve de sortie | Soustraite de la fenêtre avant de construire le prompt ; évite les requêtes à zéro jeton de réponse. | 8 192 jetons. |
 | Gestion adaptative | Ajuste contexte, stagnation, reprises et sorties utiles à partir du contrat effectif. | Activée. |
 | Continuer tant que le travail progresse | Autorise une étape à dépasser tout nombre total de tours lorsque fichiers, livrables ou nouveaux tests réussis évoluent réellement. | Activé pour les projets longs. |
 | Budget sans progrès | Nombre de tours consécutifs sans modification durable ni nouvelle preuve avant reprise ou échec. | 20 à 40 ; ce n'est pas une durée maximale. |
@@ -527,7 +533,7 @@ Une règle de politique peut viser une capacité entière (`shell`) ou une actio
 | `shell` | `execute` | Lance une commande dans le projet. Avec un délai à `0`, le runtime choisit un budget par catégorie ; une sortie maximale à `0` est conservée entièrement. `python` utilise l'interpréteur courant, y compris dans les pipelines Windows. |
 | `agent` | `spawn`, `status`, `execute_subtask` | Crée ou suit une sous-tâche. La délégation imbriquée accepte une tâche nouvelle ; la répétition d’une tâche ancêtre est bloquée. |
 | `devteam` | `build_project`, `approve_quality_gate` | Pipeline de développement avec les mêmes règles de délégation et d’approbation. |
-| `documents` | `inventory`, `search`, `read`, `read_chunk` | Inventorie, recherche et lit avec provenance uniquement les documents explicitement joints à l'exécution. Aucun lien distant n'est suivi. |
+| `documents` | `inventory`, `search`, `read`, `read_chunk`, `read_image`, `read_images` | Pagine et lit avec provenance uniquement les documents/images explicitement joints ; les images sont chargées par lots multimodaux bornés. Aucun lien distant n'est suivi. |
 
 Le shell bloque en mode sûr plusieurs motifs destructifs évidents (`rm -rf /`, `format`, `diskpart`, `shutdown`, `reg delete`, etc.). Ce filtrage est intentionnellement limité : une politique stricte et un environnement isolé restent nécessaires.
 
@@ -635,7 +641,7 @@ Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8000/executions `
   -ContentType 'application/json' -Body $task
 ```
 
-Les documents ne sont pas concaténés puis tronqués aveuglément. GPTMOSS sélectionne les chunks liés à la tâche, diversifie les sources et peut échantillonner début, milieu et fin ; les agents disposent ensuite de lectures paginées. Une image est envoyée lorsque la capacité vision est détectée ou explicitement activée. Si une pièce jointe exige une capacité absente, le plan déclare une lacune et une routine de configuration au lieu de fabriquer une analyse.
+Les documents ne sont pas concaténés puis tronqués aveuglément. GPTMOSS sélectionne les chunks liés à la tâche, diversifie les sources et peut échantillonner début, milieu et fin ; les agents disposent ensuite d'un inventaire et de lectures paginés. Avec la vision active, ils chargent les images précises via `documents.read_image` ou `documents.read_images`, quatre maximum par tour. Une image n'est comptée comme analysée qu'après une complétion multimodale réussie. Si une pièce exige une capacité absente, le plan déclare une lacune et une routine de configuration au lieu de fabriquer une analyse.
 
 ## Mémoire, contexte et traces
 
@@ -649,7 +655,7 @@ Les documents ne sont pas concaténés puis tronqués aveuglément. GPTMOSS sél
 
 La mémoire durable est typée (`fact`, `decision`, `preference`, `constraint`, `lesson`) et cloisonnée par projet. Un agent peut rechercher les entrées validées ou proposer une nouvelle entrée ; il ne peut ni valider sa propre proposition ni la rendre globale. La validation humaine conserve la provenance et un remplacement validé masque la version obsolète sans effacer son historique.
 
-`max_context_chars` est un plancher lorsque la gestion adaptative est active : le budget grandit avec la tâche, les exigences et les étapes. Les sorties d’outils utilisent elles aussi un budget croissant, sans modifier la trace complète sauvegardée. Si le fournisseur refuse encore la taille, GPTMOSS apprend une enveloppe plus petite, conserve le système et l’ordre récent des outils, puis retente. Les recherches de mémoire automatique ne réutilisent que les entrées validées et non expirées. Les traces masquent les champs sensibles connus (`api_key`, `authorization`, `token`, `password`, `secret`).
+`max_context_chars` gouverne l'historique, mais la limite finale est calculée en jetons à partir de `context_window_tokens`, de la réserve de sortie, des outils et d'une marge de sécurité. En mode automatique, GPTMOSS démarre prudemment et apprend toute limite exacte renvoyée par le fournisseur. Les pièces sont sélectionnées globalement, les images ont aussi un budget en octets et un corpus massif est traité par recherche et partitions plutôt que concaténé dans un prompt. La trace persistée reste complète. Les recherches de mémoire automatique ne réutilisent que les entrées validées et non expirées. Les traces masquent les champs sensibles connus (`api_key`, `authorization`, `token`, `password`, `secret`).
 
 ## Sécurité
 

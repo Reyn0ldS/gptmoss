@@ -150,6 +150,8 @@ def bootstrap_runtime(workspace_root: str):
         default_model=model_name,
         ssl_verify=ssl_verify,
         ssl_cert_path=ssl_cert_path,
+        context_window_tokens=settings.context_window_tokens,
+        context_output_reserve_tokens=settings.context_output_reserve_tokens,
     )
     llm_provider.set_vision_mode(vision_mode)
 

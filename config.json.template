@@ -25,6 +25,8 @@
   "restrict_to_workspace": true,
   "allow_subfolders": true,
   "max_context_chars": 12000,
+  "context_window_tokens": 0,
+  "context_output_reserve_tokens": 8192,
   "max_upload_bytes": 104857600,
   "max_attachment_text_chars": 5000000,
   "max_transitions_per_execution": 2000,

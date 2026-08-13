@@ -23,6 +23,8 @@ class QwenProvider(LLMProvider):
         default_model: str = "qwen-turbo",
         ssl_verify: bool = True,
         ssl_cert_path: str = "",
+        context_window_tokens: int = 0,
+        context_output_reserve_tokens: int = 8_192,
     ):
         # Fall back to env variables or defaults
         self.api_key = api_key or os.getenv("OPENAI_API_KEY") or os.getenv("DASHSCOPE_API_KEY") or "mock-key"
@@ -35,6 +37,11 @@ class QwenProvider(LLMProvider):
         self.supports_vision = self._infer_vision(default_model)
         self._native_tools_supported: Optional[bool] = None
         self._learned_context_chars: Optional[int] = None
+        self.context_window_tokens = max(0, int(context_window_tokens or 0))
+        self.context_output_reserve_tokens = max(
+            256, int(context_output_reserve_tokens or 8_192)
+        )
+        self._learned_context_tokens: Optional[int] = None
         self._retired_clients = []
         self._close_tasks: set[asyncio.Task] = set()
         
@@ -108,7 +115,7 @@ class QwenProvider(LLMProvider):
             except Exception:
                 logger.warning("Unable to close an LLM HTTP client cleanly.", exc_info=True)
 
-    def update_config(self, api_key: str, base_url: str, ssl_verify: bool = True, ssl_cert_path: str = "", model_name: str = "qwen-turbo"):
+    def update_config(self, api_key: str, base_url: str, ssl_verify: bool = True, ssl_cert_path: str = "", model_name: str = "qwen-turbo", context_window_tokens: int = 0, context_output_reserve_tokens: int = 8_192):
         self.api_key = api_key
         self.base_url = base_url
         self.default_model = model_name
@@ -120,6 +127,11 @@ class QwenProvider(LLMProvider):
         )
         self._native_tools_supported = None
         self._learned_context_chars = None
+        self.context_window_tokens = max(0, int(context_window_tokens or 0))
+        self.context_output_reserve_tokens = max(
+            256, int(context_output_reserve_tokens or 8_192)
+        )
+        self._learned_context_tokens = None
         
         import httpx
         if ssl_verify:
@@ -148,6 +160,50 @@ class QwenProvider(LLMProvider):
     ) -> List[Dict[str, Any]]:
         """Drop oldest complete context items while preserving instructions and recent tool ordering."""
         return ContextWindowPolicy.compact(messages, target_chars)
+
+    @property
+    def effective_context_window_tokens(self) -> int:
+        """Use configuration, learned provider evidence, or a safe auto budget."""
+        candidates = [
+            value for value in (
+                self.context_window_tokens,
+                self._learned_context_tokens,
+            )
+            if value and value > 0
+        ]
+        # Unknown OpenAI-compatible models vary enormously.  65k is a safe
+        # initial automatic envelope; an exact provider rejection is learned.
+        return min(candidates) if candidates else 65_536
+
+    @property
+    def context_input_budget_tokens(self) -> int:
+        window = self.effective_context_window_tokens
+        safety = max(1_024, min(8_192, window // 32))
+        reserve = min(self.context_output_reserve_tokens, max(256, window // 4))
+        return max(1_024, window - safety - reserve)
+
+    @property
+    def context_input_budget_chars(self) -> int:
+        return self.context_input_budget_tokens * 2
+
+    def _fit_context_request(self, request: Dict[str, Any]) -> Dict[str, Any]:
+        fitted = dict(request)
+        messages = [dict(item) for item in fitted.get("messages") or []]
+        window = self.effective_context_window_tokens
+        requested_output = fitted.get("max_tokens")
+        reserve = int(requested_output) if requested_output else self.context_output_reserve_tokens
+        reserve = max(1, min(reserve, max(256, window // 4)))
+        fitted["max_tokens"] = reserve
+        overhead = ContextWindowPolicy.estimate_tokens({
+            "tools": fitted.get("tools") or [],
+            "tool_choice": fitted.get("tool_choice"),
+        })
+        safety = max(1_024, min(8_192, window // 32))
+        message_budget = max(1_024, window - reserve - safety - overhead)
+        fitted["messages"] = ContextWindowPolicy.compact_to_tokens(
+            messages, message_budget
+        )
+        return fitted
 
     @staticmethod
     async def _notify_text_delta(callback, text: str) -> None:
@@ -222,16 +278,24 @@ class QwenProvider(LLMProvider):
                 content = None
         return {"content": content, "tool_calls": calls, "usage": usage}
 
-    async def _create_with_context_recovery(self, arguments: Dict[str, Any], on_text_delta=None):
+    async def _create_with_context_recovery(
+        self, arguments: Dict[str, Any], on_text_delta=None,
+        on_context_fitted=None,
+    ):
         """Learn a provider's effective context size and recover without losing task state."""
         request = dict(arguments)
         request.pop("stream", None)
+        request = self._fit_context_request(request)
         messages = [dict(item) for item in request.get("messages") or []]
         if self._learned_context_chars:
             messages = self._compact_messages(messages, self._learned_context_chars)
         for attempt in range(5):
             request["messages"] = messages
             try:
+                if on_context_fitted is not None:
+                    fitted_result = on_context_fitted(messages)
+                    if inspect.isawaitable(fitted_result):
+                        await fitted_result
                 if on_text_delta is not None:
                     stream_request = dict(request)
                     stream_request.setdefault("stream_options", {"include_usage": True})
@@ -257,19 +321,42 @@ class QwenProvider(LLMProvider):
             except Exception as error:
                 if not self._is_context_limit_error(error) or attempt >= 4:
                     raise
-                current_size = self._message_chars(messages)
-                learned = max(2_000, int(current_size * 0.7))
-                self._learned_context_chars = (
-                    learned if self._learned_context_chars is None
-                    else min(self._learned_context_chars, learned)
-                )
-                compacted = self._compact_messages(messages, self._learned_context_chars)
+                provider_limit = ContextWindowPolicy.limit_tokens(error)
+                if provider_limit:
+                    self._learned_context_tokens = (
+                        provider_limit if self._learned_context_tokens is None
+                        else min(self._learned_context_tokens, provider_limit)
+                    )
+                    request = self._fit_context_request({**request, "messages": messages})
+                    compacted = request["messages"]
+                    self._learned_context_chars = ContextWindowPolicy.message_chars(compacted)
+                else:
+                    current_size = self._message_chars(messages)
+                    learned = max(2_000, int(current_size * 0.65))
+                    self._learned_context_chars = (
+                        learned if self._learned_context_chars is None
+                        else min(self._learned_context_chars, learned)
+                    )
+                    compacted = self._compact_messages(messages, self._learned_context_chars)
+                if compacted == messages:
+                    # Multimodal servers can account image/tool tokens more
+                    # aggressively than the portable estimator. Force strict
+                    # monotonic reduction instead of replaying the same request.
+                    learned = max(1_000, int(self._message_chars(messages) * 0.70))
+                    self._learned_context_chars = (
+                        learned if self._learned_context_chars is None
+                        else min(self._learned_context_chars, learned)
+                    )
+                    compacted = self._compact_messages(
+                        messages, self._learned_context_chars
+                    )
                 if compacted == messages:
                     raise
                 messages = compacted
                 logger.warning(
-                    "Provider context limit reached; retrying with %s learned characters.",
-                    self._learned_context_chars,
+                    "Provider context limit reached; retrying with %s input tokens (%s characters).",
+                    self.context_input_budget_tokens,
+                    ContextWindowPolicy.message_chars(messages),
                 )
 
     async def completion(
@@ -282,6 +369,7 @@ class QwenProvider(LLMProvider):
         """Send completion request to Qwen/OpenAI compatible API."""
         model = kwargs.pop("model", self.default_model)
         on_text_delta = kwargs.pop("on_text_delta", None)
+        on_context_fitted = kwargs.pop("on_context_fitted", None)
         kwargs.pop("stream", None)
         
         if not tools:
@@ -292,7 +380,7 @@ class QwenProvider(LLMProvider):
                     "model": model,
                     "messages": messages,
                     **kwargs,
-                }, on_text_delta=on_text_delta)
+                }, on_text_delta=on_text_delta, on_context_fitted=on_context_fitted)
                 if isinstance(response, dict) and "content" in response:
                     return response
                 return self._parse_openai_response(response)
@@ -302,7 +390,8 @@ class QwenProvider(LLMProvider):
 
         if self._native_tools_supported is False:
             return await self._prompt_based_tool_calling(
-                messages, tools, model, on_text_delta=on_text_delta, **kwargs
+                messages, tools, model, on_text_delta=on_text_delta,
+                on_context_fitted=on_context_fitted, **kwargs
             )
 
         # Build arguments for openai client to try native tool calling
@@ -319,7 +408,8 @@ class QwenProvider(LLMProvider):
 
         try:
             response = await self._create_with_context_recovery(
-                client_kwargs, on_text_delta=on_text_delta
+                client_kwargs, on_text_delta=on_text_delta,
+                on_context_fitted=on_context_fitted,
             )
             parsed = (
                 response
@@ -339,7 +429,8 @@ class QwenProvider(LLMProvider):
                 logger.warning("Native tool calling failed/not supported by remote endpoint, falling back to prompt-based tool calling.")
                 self._native_tools_supported = False
                 return await self._prompt_based_tool_calling(
-                    messages, tools, model, on_text_delta=on_text_delta, **kwargs
+                    messages, tools, model, on_text_delta=on_text_delta,
+                    on_context_fitted=on_context_fitted, **kwargs
                 )
             else:
                 self._log_completion_error(e)
@@ -392,13 +483,9 @@ class QwenProvider(LLMProvider):
         for msg in messages:
             role = msg.get("role")
             if isinstance(msg.get("content"), list):
-                text_parts = []
-                for part in msg["content"]:
-                    if part.get("type") == "text":
-                        text_parts.append(part.get("text", ""))
-                    elif part.get("type") == "image_url":
-                        text_parts.append("[image attached]")
-                cleaned_messages.append({"role": role, "content": "\n".join(text_parts)})
+                # Tool fallback changes the tool protocol, not the model's
+                # multimodal chat contract. Preserve image parts verbatim.
+                cleaned_messages.append(dict(msg))
                 continue
             if role == "tool":
                 cleaned_messages.append({
@@ -445,13 +532,14 @@ class QwenProvider(LLMProvider):
             fallback_messages.insert(0, {"role": "system", "content": system_instruction})
         
         on_text_delta = kwargs.pop("on_text_delta", None)
+        on_context_fitted = kwargs.pop("on_context_fitted", None)
         kwargs.pop("stream", None)
         # Make a standard chat completion call
         response = await self._create_with_context_recovery({
             "model": model,
             "messages": fallback_messages,
             **kwargs,
-        }, on_text_delta=on_text_delta)
+        }, on_text_delta=on_text_delta, on_context_fitted=on_context_fitted)
         pre_parsed_tool_calls = None
         if isinstance(response, dict) and "content" in response:
             content = response.get("content") or ""

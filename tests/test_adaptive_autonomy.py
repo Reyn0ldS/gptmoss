@@ -570,6 +570,34 @@ def test_progress_failure_count_ignores_unrelated_shell_probes(tmp_path):
     )
 
 
+def test_progress_rewards_new_document_coverage_but_not_repeated_reads(tmp_path):
+    engine, state = _engine(tmp_path, MockLLMProvider())
+    execution = state.get_execution("source-progress")
+    step = {"required_artifacts": []}
+    before = engine._progress_signature("source-progress", step)
+    read = json.dumps({
+        "artifact_id": "doc-1", "blocks": [{"order": 0}, {"order": 1}],
+    })
+    engine._record_tool_result(
+        "source-progress", "documents", "read", {}, read
+    )
+    after = engine._progress_signature("source-progress", step)
+    assert engine._quality_improved("source-progress", before, after) == (
+        True, "new_source_coverage",
+    )
+
+    engine._record_tool_result(
+        "source-progress", "documents", "read", {}, read
+    )
+    repeated = engine._progress_signature("source-progress", step)
+    assert repeated == after
+    execution.variables["visualized_artifact_ids"] = ["image-1"]
+    visual = engine._progress_signature("source-progress", step)
+    assert engine._quality_improved("source-progress", repeated, visual) == (
+        True, "new_source_coverage",
+    )
+
+
 def test_tool_argument_normalization_recovers_wrappers_aliases_and_prefixed_path():
     wrapped = ExecutionEngine._normalize_tool_arguments(
         "filesystem", "write", {"parameters": {"file_path": "src/app.py", "text": "VALUE = 1\n"}},
@@ -1037,6 +1065,36 @@ def test_exhaustive_inventory_gate_requires_every_normalized_block_read(tmp_path
     )
 
     assert engine._document_coverage_issues("coverage-gate", step) == []
+
+
+def test_exhaustive_inventory_gate_requires_each_attached_image_presented(tmp_path):
+    engine, state = _engine(tmp_path, MockLLMProvider())
+    store = ArtifactStore(str(tmp_path / "image-artifacts"))
+    image = store.save_bytes(
+        "evidence.png", b"\x89PNG\r\n\x1a\nevidence", "image/png"
+    )
+    engine.artifact_store = store
+    execution = state.get_execution("image-coverage-gate")
+    execution.variables["attachment_ids"] = [image["id"]]
+    step = {
+        "description": "Inventory every explicit attachment and record complete coverage.",
+        "acceptance_criteria": ["All images were analyzed."],
+    }
+
+    result = json.dumps({
+        "artifact_id": image["id"],
+        "status": "scheduled_for_multimodal_context",
+    })
+    engine._record_tool_result(
+        "image-coverage-gate", "documents", "read_image", {}, result
+    )
+
+    assert execution.variables["pending_visual_artifact_ids"] == [image["id"]]
+    assert "evidence.png" in engine._document_coverage_issues(
+        "image-coverage-gate", step
+    )[0]
+    execution.variables["visualized_artifact_ids"] = [image["id"]]
+    assert engine._document_coverage_issues("image-coverage-gate", step) == []
 
 
 def test_rescue_strips_prefixed_fence_and_rejects_mock_random_tests():

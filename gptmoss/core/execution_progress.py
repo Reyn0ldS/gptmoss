@@ -96,7 +96,20 @@ class ExecutionProgressMixin:
             and exhaustive_assignment
         ):
             return []
-        covered: Dict[str, set[int]] = {artifact_id: set() for artifact_id in attached}
+        document_ids: set[str] = set()
+        image_ids: set[str] = set()
+        for artifact_id in attached:
+            try:
+                metadata = self.artifact_store.get(artifact_id)
+            except (FileNotFoundError, KeyError, OSError, ValueError):
+                continue
+            if metadata.get("content_type") in self.artifact_store.IMAGE_TYPES:
+                image_ids.add(artifact_id)
+            else:
+                document_ids.add(artifact_id)
+        covered: Dict[str, set[int]] = {
+            artifact_id: set() for artifact_id in document_ids
+        }
         history = state.variables.get("tool_call_history", [])
         for item in history:
             if item.get("capability") != "documents" or item.get("action") != "read":
@@ -119,7 +132,7 @@ class ExecutionProgressMixin:
             for item in self.artifact_store.document_index.inventory()
             if str(item.get("artifact_id")) in attached
         }
-        for artifact_id in sorted(attached):
+        for artifact_id in sorted(document_ids):
             item = inventory.get(artifact_id, {})
             try:
                 total = int(item.get("block_count") or len(
@@ -138,6 +151,27 @@ class ExecutionProgressMixin:
                     f"read every normalized block of {filename}; "
                     f"missing 1-based block(s): {display}"
                 )
+        visualized = {
+            str(item) for item in state.variables.get(
+                "visualized_artifact_ids", []
+            ) if item
+        }
+        missing_images = sorted(image_ids - visualized)
+        if missing_images:
+            names = []
+            for artifact_id in missing_images[:20]:
+                try:
+                    names.append(str(self.artifact_store.get(artifact_id)["filename"]))
+                except (FileNotFoundError, KeyError, OSError, ValueError):
+                    names.append(artifact_id)
+            suffix = (
+                f", and {len(missing_images) - 20} more"
+                if len(missing_images) > 20 else ""
+            )
+            issues.append(
+                "analyze every attached image through documents.read_image/read_images; "
+                f"missing: {', '.join(names)}{suffix}"
+            )
         return issues
 
     def _capability_gaps(self, state) -> List[Dict[str, Any]]:
@@ -322,11 +356,41 @@ class ExecutionProgressMixin:
                 )]
                 latest_failure_count = sum(counts) if counts else 1_000_000
             break
+        source_coverage = set()
+        for item in history:
+            if item.get("capability") != "documents":
+                continue
+            action = str(item.get("action") or "")
+            try:
+                payload = json.loads(str(item.get("result") or ""))
+            except (TypeError, ValueError):
+                continue
+            if action == "read":
+                artifact_id = str(payload.get("artifact_id") or "")
+                for block in payload.get("blocks") or []:
+                    if artifact_id and isinstance(block, dict):
+                        try:
+                            source_coverage.add(
+                                ("block", artifact_id, int(block["order"]))
+                            )
+                        except (KeyError, TypeError, ValueError):
+                            continue
+            elif action == "read_chunk" and payload.get("id"):
+                source_coverage.add(("chunk", str(payload["id"])))
+            elif action == "inventory":
+                source_coverage.add(("inventory-page", int(payload.get("offset") or 0)))
+        source_coverage.update(
+            ("image", str(item))
+            for item in execution_state.variables.get(
+                "visualized_artifact_ids", []
+            ) if item
+        )
         return (
             tuple(files),
             tuple(successful_commands),
             tuple(sorted(self._missing_artifacts(execution_id, step))),
             latest_failure_count,
+            tuple(sorted(source_coverage)),
         )
 
     def _quality_improved(self, execution_id: str, previous: tuple, current: tuple) -> tuple[bool, str]:
@@ -345,6 +409,10 @@ class ExecutionProgressMixin:
         if (previous_failures is not None and current_failures is not None
                 and current_failures < previous_failures):
             return True, "fewer_machine_failures"
+        previous_sources = set(previous[4]) if len(previous) > 4 else set()
+        current_sources = set(current[4]) if len(current) > 4 else set()
+        if current_sources - previous_sources:
+            return True, "new_source_coverage"
 
         changed = sorted(
             path for path in set(previous_files) & set(current_files)

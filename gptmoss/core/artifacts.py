@@ -566,6 +566,10 @@ class ArtifactStore:
         supports_vision: bool = False,
         max_text_chars: int | None = None,
         query: str = "",
+        max_items: int = 64,
+        max_images: int = 4,
+        max_image_bytes: int = 0,
+        preferred_artifact_ids: List[str] | None = None,
     ) -> List[Dict[str, Any]]:
         items = []
         text_limit = self.max_text_chars if max_text_chars is None else max(0, int(max_text_chars))
@@ -575,9 +579,12 @@ class ArtifactStore:
             for metadata in metadata_items
             if metadata["content_type"] in self.DOCUMENT_TYPES
         ]
-        per_document_limit = 0
-        if text_limit and document_ids:
-            per_document_limit = max(128, text_limit // len(document_ids))
+        max_items = max(1, int(max_items or 1))
+        max_images = max(0, int(max_images or 0))
+        max_image_bytes = max(0, int(max_image_bytes or 0))
+        preferred = [
+            str(item) for item in (preferred_artifact_ids or []) if item
+        ]
 
         ranked_by_artifact: Dict[str, List[Dict[str, Any]]] = {}
         if query.strip() and document_ids:
@@ -589,11 +596,53 @@ class ArtifactStore:
             for result in ranked:
                 ranked_by_artifact.setdefault(result["artifact_id"], []).append(result)
 
+        # Select a bounded representative working set.  The full inventory and
+        # every omitted document remain queryable through documents.* tools.
+        ranked_ids = list(ranked_by_artifact)
+        document_order = [metadata["id"] for metadata in metadata_items if metadata["id"] in document_ids]
+        selected_document_ids = list(dict.fromkeys(ranked_ids))[:max_items]
+        remaining_slots = max(0, max_items - len(selected_document_ids))
+        if remaining_slots:
+            unselected = [item for item in document_order if item not in selected_document_ids]
+            if unselected:
+                selected_document_ids.extend(
+                    self._evenly_spaced_chunks(
+                        unselected, min(remaining_slots, len(unselected))
+                    )
+                )
+        selected_document_set = set(selected_document_ids)
+        selected_image_ids: set[str] = set()
+        selected_image_bytes = 0
+        image_candidates = sorted(
+            metadata_items,
+            key=lambda item: (
+                0 if item["id"] in preferred else 1,
+                preferred.index(item["id"]) if item["id"] in preferred else 0,
+            ),
+        )
+        for metadata in image_candidates:
+            if metadata["content_type"] not in self.IMAGE_TYPES:
+                continue
+            if len(selected_image_ids) >= max_images:
+                break
+            image_bytes = max(0, int(metadata.get("size_bytes") or 0))
+            if (
+                max_image_bytes
+                and selected_image_bytes + image_bytes > max_image_bytes
+            ):
+                continue
+            selected_image_ids.add(metadata["id"])
+            selected_image_bytes += image_bytes
+        selected_count = max(1, len(selected_document_set))
+        per_document_limit = max(1, text_limit // selected_count) if text_limit else 0
+
         for metadata in metadata_items:
             artifact_id = metadata["id"]
             path = Path(metadata["path"])
             item = {key: metadata[key] for key in ("id", "filename", "content_type", "size_bytes", "sha256")}
             if metadata["content_type"] in self.DOCUMENT_TYPES:
+                if artifact_id not in selected_document_set:
+                    continue
                 document = self.document(artifact_id)
                 full_text = document.to_markdown()
                 chunks = self.document_index.chunks_for_artifact(artifact_id)
@@ -670,10 +719,31 @@ class ArtifactStore:
                     "parser_version": document.parser_version,
                     "block_count": len(document.blocks),
                 }
-            elif supports_vision:
+            elif supports_vision and artifact_id in selected_image_ids:
                 encoded = base64.b64encode(path.read_bytes()).decode("ascii")
                 item["image_url"] = f"data:{metadata['content_type']};base64,{encoded}"
-            else:
+            elif artifact_id in selected_image_ids:
                 item["note"] = "Image attached; the configured model does not advertise vision support."
+            else:
+                continue
             items.append(item)
+        omitted = len(metadata_items) - len(items)
+        if omitted:
+            items.append({
+                "id": "corpus-selection-summary",
+                "filename": "corpus-selection-summary",
+                "content_type": "application/x-gptmoss-corpus-summary",
+                "size_bytes": 0,
+                "sha256": "",
+                "note": (
+                    f"{omitted} attached source(s) were omitted from this bounded prompt. "
+                    "Use documents.inventory/search/read to inspect them; prompt excerpts never prove full coverage."
+                ),
+                "selection": {
+                    "total_attachments": len(metadata_items),
+                    "selected_attachments": len(items),
+                    "omitted_attachments": omitted,
+                    "text_budget_chars": text_limit,
+                },
+            })
         return items

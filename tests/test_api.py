@@ -593,6 +593,8 @@ def test_api_settings_preserve_secret_and_context_budget(tmp_path):
         "diagram_rendering": False,
         "docx_embed_diagrams": False,
         "max_context_chars": 24000,
+        "context_window_tokens": 262144,
+        "context_output_reserve_tokens": 16384,
         "max_upload_bytes": 100000,
         "max_attachment_text_chars": 5000,
         "safe_shell_mode": False,
@@ -606,6 +608,8 @@ def test_api_settings_preserve_secret_and_context_budget(tmp_path):
     public_settings = client.get("/api/settings").json()
     assert "api_key" not in public_settings
     assert public_settings["max_context_chars"] == 24000
+    assert public_settings["context_window_tokens"] == 262144
+    assert public_settings["context_output_reserve_tokens"] == 16384
     assert public_settings["safe_shell_mode"] is False
     assert public_settings["shell_timeout_seconds"] == 45
     assert public_settings["default_skills"] == ["code-review"]
