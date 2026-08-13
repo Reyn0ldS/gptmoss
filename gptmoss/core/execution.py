@@ -1195,6 +1195,7 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
                     analysis=plan_result.get("analysis"),
                     workload_profile=state.variables.get("workload_profile"),
                     corpus_auto_workflow=bool(state.variables.get("corpus_auto_workflow")),
+                    validate=True,
                 )
             plan_result = normalize_plan(plan_result)
             self.telemetry.record("plan_generated", execution_id, duration_ms=round((time.perf_counter() - planning_started) * 1000, 2), steps=len(plan_result.get("steps", [])))

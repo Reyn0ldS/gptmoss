@@ -377,3 +377,86 @@ async def test_kernel_stores_planning_mode_and_title():
     stored = state.get_execution(exec_id)
     assert stored.variables["planning_mode"] == "direct"
     assert stored.variables["task_title"].startswith("Write a concise summary")
+
+
+def test_bootstrap_runtime_serves_health_readiness_and_gui(tmp_path):
+    """Catch launch regressions that unit tests of isolated engines miss."""
+    from gptmoss.api.server import app, init_app
+    from main import bootstrap_runtime
+    from tests.test_api import ASGIClient
+
+    kernel, engine, state, bus = bootstrap_runtime(str(tmp_path))
+    init_app(kernel, engine, state, bus)
+    client = ASGIClient(app)
+
+    assert client.get("/health").status_code == 200
+    ready = client.get("/readiness")
+    assert ready.status_code == 200
+    assert ready.json()["status"] == "ready"
+    page = client.get("/")
+    assert page.status_code == 200
+    assert 'id="task-planning-mode"' in page.text
+    assert "corpus_auto_workflow" in page.text
+
+
+def test_main_py_process_reaches_readiness(tmp_path):
+    """Start the same process as start.bat: python main.py."""
+    import socket
+    import subprocess
+    import time
+
+    import httpx
+
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = int(sock.getsockname()[1])
+    workspace = tmp_path / "launch-workspace"
+    proc = subprocess.Popen(
+        [
+            sys.executable, os.path.join(root, "main.py"),
+            "--host", "127.0.0.1", "--port", str(port),
+            "--workspace", str(workspace),
+        ],
+        cwd=root,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    try:
+        deadline = time.time() + 25
+        last_error = None
+        while time.time() < deadline:
+            if proc.poll() is not None:
+                output = proc.stdout.read() if proc.stdout else ""
+                raise AssertionError(
+                    f"main.py exited {proc.returncode} during launch:\n{output[-4000:]}"
+                )
+            try:
+                health = httpx.get(f"http://127.0.0.1:{port}/health", timeout=0.5)
+                ready = httpx.get(f"http://127.0.0.1:{port}/readiness", timeout=0.5)
+                gui = httpx.get(f"http://127.0.0.1:{port}/", timeout=2.0)
+                if (
+                    health.status_code == 200
+                    and ready.status_code == 200
+                    and gui.status_code == 200
+                ):
+                    assert "task-planning-mode" in gui.text
+                    return
+            except Exception as exc:
+                last_error = exc
+                time.sleep(0.15)
+        output = ""
+        if proc.stdout:
+            proc.terminate()
+            output = proc.stdout.read()
+        raise AssertionError(
+            f"main.py did not become ready: {last_error}\n{output[-4000:]}"
+        )
+    finally:
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()

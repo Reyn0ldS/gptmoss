@@ -122,6 +122,22 @@ def test_generated_plan_validation_uses_obligations_not_a_step_floor():
         SimplePlanner._validate_generated_plan(incomplete, analysis, "auto", task=task)
 
 
+def test_generic_team_fallback_keeps_a_producer_and_auditor():
+    task = "Summarize this meeting for the steering committee in two pages."
+    analysis = analyze_task_complexity(task)
+    short = SimplePlanner._fallback_plan(task, {**analysis, "level": "high"}, "short_team")
+    SimplePlanner._validate_generated_plan(
+        short, {**analysis, "level": "high"}, "short_team", task=task,
+    )
+    assert [step["role"] for step in short["steps"]] == ["architect", "coordinator"]
+
+    auto_high = SimplePlanner._fallback_plan(task, {**analysis, "level": "very_high"}, "auto")
+    SimplePlanner._validate_generated_plan(
+        auto_high, {**analysis, "level": "very_high"}, "auto", task=task,
+    )
+    assert len(auto_high["steps"]) == 2
+
+
 def test_thirteen_steps_are_a_fallback_shape_not_a_global_fixed_count():
     direct_task = "Translate this sentence into French."
     software_task = "Build a software application with a REST API, persistence and tests."

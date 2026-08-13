@@ -321,6 +321,24 @@ class SimplePlanner(PlannerProvider):
                 _step(4, "coordinator", "Final Requirement Traceability Auditor", "Audit the requested outcome against files, tests, and residual risk.", [3], ["delivery audit"], [], ["No unsupported completion claim remains."]),
             ]
             return {"analysis": analysis, "steps": steps, "rationale": "Compact software fallback sized to the task."}
+        # Team or high-complexity work still needs a producer distinct from the
+        # final auditor. Do not inflate a non-software task into a 13-step DAG.
+        if mode in {"short_team", "full_team"} or analysis["level"] in {"high", "very_high"}:
+            steps = [
+                _step(0, "architect", "Task Specialist",
+                      f"Perform the user task: {task}",
+                      [], list(domains) or ["general"], [],
+                      ["The requested outcome is produced."]),
+                _step(1, "coordinator", "Final Requirement Traceability Auditor",
+                      "Audit the requested outcome against produced evidence and residual risk.",
+                      [0], ["delivery audit"], [],
+                      ["No unsupported completion claim remains."]),
+            ]
+            return {
+                "analysis": analysis,
+                "steps": steps,
+                "rationale": "Compact independent-audit fallback sized to a non-software task.",
+            }
         return {"analysis": analysis,
                 "steps": [_step(0, "coordinator", "Task Specialist", f"Perform the user task: {task}", [], list(domains) or ["general"], [], ["The requested outcome is delivered."])],
                 "rationale": "Deterministic direct-task fallback."}
