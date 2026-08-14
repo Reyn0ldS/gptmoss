@@ -501,12 +501,12 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
                     if normalized.get(alias):
                         normalized["path"] = normalized.pop(alias)
                         break
-            if action.lower() == "write" and "content" not in normalized:
+            if action.lower() in {"write", "append"} and "content" not in normalized:
                 for alias in ("text", "source", "body"):
                     if alias in normalized:
                         normalized["content"] = normalized.pop(alias)
                         break
-            if action.lower() == "write" and not normalized.get("path"):
+            if action.lower() in {"write", "append"} and not normalized.get("path"):
                 content = normalized.get("content")
                 if isinstance(content, str):
                     first_line = content.strip().splitlines()[0] if content.strip() else ""
@@ -2504,7 +2504,9 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
                     "For long documents, work section-by-section from the declared section contracts: meet each target "
                     "word count, cite bounded local evidence near factual claims, preserve terminology and requirement IDs, "
                     "and avoid repeating prerequisite sections. Treat the checkpoint and previous-section memory as the "
-                    "canonical source of continuity. Never invent a source, citation locator, diagram, metric, or validation result."
+                    "canonical source of continuity. Build an oversized owned artifact with one filesystem.write call for "
+                    "its first bounded section followed by filesystem.append calls for later sections; do not create undeclared "
+                    "temporary part files. Never invent a source, citation locator, diagram, metric, or validation result."
                 )
             else:
                 specialized_prompt = "Coordinate the current step and synthesize prerequisite results without repeating completed work."
@@ -2694,7 +2696,9 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
                             "Your previous textual tool call was not executed because its JSON was malformed or truncated. "
                             "Do not repeat the same oversized payload. Emit only one complete valid tool-call JSON object with "
                             "all closing quotes/braces. Keep source modules compact; split a large implementation into smaller "
-                            "cohesive files and write one complete file per call."
+                            "cohesive files and write one complete file per call. For a large text artifact, write the first "
+                            "bounded section to its declared path, then append later sections to that same owned path with "
+                            "filesystem.append; do not create undeclared temporary part files."
                         ),
                         "timestamp": time.time(),
                     })
@@ -2857,8 +2861,13 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
         """Invoke a tool while enforcing specialist ownership and path serialization."""
         if self.state_engine.get_execution(execution_id).status == "cancelled":
             raise asyncio.CancelledError()
-        is_mutation = capability.lower() == "filesystem" and action.lower() in {"write", "delete"}
+        is_mutation = capability.lower() == "filesystem" and action.lower() in {"write", "append", "delete"}
         path = str(arguments.get("path") or "")
+        if is_mutation and not path.strip():
+            return (
+                f"Error: Invalid arguments for {capability}.{action}; missing required "
+                "argument(s): path. Correct the tool call and retry."
+            )
         command = str(arguments.get("command") or "")
         shell_paths = (
             self._shell_mutation_paths(command)
@@ -2960,6 +2969,25 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
             
             sig = inspect.signature(bound_method)
             kwargs = dict(arguments)
+            accepts_extra_arguments = any(
+                parameter.kind is inspect.Parameter.VAR_KEYWORD
+                for parameter in sig.parameters.values()
+            )
+            unexpected_arguments = sorted(
+                name for name in kwargs
+                if name not in sig.parameters and not accepts_extra_arguments
+            )
+            if unexpected_arguments:
+                accepted_arguments = [
+                    name for name in sig.parameters
+                    if name != "context"
+                ]
+                accepted = ", ".join(accepted_arguments) or "none"
+                return (
+                    f"Error: Invalid arguments for {capability}.{action}; unexpected "
+                    f"argument(s): {', '.join(unexpected_arguments)}. Accepted arguments: "
+                    f"{accepted}. Correct the tool call and retry."
+                )
             missing_arguments = [
                 name for name, parameter in sig.parameters.items()
                 if name != "context" and parameter.default is inspect.Parameter.empty

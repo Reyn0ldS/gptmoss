@@ -357,6 +357,70 @@ async def test_shell_and_filesystem_mutations_share_sorted_path_locks(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_filesystem_mutation_without_path_reports_argument_error_before_ownership(tmp_path):
+    engine, state = _engine(tmp_path)
+    execution = state.get_execution("missing-path")
+    execution.variables["delivery_contract"] = {
+        "steps": [{"step_id": 0, "role": "writer", "owned_paths": ["deliverable.md"]}]
+    }
+    execution.variables["plan_step_id"] = 0
+    execution.variables["role_key"] = "writer"
+
+    result = await engine._call_tool(
+        "missing-path", "filesystem", "write", {"content": "draft"}
+    )
+
+    assert "missing required argument(s): path" in result
+    assert "ownership denied" not in result.casefold()
+
+
+@pytest.mark.asyncio
+async def test_tool_dispatch_reports_unexpected_arguments_without_invoking_capability(tmp_path):
+    engine, state = _engine(tmp_path)
+    state.get_execution("unexpected-argument")
+    target = tmp_path / "evidence.txt"
+    target.write_text("local evidence", encoding="utf-8")
+
+    result = await engine._call_tool(
+        "unexpected-argument",
+        "filesystem",
+        "read",
+        {"path": "evidence.txt", "artifact_id": "not-valid-for-filesystem"},
+    )
+
+    assert "unexpected argument(s): artifact_id" in result
+    assert "Accepted arguments: path, offset, limit" in result
+
+
+@pytest.mark.asyncio
+async def test_owned_long_artifact_can_be_built_with_bounded_append_calls(tmp_path):
+    engine, state = _engine(tmp_path)
+    execution = state.get_execution("long-append")
+    execution.variables["delivery_contract"] = {
+        "steps": [{"step_id": 0, "role": "writer", "owned_paths": ["dossier.md"]}]
+    }
+    execution.variables["plan_step_id"] = 0
+    execution.variables["role_key"] = "writer"
+
+    first = await engine._call_tool(
+        "long-append", "filesystem", "write",
+        {"path": "dossier.md", "content": "# Section 1\n\nEvidence one.\n"},
+    )
+    second = await engine._call_tool(
+        "long-append", "filesystem", "append",
+        {"path": "dossier.md", "content": "\n# Section 2\n\nEvidence two.\n"},
+    )
+
+    assert first == "File written successfully to dossier.md"
+    assert second == "Content appended successfully to dossier.md"
+    assert (tmp_path / "projects" / "proj-default" / "dossier.md").read_text(
+        encoding="utf-8"
+    ) == (
+        "# Section 1\n\nEvidence one.\n\n# Section 2\n\nEvidence two.\n"
+    )
+
+
+@pytest.mark.asyncio
 async def test_kernel_stores_planning_mode_and_title():
     state = StateEngine()
     llm = MockLLMProvider()

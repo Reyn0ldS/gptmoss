@@ -529,7 +529,7 @@ Une règle de politique peut viser une capacité entière (`shell`) ou une actio
 
 | Capacité | Actions | Utilisation et limites |
 |---|---|---|
-| `filesystem` | `read`, `write`, `list_dir`, `delete` | Les chemins sont résolus par rapport au projet de l'exécution. `write` écrase un fichier existant ; `delete` ne supprime un dossier que s'il est vide. |
+| `filesystem` | `read`, `write`, `append`, `list_dir`, `delete` | Les chemins sont résolus par rapport au projet de l'exécution. `write` écrase un fichier existant ; `append` construit un grand artefact autorisé par ajouts bornés sans créer de fichiers intermédiaires hors contrat ; `delete` ne supprime un dossier que s'il est vide. |
 | `shell` | `execute` | Lance une commande dans le projet. Avec un délai à `0`, le runtime choisit un budget par catégorie ; une sortie maximale à `0` est conservée entièrement. `python` utilise l'interpréteur courant, y compris dans les pipelines Windows. |
 | `agent` | `spawn`, `status`, `execute_subtask` | Crée ou suit une sous-tâche. La délégation imbriquée accepte une tâche nouvelle ; la répétition d’une tâche ancêtre est bloquée. |
 | `devteam` | `build_project`, `approve_quality_gate` | Pipeline de développement avec les mêmes règles de délégation et d’approbation. |

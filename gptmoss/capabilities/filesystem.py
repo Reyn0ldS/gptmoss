@@ -107,6 +107,24 @@ class FilesystemCapability:
             f.write(content)
         return f"File written successfully to {path}"
 
+    @action(
+        name="append",
+        description=(
+            "Append text to a file without replacing existing content. Use this to build "
+            "large owned artifacts in bounded sections after the initial write."
+        ),
+    )
+    def append(self, path: str, content: str, context: Optional[Dict[str, Any]] = None) -> str:
+        """Append UTF-8 text to an owned workspace file."""
+        execution_id = context.get("execution_id") if context else None
+        resolved = self._resolve_path(path, execution_id)
+        if os.path.isdir(resolved):
+            return f"Error: '{path}' is a directory. Append requires a file path."
+        os.makedirs(os.path.dirname(resolved), exist_ok=True)
+        with open(resolved, "a", encoding="utf-8") as f:
+            f.write(content)
+        return f"Content appended successfully to {path}"
+
     @action(name="list_dir", description="List files and directories in a path relative to the workspace.")
     def list_dir(self, path: str = ".", context: Optional[Dict[str, Any]] = None) -> str:
         """Lists directory files."""

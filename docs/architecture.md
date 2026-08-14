@@ -59,7 +59,7 @@ planification et politique de leurs implémentations actuelles.
 
 | Capacité | Actions | Frontière principale |
 |---|---|---|
-| `filesystem` | `read`, `write`, `list_dir`, `delete` | Résolution dans le workspace de l'exécution ; sous-dossiers et suppression configurables. |
+| `filesystem` | `read`, `write`, `append`, `list_dir`, `delete` | Résolution dans le workspace de l'exécution ; écriture incrémentale des grands artefacts sur leur chemin déclaré ; sous-dossiers et suppression configurables. |
 | `documents` | `inventory`, `search`, `read`, `read_chunk`, `read_image`, `read_images` | Pièces explicitement jointes uniquement ; texte normalisé et images sélectionnées par lots multimodaux bornés. |
 | `memory` | `search`, `propose` | Lecture validée du projet ; une proposition agent reste non validée et non globale. |
 | `shell` | `execute` | Répertoire du projet, blocage destructif, timeout, sortie bornée et approbation selon politique. |

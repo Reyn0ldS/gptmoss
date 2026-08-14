@@ -100,7 +100,7 @@
     },
     "filesystem": {
       "module": "gptmoss/capabilities/filesystem.py",
-      "actions": ["read", "write", "list_dir", "delete"]
+      "actions": ["read", "write", "append", "list_dir", "delete"]
     },
     "memory": {
       "module": "gptmoss/capabilities/memory.py",
