@@ -149,6 +149,11 @@ le consolidateur reçoit leurs résultats validés et non une nouvelle copie du 
 scheduler conserve toutes ces unités mais n'en exécute qu'une vague bornée simultanément,
 automatique avec `max_parallel_plan_steps=0`.
 
+L'identité canonique d'une source vient toujours du stockage d'artefacts. Pour un dossier,
+le chemin relatif complet remplace donc les éventuels basenames proposés par le planner
+dans toutes les politiques documentaires fondées sur les sources ; inventaire, analyses
+intermédiaires et livrable final valident ainsi les mêmes citations.
+
 Pour un document long, le moteur sectionnel crée un contrat stable par titre (objectif,
 volume cible, exigences, preuves et dépendances), sauvegarde chaque révision dans
 `.gptmoss/document-state` et réassemble le Markdown uniquement à partir des sections
