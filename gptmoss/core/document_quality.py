@@ -251,10 +251,12 @@ def validate_document(path: Path, constraints: Dict[str, Any]) -> ValidationRepo
     headings = _headings(lines)
     paragraphs = _paragraphs(text)
     evidence_text = _without_markdown_code(text)
+    all_reference_count = len(list(_LOCAL_REFERENCE.finditer(text)))
     references = [
         {"source": match.group(1).strip(), "locator": match.group(2).strip()}
         for match in _LOCAL_REFERENCE.finditer(evidence_text)
     ]
+    code_reference_count = max(0, all_reference_count - len(references))
     external_links = _EXTERNAL_LINK.findall(text)
     required_headings = _strings(constraints.get("required_headings"), "required_headings")
     required_ids = _strings(
@@ -381,9 +383,21 @@ def validate_document(path: Path, constraints: Dict[str, Any]) -> ValidationRepo
         source for source in required_sources if _normalize_source(source) not in cited_sources
     ]
     if missing_sources:
-        _failure(report, "uncited required source file(s): " + ", ".join(missing_sources))
+        message = "uncited required source file(s): " + ", ".join(missing_sources)
+        if code_reference_count:
+            message += (
+                f"; {code_reference_count} citation-like pattern(s) inside Markdown code do not "
+                "count as evidence; write actual citations without backticks or code fences"
+            )
+        _failure(report, message)
     if constraints.get("require_local_references") and not references:
-        _failure(report, "document contains no local source reference")
+        message = "document contains no local source reference"
+        if code_reference_count:
+            message += (
+                "; citation-like patterns inside Markdown code are examples, not evidence; "
+                "write actual citations without backticks or code fences"
+            )
+        _failure(report, message)
 
     source_units_covered = 0
     source_units_total = 0

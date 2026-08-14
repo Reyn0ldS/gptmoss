@@ -193,6 +193,27 @@ def test_document_validator_ignores_reference_syntax_inside_markdown_code(tmp_pa
     assert report["metrics"]["local_references"] == 1
 
 
+def test_document_validator_explains_that_code_only_citations_are_not_evidence(tmp_path):
+    document = tmp_path / "code-only.md"
+    document.write_text(
+        "# Sources\n\n`[requirements.docx > Exigences > blocks 1-12]`\n",
+        encoding="utf-8",
+    )
+
+    report = validate_artifact(
+        document,
+        validator="document",
+        constraints={
+            "required_source_files": ["requirements.docx"],
+            "require_local_references": True,
+        },
+    )
+
+    assert not report["valid"]
+    assert any("write actual citations without backticks" in item for item in report["failures"])
+    assert report["metrics"]["local_references"] == 0
+
+
 def test_document_validator_requires_union_of_full_source_inventory(tmp_path):
     document = tmp_path / "inventory.md"
     document.write_text(
