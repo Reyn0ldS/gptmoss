@@ -416,7 +416,22 @@ class QwenProvider(LLMProvider):
                 if isinstance(response, dict) and "content" in response
                 else self._parse_openai_response(response)
             )
-            self._native_tools_supported = True
+            if parsed.get("tool_calls"):
+                self._native_tools_supported = True
+            else:
+                # A number of OpenAI-compatible gateways accept the `tools`
+                # payload but silently answer with prose instead of native
+                # calls.  HTTP 200 therefore does not prove protocol support.
+                # Preserve this response (it may be a legitimate final
+                # answer), but make the next tool-enabled turn use the strict
+                # prompt protocol.  If delivery gates reject the prose, the
+                # agent can then recover instead of repeating it indefinitely.
+                if self._native_tools_supported is not False:
+                    logger.warning(
+                        "Native tool request returned no tool call; using prompt-based "
+                        "tool calling for subsequent tool-enabled requests."
+                    )
+                self._native_tools_supported = False
             return parsed
         except Exception as e:
             err_msg = str(e).lower()

@@ -90,6 +90,68 @@ async def test_local_openai_compatible_tool_call_round_trip():
     assert provider.client.max_retries == 0
 
 
+@pytest.mark.asyncio
+async def test_native_tool_request_without_call_demotes_to_prompt_protocol():
+    provider = QwenProvider(
+        api_key="local-key",
+        base_url="http://127.0.0.1:9/v1",
+        default_model="local-model",
+    )
+    native_requests = []
+    fallback_requests = []
+
+    async def native_response(arguments, **_kwargs):
+        native_requests.append(arguments)
+        return {
+            "content": "I need to call filesystem__write next.",
+            "tool_calls": None,
+            "usage": {"prompt_tokens": 5, "completion_tokens": 7, "total_tokens": 12},
+        }
+
+    async def prompt_response(messages, tools, model, **_kwargs):
+        fallback_requests.append((messages, tools, model))
+        return {
+            "content": None,
+            "tool_calls": [{
+                "id": "prompt-write",
+                "type": "function",
+                "function": {
+                    "name": "filesystem__write",
+                    "arguments": {"path": "report.md", "content": "verified"},
+                },
+            }],
+            "usage": {"prompt_tokens": 8, "completion_tokens": 4, "total_tokens": 12},
+        }
+
+    provider._create_with_context_recovery = native_response
+    provider._prompt_based_tool_calling = prompt_response
+    tools = [{
+        "type": "function",
+        "function": {
+            "name": "filesystem__write",
+            "description": "Write a file",
+            "parameters": {"type": "object"},
+        },
+    }]
+    try:
+        first = await provider.completion(
+            messages=[{"role": "user", "content": "Write the report"}],
+            tools=tools,
+        )
+        second = await provider.completion(
+            messages=[{"role": "user", "content": "Use the tool now"}],
+            tools=tools,
+        )
+    finally:
+        await provider.close()
+
+    assert first["content"].startswith("I need to call")
+    assert provider._native_tools_supported is False
+    assert len(native_requests) == 1
+    assert len(fallback_requests) == 1
+    assert second["tool_calls"][0]["function"]["name"] == "filesystem__write"
+
+
 def test_qwen_textual_tool_calls_are_normalized_and_deterministic():
     xml_content = """<tool_call>
 <function=filesystem__write>
