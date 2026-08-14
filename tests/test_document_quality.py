@@ -197,6 +197,12 @@ def test_document_validator_requires_union_of_full_source_inventory(tmp_path):
 
     assert not rejected["valid"]
     assert any("incomplete source coverage" in item for item in rejected["failures"])
+    coverage_failure = next(
+        item for item in rejected["failures"] if "incomplete source coverage" in item
+    )
+    assert "requirements.docx has uncovered required blocks: 9-12" in coverage_failure
+    assert "and 4 more" not in coverage_failure
+    assert "add bounded local reference(s) covering these exact ranges" in coverage_failure
     assert rejected["metrics"]["source_units_covered"] == 12
     assert rejected["metrics"]["source_units_total"] == 16
     assert accepted["valid"], json.dumps(accepted, indent=2)

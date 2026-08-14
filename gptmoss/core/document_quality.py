@@ -61,6 +61,23 @@ def _positive_int(value: Any, name: str, default: int) -> int:
     return result
 
 
+def _compact_integer_ranges(values: Sequence[int]) -> str:
+    """Render every integer exactly once as concise contiguous ranges."""
+    ordered = sorted({int(value) for value in values})
+    if not ordered:
+        return ""
+    spans: List[str] = []
+    start = previous = ordered[0]
+    for value in ordered[1:]:
+        if value == previous + 1:
+            previous = value
+            continue
+        spans.append(str(start) if start == previous else f"{start}-{previous}")
+        start = previous = value
+    spans.append(str(start) if start == previous else f"{start}-{previous}")
+    return ", ".join(spans)
+
+
 def _words(value: str) -> List[str]:
     return re.findall(r"[^\W_]+(?:[-'][^\W_]+)*", value, flags=re.UNICODE)
 
@@ -377,11 +394,10 @@ def validate_document(path: Path, constraints: Dict[str, Any]) -> ValidationRepo
             source_units_covered += len(expected & covered)
             source_units_total += len(expected)
             if missing_units:
-                display = ", ".join(str(value) for value in missing_units[:20])
-                if len(missing_units) > 20:
-                    display += f", and {len(missing_units) - 20} more"
+                display = _compact_integer_ranges(missing_units)
                 coverage_failures.append(
-                    f"{source} has uncovered required {unit}: {display}"
+                    f"{source} has uncovered required {unit}: {display}; "
+                    "add bounded local reference(s) covering these exact ranges"
                 )
         if coverage_failures:
             _failure(
