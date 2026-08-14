@@ -73,6 +73,8 @@ def test_professional_document_skills_use_standard_tools_and_quality_gates():
     )[0].name == "document-analysis"
     assert "documents.search" in analysis.instructions
     assert "traceability matrix" in documentation.instructions
+    assert "execution engine apply the declared artifact validation policy automatically" in documentation.instructions
+    assert "scripts/validate_document.py" not in documentation.instructions
     assert "migration" in architecture.instructions
 
     interface = (

@@ -1264,6 +1264,58 @@ async def test_truncated_text_tool_call_gets_recovery_feedback_instead_of_comple
 
 
 @pytest.mark.asyncio
+async def test_specialist_prompt_delegates_artifact_validation_to_runtime(tmp_path):
+    class CapturingProvider(MockLLMProvider):
+        def __init__(self):
+            super().__init__()
+            self.requests = []
+
+        async def completion(self, messages, **kwargs):
+            self.requests.append(messages)
+            return await super().completion(messages, **kwargs)
+
+    llm = CapturingProvider()
+    llm.add_response(tool_calls=[{
+        "id": "write", "type": "function",
+        "function": {
+            "name": "filesystem__write",
+            "arguments": {"path": "report.md", "content": "# Verified report\n\nConcrete evidence.\n"},
+        },
+    }])
+    llm.add_response(content=json.dumps({
+        "summary": "written", "artifacts": ["report.md"],
+        "evidence": ["read-back contract"], "risks": [], "next_action": "",
+    }))
+    engine, state = _engine(tmp_path, llm)
+    execution = state.get_execution("runtime-validation-prompt")
+    execution.variables.update({
+        "parent_execution_id": "parent", "role_key": "writer",
+        "role_name": "Writer", "specialist": "Writer",
+    })
+    execution.current_plan = {
+        "steps": [{
+            "id": 0, "role": "writer", "specialist": "Writer",
+            "description": "Write a verified report", "dependencies": [],
+            "expertise": ["documentation"], "required_artifacts": ["report.md"],
+            "acceptance_criteria": ["Report exists"], "verification_commands": [],
+        }],
+        "artifact_validations": [{
+            "path": "report.md", "validator": "document", "required": True,
+            "constraints": {"minimums": {"words": 2}},
+        }],
+    }
+
+    await engine.execute_task("runtime-validation-prompt", "Write a verified report")
+
+    system_prompt = next(
+        message["content"] for message in llm.requests[0] if message.get("role") == "system"
+    )
+    assert "enforced automatically by the execution engine" in system_prompt
+    assert "Do not invoke repository-only validator scripts" in system_prompt
+    assert execution.status == "completed"
+
+
+@pytest.mark.asyncio
 async def test_repeated_malformed_text_tool_calls_trip_safe_retry_circuit(tmp_path):
     llm = MockLLMProvider()
     malformed = (
