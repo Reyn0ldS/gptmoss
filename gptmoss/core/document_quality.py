@@ -78,6 +78,23 @@ def _compact_integer_ranges(values: Sequence[int]) -> str:
     return ", ".join(spans)
 
 
+def _without_markdown_code(text: str) -> str:
+    """Exclude fenced and inline code examples from evidence detection."""
+    visible: List[str] = []
+    in_fence = False
+    for line in text.splitlines():
+        stripped = line.lstrip()
+        if stripped.startswith("```") or stripped.startswith("~~~"):
+            in_fence = not in_fence
+            visible.append("")
+            continue
+        if in_fence:
+            visible.append("")
+            continue
+        visible.append(re.sub(r"`+[^`\n]*`+", "", line))
+    return "\n".join(visible)
+
+
 def _words(value: str) -> List[str]:
     return re.findall(r"[^\W_]+(?:[-'][^\W_]+)*", value, flags=re.UNICODE)
 
@@ -233,9 +250,10 @@ def validate_document(path: Path, constraints: Dict[str, Any]) -> ValidationRepo
     lines = text.splitlines()
     headings = _headings(lines)
     paragraphs = _paragraphs(text)
+    evidence_text = _without_markdown_code(text)
     references = [
         {"source": match.group(1).strip(), "locator": match.group(2).strip()}
-        for match in _LOCAL_REFERENCE.finditer(text)
+        for match in _LOCAL_REFERENCE.finditer(evidence_text)
     ]
     external_links = _EXTERNAL_LINK.findall(text)
     required_headings = _strings(constraints.get("required_headings"), "required_headings")

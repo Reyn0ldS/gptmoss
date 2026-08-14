@@ -167,6 +167,32 @@ def test_document_validator_accepts_french_bounded_locator_terms(tmp_path):
     assert report["valid"], json.dumps(report, indent=2)
 
 
+def test_document_validator_ignores_reference_syntax_inside_markdown_code(tmp_path):
+    document = tmp_path / "examples.md"
+    document.write_text(
+        "# Sources\n\n"
+        "Preuve rÃ©elle. [requirements.docx > Exigences > blocs 1-12]\n\n"
+        "Syntaxe inline : `[filename > heading > blocks 1-2]`.\n\n"
+        "```text\n[another-name > section > blocks 1-99]\n```\n",
+        encoding="utf-8",
+    )
+
+    report = validate_artifact(
+        document,
+        validator="document",
+        constraints={
+            "source_inventory": {"requirements.docx": {"blocks": 12}},
+            "required_source_files": ["requirements.docx"],
+            "require_local_references": True,
+            "require_bounded_references": True,
+            "require_source_coverage": True,
+        },
+    )
+
+    assert report["valid"], json.dumps(report, indent=2)
+    assert report["metrics"]["local_references"] == 1
+
+
 def test_document_validator_requires_union_of_full_source_inventory(tmp_path):
     document = tmp_path / "inventory.md"
     document.write_text(
