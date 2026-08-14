@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from typing import Any, Dict
+from unicodedata import combining, normalize
 
 from gptmoss.core.domains import DEFAULT_DOMAIN_REGISTRY, ProjectDomainRegistry
 
@@ -35,12 +36,53 @@ def task_title_from_text(task: str, limit: int = 72) -> str:
     return text[: max(1, limit - 1)].rstrip() + "…"
 
 
+def requires_software_implementation(
+    task: str, analysis: Dict[str, Any] | None = None,
+) -> bool:
+    """Distinguish changing software from merely analysing software.
+
+    Domain classification intentionally stays broad: a professional dossier
+    about an API still belongs to software engineering. Implementation gates,
+    however, require an explicit mutation verb tied to a software target.
+    """
+    if isinstance(analysis, dict) and "software_implementation_requested" in analysis:
+        return bool(analysis["software_implementation_requested"])
+    text = "".join(
+        character for character in normalize("NFKD", str(task or "")).casefold()
+        if not combining(character)
+    )
+    mutation = (
+        r"(?:implement|develop|fix|repair|debug|modify|update|refactor|"
+        r"add|remove|configure|deploy|migrate|integrate|build|create|"
+        r"implemente|developpe|coder|corrige|repare|modifie|mets?\s+a\s+jour|"
+        r"refactorise|ajoute|supprime|configure|deploie|migre|integre|cree)"
+    )
+    target = (
+        r"(?:software|application|api|gui|interface|code|source|runtime|server|"
+        r"service|module|package|feature|function|endpoint|script|test|repository|"
+        r"repo|project|logic|pipeline|workflow|import|export|logiciel|serveur|"
+        r"fonctionnalite|fonction|projet|depot)"
+    )
+    return bool(
+        re.search(rf"\b{mutation}\b[^.\n;:]{{0,96}}\b{target}\b", text)
+        or re.search(rf"\b{target}\b[^.\n;:]{{0,48}}\b{mutation}\b", text)
+    )
+
+
 def analyze_task_complexity(
     task: str, domain_registry: ProjectDomainRegistry | None = None
 ) -> Dict[str, Any]:
     """Return deterministic hints so the LLM cannot silently trivialize a task."""
     text = str(task or "").lower()
     domains = (domain_registry or DEFAULT_DOMAIN_REGISTRY).classify(text)
+    software_implementation_requested = requires_software_implementation(
+        task, {"domains": domains}
+    )
+    if (
+        software_implementation_requested
+        and "software-engineering" not in domains
+    ):
+        domains = [*domains, "software-engineering"]
     requested_outcomes = len(re.findall(
         r"\b(?:doit|devra|pouvoir|créer|creer|faire|importer|extrapoler|intégrer|integrer|"
         r"must|should|create|build|implement|support|import)\b", text,
@@ -61,5 +103,6 @@ def analyze_task_complexity(
     else:
         level, minimum = "low", 1
     return {"level": level, "score": score, "domains": domains,
+            "software_implementation_requested": software_implementation_requested,
             "requested_outcomes": requested_outcomes,
             "suggested_min_steps": minimum}  # hint for the LLM, never a hard floor

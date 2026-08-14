@@ -44,7 +44,9 @@ superviseur avec son jeton. Un port occupé est signalé avant de démarrer l'en
    absentes, contrôle leurs dépendances et refuse les preuves purement déclaratives. Un
    travail de 24 h peut donc produire des dizaines d'étapes tandis qu'une tâche directe
    regroupe ses obligations dans une seule unité. Après normalisation, `workload.py`
-   partitionne la charge réelle et rejoint les résultats par consolidation.
+   partitionne la charge réelle et rejoint les résultats par consolidation. Le domaine
+   logiciel reste un contexte d'analyse large, mais une porte d'implémentation n'est
+   ajoutée que si une action de modification vise explicitement un élément logiciel.
 7. Une réduction de périmètre requiert `ScopeApprovalRequested` avant toute exécution.
 
 ## Ordonnancement et exécution d'une étape

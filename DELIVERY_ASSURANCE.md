@@ -32,6 +32,9 @@ rédaction dépende de l'inventaire, que le QA dépende d'un producteur distinct
 réparation suive le QA et que l'audit final soit en aval des travaux obligatoires. Les
 artefacts déclarés doivent exister et les corpus contenant des documents ou images
 doivent présenter des appels `documents.read`/`read_image` dans l'historique agrégé.
+De même, analyser une API, une GUI ou une architecture classe correctement la mission
+dans le domaine logiciel sans créer une obligation d'implémentation : celle-ci exige une
+demande explicite de modification d'une cible logicielle.
 
 ## Réduction de périmètre
 

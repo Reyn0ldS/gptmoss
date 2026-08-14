@@ -175,7 +175,10 @@ def collect_plan_obligations(
     corpus_policy: Dict[str, Any] | None = None,
 ) -> List[Dict[str, Any]]:
     """Select semantic gates; complexity never imposes a step quota."""
-    from gptmoss.planners.complexity import normalize_planning_mode
+    from gptmoss.planners.complexity import (
+        normalize_planning_mode,
+        requires_software_implementation,
+    )
     from gptmoss.planners.fallbacks import _document_deliverable_task
 
     mode = normalize_planning_mode(planning_mode)
@@ -183,7 +186,10 @@ def collect_plan_obligations(
     domains = _domains(analysis)
     level = str(analysis.get("level") or "low")
     high = level in {"high", "very_high"}
-    software = "software-engineering" in domains
+    software = (
+        "software-engineering" in domains
+        and requires_software_implementation(task, analysis)
+    )
     document_task = _document_deliverable_task(task)
     has_sources = _count(
         workload_profile, "attachment_count", "document_count", "image_count"

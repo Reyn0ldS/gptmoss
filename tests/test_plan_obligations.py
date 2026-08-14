@@ -9,6 +9,7 @@ from gptmoss.core.plan_obligations import (
     validate_plan_obligations,
 )
 from gptmoss.core.workload import MAX_SOURCE_PARTITIONS, compile_work_graph
+from gptmoss.planners.complexity import analyze_task_complexity
 from gptmoss.planners.fallbacks import _step
 from gptmoss.planners.simple import SimplePlanner
 from tests.mock_llm import MockLLMProvider
@@ -95,6 +96,52 @@ def test_unchecked_corpus_workflow_does_not_force_document_gates_on_software():
     assert "source_inventory" not in ids
     assert "implementation" in ids
     assert "independent_validation" in ids
+
+
+def test_software_architecture_dossier_does_not_inject_implementation_work():
+    task = (
+        "Produce a professional dossier from the local corpus. Analyze the API, GUI, "
+        "runtime, source code architecture, tests, scheduling and recovery. Include "
+        "Mermaid diagrams and a DOCX package, but do not change the application."
+    )
+    analysis = analyze_task_complexity(task)
+    assert "software-engineering" in analysis["domains"]
+    assert analysis["software_implementation_requested"] is False
+
+    plan = SimplePlanner._fallback_plan(
+        task, analysis, "auto",
+        corpus_policy={"enabled": True, "professional_delivery": True},
+    )
+    attach_plan_obligations(
+        plan,
+        task=task,
+        planning_mode="auto",
+        analysis=analysis,
+        workload_profile={"attachment_count": 4, "document_count": 4},
+        corpus_policy={"enabled": True, "professional_delivery": True},
+        repair=True,
+        validate=True,
+    )
+
+    assert "implementation" not in {
+        item["id"] for item in plan["plan_obligations"]
+    }
+    assert not any(step.get("role") == "developer" for step in plan["steps"])
+
+
+@pytest.mark.parametrize("task", [
+    "Build a runnable software application and its tests.",
+    "Fix the API authentication bug in the existing source code.",
+    "Ajoute une fonctionnalite a la GUI et mets a jour les tests.",
+])
+def test_explicit_software_mutation_still_requires_implementation(task):
+    analysis = analyze_task_complexity(task)
+    obligations = collect_plan_obligations(
+        task=task, planning_mode="auto", analysis=analysis,
+    )
+
+    assert analysis["software_implementation_requested"] is True
+    assert "implementation" in {item["id"] for item in obligations}
 
 
 def test_fifty_step_software_plan_is_accepted():
