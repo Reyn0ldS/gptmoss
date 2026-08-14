@@ -37,6 +37,14 @@ async def test_execution_control_api_preserves_transition_chronology(tmp_path):
     execution = state_engine.get_execution("lifecycle")
     execution.status = "running"
     execution.variables["task"] = "Chronological task"
+    execution.current_plan = {"steps": [{
+        "id": 0,
+        "status": "pending",
+        "assigned_execution_id": "cancelled-child",
+    }]}
+    cancelled_child = state_engine.get_execution("cancelled-child")
+    cancelled_child.status = "cancelled"
+    cancelled_child.variables["parent_execution_id"] = "lifecycle"
 
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
@@ -52,6 +60,7 @@ async def test_execution_control_api_preserves_transition_chronology(tmp_path):
     assert [response.status_code for response in (paused, resumed, cancelled, deleted, cleared)] == [200] * 5
     assert paused.json()["status"] == "paused"
     assert resumed.json()["status"] == "running"
+    assert "assigned_execution_id" not in execution.current_plan["steps"][0]
     assert cancelled.json() == {"status": "cancelled", "execution_ids": ["lifecycle"]}
     assert not state_engine.executions and not state_engine.conversations
     engine.execute_task.assert_awaited_once_with("lifecycle", "Chronological task")

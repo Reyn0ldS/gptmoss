@@ -1294,6 +1294,18 @@ async def resume_execution(execution_id: str):
             status_code=400,
             detail="Execution is paused waiting for scope approval. Use /approve or /reject endpoint."
         )
+
+    # Pausing an active delegated step cancels its in-flight child task while
+    # preserving the parent step as pending.  Never reuse that terminal child
+    # on resume: a fresh specialist must inherit the durable workspace edits
+    # and the current runtime/tool schemas.
+    for step in (state.current_plan or {}).get("steps", []):
+        if step.get("status") != "pending":
+            continue
+        assigned_id = step.get("assigned_execution_id")
+        assigned = app_state.state_engine.executions.get(assigned_id) if assigned_id else None
+        if assigned is not None and assigned.status == "cancelled":
+            step.pop("assigned_execution_id", None)
         
     if state.status == "failed":
         steps = (state.current_plan or {}).get("steps", [])
