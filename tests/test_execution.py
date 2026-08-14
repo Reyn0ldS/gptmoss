@@ -20,6 +20,16 @@ def test_filesystem_read_accepts_bounded_model_offsets(tmp_path):
     assert filesystem.read("large.txt", offset=8) == "89"
     assert filesystem.read("large.txt", offset=99, limit=3) == ""
 
+
+def test_filesystem_read_opens_resolved_file_without_exists_preflight(tmp_path, monkeypatch):
+    path = tmp_path / "analysis" / "report.md"
+    path.parent.mkdir()
+    path.write_text("durable content", encoding="utf-8")
+    filesystem = FilesystemCapability(str(tmp_path))
+    monkeypatch.setattr("gptmoss.capabilities.filesystem.os.path.exists", lambda _path: False)
+
+    assert filesystem.read("analysis/report.md") == "durable content"
+
 @pytest.fixture
 def test_workspace():
     workspace_dir = "./test_execution_workspace"

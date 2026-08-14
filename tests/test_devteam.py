@@ -51,6 +51,8 @@ def test_filesystem_dynamic_project_routing():
         # Call write with context
         context = {"execution_id": exec_id}
         fs.write("hello.txt", "World data", context=context)
+        assert fs.list_dir(".", context=context) == "hello.txt"
+        assert fs.read("hello.txt", context=context) == "World data"
         
         # Verify that path is created under tmp_dir/projects/proj-calculator/hello.txt
         expected_path = os.path.join(tmp_dir, "projects", "proj-calculator", "hello.txt")

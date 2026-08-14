@@ -81,12 +81,16 @@ class FilesystemCapability:
         """Read text, optionally using bounded character offsets for large files."""
         execution_id = context.get("execution_id") if context else None
         resolved = self._resolve_path(path, execution_id)
-        if not os.path.exists(resolved):
-            return f"Error: File not found at {path}"
         if os.path.isdir(resolved):
             return f"Error: '{path}' is a directory. Use list_dir to view its contents."
-        with open(resolved, "r", encoding="utf-8") as f:
-            content = f.read()
+        # Open directly after the sandboxed resolution. A separate exists()
+        # probe creates a TOCTOU window and has produced false negatives on
+        # Windows/network-backed workspaces even when list_dir sees the file.
+        try:
+            with open(resolved, "r", encoding="utf-8") as f:
+                content = f.read()
+        except FileNotFoundError:
+            return f"Error: File not found at {path}"
         start = max(0, int(offset or 0))
         if start >= len(content):
             return ""
