@@ -2673,7 +2673,7 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
             if not tool_calls:
                 response_text = llm_response.get("content") or ""
                 if re.search(
-                    r"(?:\"?tool_call\"?\s*:|\"?name\"?\s*:\s*\"?(?:filesystem|shell|agent|devteam)__)",
+                    r"(?:<tool_code\b|\"?tool_call\"?\s*:|\"?name\"?\s*:\s*\"?(?:filesystem|shell|agent|devteam)__)",
                     response_text,
                     flags=re.IGNORECASE,
                 ):

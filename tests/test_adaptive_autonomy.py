@@ -1264,6 +1264,34 @@ async def test_truncated_text_tool_call_gets_recovery_feedback_instead_of_comple
 
 
 @pytest.mark.asyncio
+async def test_truncated_tool_code_marker_gets_protocol_recovery_feedback(tmp_path):
+    llm = MockLLMProvider()
+    llm.add_response(content="I will write the file now.\n<tool_code>")
+    llm.add_response(content=json.dumps({
+        "summary": "recovered", "artifacts": [], "evidence": [],
+        "risks": [], "next_action": "",
+    }))
+    engine, state = _engine(tmp_path, llm, max_iterations=4)
+    execution = state.get_execution("tool-code-marker")
+    execution.variables.update({
+        "parent_execution_id": "parent", "role_key": "writer",
+        "role_name": "Writer", "specialist": "Writer",
+    })
+    execution.current_plan = {"steps": [{
+        "id": 0, "role": "writer", "specialist": "Writer",
+        "description": "Return a compact delivery", "dependencies": [],
+        "expertise": [], "required_artifacts": [],
+        "acceptance_criteria": [], "verification_commands": [],
+    }]}
+
+    await engine.execute_task("tool-code-marker", "Return a compact delivery")
+
+    assert execution.status == "completed"
+    feedback = [message.get("content", "") for message in state.get_conversation("tool-code-marker").messages]
+    assert any("malformed or truncated" in message for message in feedback)
+
+
+@pytest.mark.asyncio
 async def test_specialist_prompt_delegates_artifact_validation_to_runtime(tmp_path):
     class CapturingProvider(MockLLMProvider):
         def __init__(self):
