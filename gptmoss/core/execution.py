@@ -1216,7 +1216,8 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
             state.current_plan = plan_result
             self._initialize_document_state(execution_id, task, plan_result, state)
             state.variables["delivery_contract"] = build_delivery_contract(
-                state.current_plan, task
+                state.current_plan, task,
+                repair_obligations=not bool(state.variables.get("parent_execution_id")),
             )
             state.current_step = 0
             await self.event_bus.publish(Event(
@@ -1229,7 +1230,8 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
             self._initialize_document_state(execution_id, task, state.current_plan, state)
         if not isinstance(state.variables.get("delivery_contract"), dict):
             state.variables["delivery_contract"] = build_delivery_contract(
-                state.current_plan, task
+                state.current_plan, task,
+                repair_obligations=not bool(state.variables.get("parent_execution_id")),
             )
         delivery_contract = state.variables["delivery_contract"]
         scope_changes = delivery_contract.get("scope_changes", [])

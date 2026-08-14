@@ -513,25 +513,37 @@ def normalize_execution_routines(
     return normalized
 
 
-def build_delivery_contract(plan: Dict[str, Any], task: str) -> Dict[str, Any]:
+def build_delivery_contract(
+    plan: Dict[str, Any], task: str, *, repair_obligations: bool = True
+) -> Dict[str, Any]:
     """Enrich a normalized plan and freeze the user-owned delivery contract."""
     corpus_policy = normalize_corpus_policy(plan.get("corpus_policy"))
-    obligations = attach_plan_obligations(
-        plan,
-        task=task,
-        planning_mode=str(plan.get("planning_mode") or "auto"),
-        analysis=(
-            plan.get("analysis") if isinstance(plan.get("analysis"), dict) else None
-        ),
-        workload_profile=(
-            plan.get("workload_profile")
-            if isinstance(plan.get("workload_profile"), dict) else None
-        ),
-        corpus_auto_workflow=bool(corpus_policy.get("enabled")),
-        corpus_policy=corpus_policy,
-        repair=True,
-        validate=True,
-    )
+    if repair_obligations:
+        obligations = attach_plan_obligations(
+            plan,
+            task=task,
+            planning_mode=str(plan.get("planning_mode") or "auto"),
+            analysis=(
+                plan.get("analysis") if isinstance(plan.get("analysis"), dict) else None
+            ),
+            workload_profile=(
+                plan.get("workload_profile")
+                if isinstance(plan.get("workload_profile"), dict) else None
+            ),
+            corpus_auto_workflow=bool(corpus_policy.get("enabled")),
+            corpus_policy=corpus_policy,
+            repair=True,
+            validate=True,
+        )
+    else:
+        # A delegated execution is already one owned node of its parent's
+        # validated DAG. Re-expanding it into QA/audit obligations creates
+        # orphan artifacts that its single direct step cannot own or execute.
+        obligations = [
+            dict(item) for item in (plan.get("plan_obligations") or [])
+            if isinstance(item, dict)
+        ]
+        plan["plan_obligations"] = obligations
     requirements = normalize_requirements(plan, task)
     traceability = map_requirements(plan, requirements)
     scope_changes = normalize_scope_changes(plan)
