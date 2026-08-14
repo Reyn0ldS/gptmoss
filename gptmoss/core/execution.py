@@ -671,6 +671,36 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
                 return True
         return False
 
+    def _writer_incremental_repair_tool(
+        self,
+        execution_id: str,
+        role_key: str,
+        step: Dict[str, Any],
+        issues: List[str],
+    ) -> str:
+        """Return the exact mutation required to repair a long writer delivery."""
+        replacement_markers = (
+            "duplicate paragraph", "invalid local reference", "external link",
+            "placeholder marker", "reasoning tag",
+        )
+        if role_key != "writer" or not any(
+            marker in issue
+            for issue in issues
+            for marker in (
+                "words=", "empty required section", "lack a local reference",
+                *replacement_markers,
+            )
+        ):
+            return ""
+        artifacts = [str(path).strip() for path in step.get("required_artifacts", []) if str(path).strip()]
+        if not artifacts:
+            return ""
+        target = artifacts[0]
+        if any(marker in issue for issue in issues for marker in replacement_markers):
+            return "filesystem__write"
+        exists = self._artifact_exists(execution_id, target)
+        return "filesystem__append" if exists else "filesystem__write"
+
     def _writer_incremental_repair_nudge(
         self,
         execution_id: str,
@@ -679,29 +709,60 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
         issues: List[str],
     ) -> str:
         """Turn long-document gate failures into one bounded executable action."""
-        if role_key != "writer" or not any(
-            marker in issue
-            for issue in issues
-            for marker in ("words=", "empty required section", "lack a local reference")
-        ):
+        action = self._writer_incremental_repair_tool(
+            execution_id, role_key, step, issues,
+        )
+        if not action:
             return ""
         artifacts = [str(path).strip() for path in step.get("required_artifacts", []) if str(path).strip()]
-        if not artifacts:
-            return ""
         target = artifacts[0]
-        exists = self._artifact_exists(execution_id, target)
-        action = "filesystem__append" if exists else "filesystem__write"
-        continuity = (
-            "Preserve the existing valid content and append the next missing or underdeveloped section"
-            if exists else
-            "Create only the first complete section"
-        )
+        if action == "filesystem__append":
+            continuity = (
+                "Preserve the existing valid content and append the next missing or underdeveloped section"
+            )
+        elif self._artifact_exists(execution_id, target):
+            continuity = (
+                "Replace the defective document with only the first clean, complete section; "
+                "later turns will append the remaining non-duplicated sections"
+            )
+        else:
+            continuity = "Create only the first complete section"
         return (
             f" Do not answer with a plan and do not send the whole document in one call. "
             f"Your next response must be exactly one valid {action} tool call targeting '{target}'. "
             f"{continuity} in a bounded 400-800 word chunk with nearby valid local citations. "
             "Repeat with another bounded append call on later iterations until every gate passes; "
             "never create undeclared part files."
+        )
+
+    @staticmethod
+    def _schemas_for_required_tool(
+        schemas: List[Dict[str, Any]], required_tool: str,
+    ) -> List[Dict[str, Any]]:
+        """Expose only the mutation mandated by the preceding quality gate."""
+        if not required_tool:
+            return schemas
+        return [
+            schema for schema in schemas
+            if schema.get("function", {}).get("name") == required_tool
+        ]
+
+    @staticmethod
+    def _required_tool_succeeded(
+        messages: List[Dict[str, Any]],
+        tool_calls: List[Dict[str, Any]],
+        required_tool: str,
+    ) -> bool:
+        expected_ids = {
+            str(call.get("id") or "")
+            for call in tool_calls
+            if call.get("function", {}).get("name") == required_tool
+        }
+        return bool(expected_ids) and any(
+            message.get("role") == "tool"
+            and str(message.get("tool_call_id") or "") in expected_ids
+            and not str(message.get("content") or "").lstrip().startswith("Error:")
+            for message in messages
         )
 
     def _step_completion_issues(self, execution_id: str, step: Dict[str, Any], response: str) -> List[str]:
@@ -2379,6 +2440,13 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
                     )
                 ),
             )
+            required_next_tool = str(runtime.get("required_next_tool") or "")
+            if required_next_tool:
+                constrained_schemas = self._schemas_for_required_tool(
+                    schemas, required_next_tool,
+                )
+                if constrained_schemas:
+                    schemas = constrained_schemas
 
             # Compile context
             context = await self.context_engine.compile_context(
@@ -2668,6 +2736,7 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
                 execution_id,
                 messages=llm_messages,
                 tools=schemas if schemas else None,
+                tool_choice="required" if required_next_tool else None,
                 on_text_delta=on_text_delta,
                 on_context_fitted=record_fitted_context,
             )
@@ -2744,6 +2813,11 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
                     repair_nudge = self._writer_incremental_repair_nudge(
                         execution_id, role_for_step, step, completion_issues,
                     )
+                    required_repair_tool = self._writer_incremental_repair_tool(
+                        execution_id, role_for_step, step, completion_issues,
+                    )
+                    if required_repair_tool:
+                        runtime["required_next_tool"] = required_repair_tool
                     convo.messages.append({
                         "role": "system",
                         "content": (
@@ -2773,6 +2847,10 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
             )
             if pause_result is not None:
                 return pause_result
+            if required_next_tool and self._required_tool_succeeded(
+                convo.messages, tool_calls, required_next_tool,
+            ):
+                runtime.pop("required_next_tool", None)
 
             tool_history = state.variables.get("tool_call_history", [])
             if (self._missing_artifacts(execution_id, step) and len(tool_history) >= 8
@@ -2894,9 +2972,39 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
             path for path in paths if path.strip().lower() not in ignored
         ))
 
+    @staticmethod
+    def _normalized_workspace_path(path: str) -> str:
+        normalized = os.path.normcase(os.path.normpath(str(path or "").strip()))
+        while normalized.startswith(f".{os.sep}"):
+            normalized = normalized[2:]
+        return normalized
+
+    @classmethod
+    def _active_required_artifacts(cls, state) -> set[str]:
+        """Return artifacts whose deletion would invalidate the active step."""
+        plan = state.current_plan if isinstance(state.current_plan, dict) else {}
+        steps = plan.get("steps") if isinstance(plan.get("steps"), list) else []
+        index = int(state.current_step or 0)
+        if index < 0 or index >= len(steps) or not isinstance(steps[index], dict):
+            return set()
+        return {
+            cls._normalized_workspace_path(path)
+            for path in steps[index].get("required_artifacts", [])
+            if str(path or "").strip()
+        }
+
+    @staticmethod
+    def _shell_requests_deletion(command: str) -> bool:
+        return bool(re.search(
+            r"(?:\b(?:del|erase|rm|rmdir|rd|remove-item)\b|\.unlink\s*\()",
+            str(command or ""),
+            flags=re.IGNORECASE,
+        ))
+
     async def _call_tool(self, execution_id: str, capability: str, action: str, arguments: Dict[str, Any]) -> str:
         """Invoke a tool while enforcing specialist ownership and path serialization."""
-        if self.state_engine.get_execution(execution_id).status == "cancelled":
+        state = self.state_engine.get_execution(execution_id)
+        if state.status == "cancelled":
             raise asyncio.CancelledError()
         is_mutation = capability.lower() == "filesystem" and action.lower() in {"write", "append", "delete"}
         path = str(arguments.get("path") or "")
@@ -2919,8 +3027,44 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
                     lock_paths.append(target)
         if is_mutation and path:
             lock_paths.append(path)
+        protected_artifacts = self._active_required_artifacts(state)
+        protected_targets = {
+            target for target in lock_paths
+            if self._normalized_workspace_path(target) in protected_artifacts
+        }
+        deletes_required_artifact = (
+            capability.lower() == "filesystem"
+            and action.lower() == "delete"
+            and self._normalized_workspace_path(path) in protected_artifacts
+        ) or (
+            capability.lower() == "shell"
+            and action.lower() == "execute"
+            and self._shell_requests_deletion(command)
+            and bool(protected_targets)
+        )
+        if deletes_required_artifact:
+            denied = sorted(protected_targets or {path})
+            self.telemetry.record(
+                "required_artifact_deletion_blocked", execution_id, paths=denied,
+            )
+            return (
+                "Error: Deletion blocked for active required artifact(s): "
+                + ", ".join(denied)
+                + ". Repair the declared artifact in place with filesystem.write or "
+                "filesystem.append; a required delivery may not be removed."
+            )
+        empties_required_artifact = (
+            capability.lower() == "filesystem"
+            and action.lower() == "write"
+            and self._normalized_workspace_path(path) in protected_artifacts
+            and not str(arguments.get("content") or "").strip()
+        )
+        if empties_required_artifact:
+            return (
+                f"Error: Empty overwrite blocked for active required artifact '{path}'. "
+                "Write one complete bounded section instead."
+            )
         if shell_paths:
-            state = self.state_engine.get_execution(execution_id)
             parent_id = state.variables.get("parent_execution_id")
             contract_state = self.state_engine.get_execution(parent_id) if parent_id else state
             contract = contract_state.variables.get("delivery_contract")
@@ -2942,7 +3086,6 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
                     + ". Use the declared owned_paths or request a debugger repair handoff."
                 )
         if is_mutation:
-            state = self.state_engine.get_execution(execution_id)
             parent_id = state.variables.get("parent_execution_id")
             contract_state = (
                 self.state_engine.get_execution(parent_id) if parent_id else state

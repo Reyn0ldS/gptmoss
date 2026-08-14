@@ -420,6 +420,66 @@ async def test_owned_long_artifact_can_be_built_with_bounded_append_calls(tmp_pa
     )
 
 
+@pytest.mark.asyncio
+async def test_active_required_artifact_cannot_be_deleted_by_its_writer(tmp_path):
+    engine, state = _engine(tmp_path)
+    execution = state.get_execution("protected-delivery")
+    execution.current_plan = {
+        "steps": [{
+            "id": 0,
+            "role": "writer",
+            "required_artifacts": ["dossier.md"],
+            "owned_paths": ["dossier.md"],
+        }]
+    }
+    execution.current_step = 0
+    project = tmp_path / "projects" / "proj-default"
+    project.mkdir(parents=True)
+    target = project / "dossier.md"
+    target.write_text("validated draft", encoding="utf-8")
+
+    result = await engine._call_tool(
+        "protected-delivery", "filesystem", "delete", {"path": "dossier.md"},
+    )
+
+    assert "Deletion blocked for active required artifact" in result
+    assert target.read_text(encoding="utf-8") == "validated draft"
+
+    empty_result = await engine._call_tool(
+        "protected-delivery", "filesystem", "write",
+        {"path": "dossier.md", "content": ""},
+    )
+    assert "Empty overwrite blocked for active required artifact" in empty_result
+    assert target.read_text(encoding="utf-8") == "validated draft"
+
+
+@pytest.mark.asyncio
+async def test_shell_cannot_bypass_required_artifact_deletion_guard(tmp_path):
+    engine, state = _engine(tmp_path)
+    execution = state.get_execution("protected-shell-delivery")
+    execution.current_plan = {
+        "steps": [{
+            "id": 0,
+            "role": "writer",
+            "required_artifacts": ["dossier.md"],
+            "owned_paths": ["dossier.md"],
+        }]
+    }
+    execution.current_step = 0
+    project = tmp_path / "projects" / "proj-default"
+    project.mkdir(parents=True)
+    target = project / "dossier.md"
+    target.write_text("validated draft", encoding="utf-8")
+    command = "del dossier.md" if sys.platform == "win32" else "rm dossier.md"
+
+    result = await engine._call_tool(
+        "protected-shell-delivery", "shell", "execute", {"command": command},
+    )
+
+    assert "Deletion blocked for active required artifact" in result
+    assert target.read_text(encoding="utf-8") == "validated draft"
+
+
 def test_writer_gate_nudge_requires_one_bounded_append_on_existing_artifact(tmp_path):
     engine, state = _engine(tmp_path)
     state.get_execution("writer-nudge")
@@ -439,6 +499,71 @@ def test_writer_gate_nudge_requires_one_bounded_append_on_existing_artifact(tmp_
     assert "400-800 word chunk" in nudge
     assert "do not send the whole document" in nudge
     assert "undeclared part files" in nudge
+
+
+def test_writer_gate_can_constrain_the_next_turn_to_the_required_mutation(tmp_path):
+    engine, state = _engine(tmp_path)
+    state.get_execution("writer-tool-constraint")
+    project = tmp_path / "projects" / "proj-default"
+    project.mkdir(parents=True)
+    (project / "dossier.md").write_text("existing", encoding="utf-8")
+    step = {"role": "writer", "required_artifacts": ["dossier.md"]}
+    issues = ["dossier.md: words=10 is below required minimum 9000"]
+    schemas = [
+        {"function": {"name": "filesystem__read"}},
+        {"function": {"name": "filesystem__append"}},
+        {"function": {"name": "shell__execute"}},
+    ]
+
+    required = engine._writer_incremental_repair_tool(
+        "writer-tool-constraint", "writer", step, issues,
+    )
+    constrained = engine._schemas_for_required_tool(schemas, required)
+
+    assert required == "filesystem__append"
+    assert [item["function"]["name"] for item in constrained] == [
+        "filesystem__append"
+    ]
+
+    calls = [{
+        "id": "append-1",
+        "function": {"name": "filesystem__append", "arguments": {}},
+    }]
+    failed = [{
+        "role": "tool", "tool_call_id": "append-1", "content": "Error: denied",
+    }]
+    succeeded = [{
+        "role": "tool", "tool_call_id": "append-1",
+        "content": "Content appended successfully to dossier.md",
+    }]
+    assert not engine._required_tool_succeeded(
+        failed, calls, "filesystem__append",
+    )
+    assert engine._required_tool_succeeded(
+        succeeded, calls, "filesystem__append",
+    )
+
+
+def test_writer_duplicate_gate_requires_bounded_clean_rewrite(tmp_path):
+    engine, state = _engine(tmp_path)
+    state.get_execution("writer-rewrite")
+    project = tmp_path / "projects" / "proj-default"
+    project.mkdir(parents=True)
+    (project / "dossier.md").write_text("duplicated", encoding="utf-8")
+    step = {"role": "writer", "required_artifacts": ["dossier.md"]}
+    issues = ["dossier.md: document contains 23 duplicate paragraph occurrence(s)"]
+
+    required = engine._writer_incremental_repair_tool(
+        "writer-rewrite", "writer", step, issues,
+    )
+    nudge = engine._writer_incremental_repair_nudge(
+        "writer-rewrite", "writer", step, issues,
+    )
+
+    assert required == "filesystem__write"
+    assert "next response must be exactly one valid filesystem__write" in nudge
+    assert "first clean, complete section" in nudge
+    assert "remaining non-duplicated sections" in nudge
 
 
 @pytest.mark.asyncio

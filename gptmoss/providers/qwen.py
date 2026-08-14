@@ -391,7 +391,8 @@ class QwenProvider(LLMProvider):
         if self._native_tools_supported is False:
             return await self._prompt_based_tool_calling(
                 messages, tools, model, on_text_delta=on_text_delta,
-                on_context_fitted=on_context_fitted, **kwargs
+                on_context_fitted=on_context_fitted,
+                require_tool=tool_choice == "required", **kwargs
             )
 
         # Build arguments for openai client to try native tool calling
@@ -445,7 +446,8 @@ class QwenProvider(LLMProvider):
                 self._native_tools_supported = False
                 return await self._prompt_based_tool_calling(
                     messages, tools, model, on_text_delta=on_text_delta,
-                    on_context_fitted=on_context_fitted, **kwargs
+                    on_context_fitted=on_context_fitted,
+                    require_tool=tool_choice == "required", **kwargs
                 )
             else:
                 self._log_completion_error(e)
@@ -467,6 +469,8 @@ class QwenProvider(LLMProvider):
         **kwargs
     ) -> Dict[str, Any]:
         import json
+
+        require_tool = bool(kwargs.pop("require_tool", False))
         
         # Format tools list for prompt injection
         tools_desc = []
@@ -490,7 +494,11 @@ class QwenProvider(LLMProvider):
             '  }\n'
             "}\n"
             "Do not add any text or conversational filler outside of the JSON object. "
-            "If you do not need to call a tool, reply with a normal message."
+            + (
+                "A tool call is REQUIRED for this turn; a normal message is invalid."
+                if require_tool else
+                "If you do not need to call a tool, reply with a normal message."
+            )
         )
         
         # Cleanse and translate messages to standard user/assistant text format

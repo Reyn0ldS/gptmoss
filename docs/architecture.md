@@ -61,6 +61,20 @@ planification et politique de leurs implémentations actuelles.
 |---|---|---|
 | `filesystem` | `read`, `write`, `append`, `list_dir`, `delete` | Résolution dans le workspace de l'exécution ; écriture incrémentale des grands artefacts sur leur chemin déclaré ; sous-dossiers et suppression configurables. |
 | `documents` | `inventory`, `search`, `read`, `read_chunk`, `read_image`, `read_images` | Pièces explicitement jointes uniquement ; texte normalisé et images sélectionnées par lots multimodaux bornés. |
+
+Les quality gates pilotent aussi le protocole d'outils. Si un rédacteur doit
+réparer un document long déjà créé, l'itération suivante ne reçoit que le schéma
+`filesystem__append` et impose un appel ; pour un artefact absent, le même mécanisme
+emploie `filesystem__write`. Le filtrage est temporaire et levé après la mutation,
+ce qui garantit un progrès durable sans figer le nombre d'itérations du plan.
+Un défaut qui exige de retirer du contenu (doublon, référence invalide, lien externe
+ou placeholder) bascule explicitement vers une reconstruction incrémentale : un
+premier `filesystem__write` borné initialise la version propre, puis les tours
+suivants emploient `filesystem__append`.
+La politique de mutation interdit également la suppression, directe ou via le
+shell, d'un artefact obligatoire de l'étape active, ainsi que son écrasement par
+un contenu vide. Une correction destructive doit employer une écriture contrôlée,
+afin qu'un livrable ne disparaisse jamais entre deux passages des quality gates.
 | `memory` | `search`, `propose` | Lecture validée du projet ; une proposition agent reste non validée et non globale. |
 | `shell` | `execute` | Répertoire du projet, blocage destructif, timeout, sortie bornée et approbation selon politique. |
 | `agent` | `spawn`, `status`, `execute_subtask` | Lignée et profondeur de délégation, refus des cycles exacts. |

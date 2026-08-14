@@ -152,6 +152,47 @@ async def test_native_tool_request_without_call_demotes_to_prompt_protocol():
     assert second["tool_calls"][0]["function"]["name"] == "filesystem__write"
 
 
+@pytest.mark.asyncio
+async def test_prompt_tool_protocol_makes_required_choice_explicit():
+    provider = QwenProvider(
+        api_key="local-key",
+        base_url="http://127.0.0.1:9/v1",
+        default_model="local-model",
+    )
+    captured = {}
+
+    async def prompt_response(arguments, **_kwargs):
+        captured.update(arguments)
+        return {
+            "content": '{"tool_call":{"name":"filesystem__append","arguments":{"path":"report.md","content":"chunk"}}}',
+            "tool_calls": None,
+            "usage": {"prompt_tokens": 8, "completion_tokens": 4, "total_tokens": 12},
+        }
+
+    provider._native_tools_supported = False
+    provider._create_with_context_recovery = prompt_response
+    tools = [{
+        "type": "function",
+        "function": {
+            "name": "filesystem__append",
+            "description": "Append text",
+            "parameters": {"type": "object"},
+        },
+    }]
+    try:
+        response = await provider.completion(
+            messages=[{"role": "user", "content": "Continue the report"}],
+            tools=tools,
+            tool_choice="required",
+        )
+    finally:
+        await provider.close()
+
+    system_prompt = captured["messages"][0]["content"]
+    assert "A tool call is REQUIRED for this turn" in system_prompt
+    assert response["tool_calls"][0]["function"]["name"] == "filesystem__append"
+
+
 def test_qwen_textual_tool_calls_are_normalized_and_deterministic():
     xml_content = """<tool_call>
 <function=filesystem__write>
