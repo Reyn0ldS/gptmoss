@@ -138,11 +138,16 @@ fichier local
 
 Le fallback professionnel estime désormais un budget d'étapes selon la taille réelle du corpus et du livrable. Une note courte reçoit un chemin compact ; un dossier à nombreuses sources, exigences, rapports ou diagrammes conserve les étapes d'analyse, rédaction, réparation et assurance indépendante. La production de la politique et des rapports qualité appartient à un rédacteur de preuves après réparation ; un QA distinct crée ensuite `analysis/final-delivery-audit.md` sans modifier les sorties des auteurs, puis le coordinateur contrôle toute la traçabilité. Les exigences complètes transmises à un spécialiste restent limitées à sa nature de travail et ne l'autorisent jamais à écrire les livrables des étapes sœurs.
 
-Le plan LLM décrit des opérations et leurs dépendances, sans minimum global d'étapes. Le
-compilateur mesure documents, images, octets, blocs, chunks, formats et erreurs. Lorsque
-la charge le justifie, il remplace uniquement l'opération source par au plus douze
-partitions stables puis une consolidation. Chaque pièce appartient à une seule partition ;
-le consolidateur reçoit leurs résultats validés et non une nouvelle copie du corpus.
+Le plan LLM décrit des opérations et leurs dépendances, sans minimum global d'étapes. La
+politique `corpus_policy` impose les garanties locales sans devenir une nouvelle demande
+utilisateur. Les champs `operation`, `satisfies_obligations` et `required_evidence` sont
+contrôlés causalement ; un fallback incomplet est réparé avant exécution. Le compilateur
+mesure documents, images, octets, blocs, chunks, formats et erreurs. Lorsque la charge le
+justifie, il remplace uniquement l'opération source par des partitions stables (borne de
+persistance 128) puis une consolidation. Chaque pièce appartient à une seule partition ;
+le consolidateur reçoit leurs résultats validés et non une nouvelle copie du corpus. Le
+scheduler conserve toutes ces unités mais n'en exécute qu'une vague bornée simultanément,
+automatique avec `max_parallel_plan_steps=0`.
 
 Pour un document long, le moteur sectionnel crée un contrat stable par titre (objectif,
 volume cible, exigences, preuves et dépendances), sauvegarde chaque révision dans

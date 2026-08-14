@@ -587,6 +587,7 @@ def test_api_settings_preserve_secret_and_context_budget(tmp_path):
         "projects": [{"id": "proj-default", "name": "Default"}],
         "max_step_iterations": 12,
         "max_step_retries": 5,
+        "max_parallel_plan_steps": 6,
         "document_engine_enabled": True,
         "document_checkpoint_enabled": False,
         "document_target_section_words": 900,
@@ -616,6 +617,7 @@ def test_api_settings_preserve_secret_and_context_budget(tmp_path):
     assert public_settings["vision_mode"] == "disabled"
     assert public_settings["denied_capabilities"] == ["documents.read_chunk"]
     assert public_settings["max_step_retries"] == 5
+    assert public_settings["max_parallel_plan_steps"] == 6
     assert public_settings["max_upload_bytes"] == 100000
     assert public_settings["max_attachment_text_chars"] == 5000
     assert public_settings["document_checkpoint_enabled"] is False
@@ -629,6 +631,7 @@ def test_api_settings_preserve_secret_and_context_budget(tmp_path):
     assert exec_engine.allow_nested_delegation is False
     assert exec_engine.max_delegation_depth == 4
     assert exec_engine.max_step_retries == 5
+    assert exec_engine.max_parallel_plan_steps == 6
     assert exec_engine.document_engine_enabled is True
     assert exec_engine.document_checkpoint_enabled is False
     assert exec_engine.document_target_section_words == 900
@@ -797,6 +800,8 @@ def test_folder_corpus_api_import_finalize_and_execution_scope(tmp_path):
     assert state.variables["corpus_summaries"][0]["file_count"] == 1
     assert state.variables["task"] == "Produce the requested professional report."
     assert state.variables["corpus_auto_workflow"] is True
+    assert state.variables["corpus_policy"]["professional_delivery"] is True
+    assert state.variables["corpus_policy"]["internet_evidence"] == "prohibited"
     assert "Mandatory local corpus workflow" not in state.variables["task"]
 
     disabled = client.post("/executions", json={
@@ -809,6 +814,7 @@ def test_folder_corpus_api_import_finalize_and_execution_scope(tmp_path):
     disabled_state = state_engine.get_execution(disabled.json()["execution_id"])
     assert disabled_state.variables["task"] == "Fix the attached source bug only."
     assert disabled_state.variables["corpus_auto_workflow"] is False
+    assert disabled_state.variables["corpus_policy"]["enabled"] is False
     public = client.get(f"/executions/{submitted.json()['execution_id']}").json()
     assert public["variables"]["corpus_summaries"][0]["root_label"] == "sources"
     deleted = client.delete(f"/corpora/{corpus_id}")
@@ -1135,6 +1141,7 @@ def test_gui_contains_complete_management_controls():
         "planning_mode", "task_title",
         'id="task-corpus-folder"', "webkitdirectory", "uploadSelectedCorpusFolder",
         'id="task-corpus-name"', 'id="task-corpus-auto-workflow"', "corpus_auto_workflow",
+        'id="settings-max-parallel-plan-steps"', "max_parallel_plan_steps",
         '"pdf":"application/pdf"', 'requestApi("/corpora"',
         'id="library-corpora"', "toggleCorpusAttachment", "selectedLibraryCorpora", "deleteCorpus",
         "applyConversationScroll", "scheduleFetchExecutionDetails",

@@ -211,6 +211,49 @@ async def test_stop_runtime_services_interrupts_all_owned_executions(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_large_dag_keeps_all_steps_but_bounds_the_active_wave():
+    event_bus = EventBus()
+    state_engine = StateEngine()
+    llm = MockLLMProvider()
+    engine = ExecutionEngine(
+        event_bus,
+        state_engine,
+        ContextEngine(state_engine, RAMMemoryProvider()),
+        llm,
+        SimplePlanner(llm),
+        SimplePolicyProvider(),
+        max_parallel_plan_steps=3,
+    )
+    state = state_engine.get_execution("large-dag")
+    state.status = "running"
+    state.variables["parent_execution_id"] = "test-parent"
+    steps = [
+        {"id": index, "status": "pending", "dependencies": [], "role": "architect"}
+        for index in range(80)
+    ]
+    active = 0
+    maximum = 0
+
+    async def run_step(step):
+        nonlocal active, maximum
+        active += 1
+        maximum = max(maximum, active)
+        await asyncio.sleep(0.001)
+        step["status"] = "completed"
+        active -= 1
+
+    await engine._coordinate_plan_execution(
+        "large-dag", state, steps, "Long bounded task", run_step, {}
+    )
+
+    assert len(steps) == 80
+    assert all(step["status"] == "completed" for step in steps)
+    assert maximum == 3
+    assert state.variables["plan_parallelism_limit"] == 3
+    assert state.status == "completed"
+
+
+@pytest.mark.asyncio
 async def test_approval_endpoints_record_ordered_scope_decisions(tmp_path):
     _, events, state_engine, engine = _runtime(tmp_path)
     tool = state_engine.get_execution("tool-approval")

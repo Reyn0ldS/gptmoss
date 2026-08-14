@@ -12,6 +12,7 @@ INHERITED_VARIABLE_KEYS = (
     "attachment_ids",
     "corpus_ids",
     "corpus_auto_workflow",
+    "corpus_policy",
     "planning_mode",
 )
 TERMINAL_EXECUTION_STATUSES = frozenset({"completed", "failed", "cancelled"})

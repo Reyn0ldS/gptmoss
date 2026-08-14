@@ -96,11 +96,16 @@ def normalize_plan(plan: Dict[str, Any]) -> Dict[str, Any]:
         for field in (
             "expertise", "required_artifacts", "acceptance_criteria",
             "verification_commands", "requirement_ids", "owned_paths",
+            "satisfies_obligations", "required_evidence",
         ):
             values = step.get(field) or []
             if not isinstance(values, list) or any(not isinstance(value, str) for value in values):
                 raise ValueError(f"Plan step {step_id} has an invalid {field} list.")
             step[field] = [value.strip() for value in values if value.strip()]
+        operation = str(step.get("operation") or "execute").strip().lower()
+        if not re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", operation):
+            raise ValueError(f"Plan step {step_id} has an invalid operation.")
+        step["operation"] = operation
         step["status"] = step.get("status", "pending")
 
     identifier_set = set(identifiers)

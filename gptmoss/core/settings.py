@@ -44,6 +44,9 @@ class RuntimeSettings(BaseModel):
     )
     max_step_iterations: int = Field(default=30, ge=1)
     max_step_retries: int = Field(default=2, ge=0)
+    # Zero chooses a conservative provider/CPU-aware value. This limits only
+    # simultaneous work; the total DAG and its duration remain unbounded.
+    max_parallel_plan_steps: int = Field(default=0, ge=0, le=128)
     max_context_chars: int = Field(default=12_000, ge=1)
     # Zero discovers/learns a safe provider envelope automatically.  The
     # output reserve is always kept outside the prompt budget.

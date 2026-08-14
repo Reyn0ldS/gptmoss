@@ -2716,6 +2716,7 @@
                 document.getElementById("settings-max-autonomous-skills").value = data.max_autonomous_skills_per_execution ?? 0;
                 document.getElementById("settings-max-step-iterations").value = data.max_step_iterations || 30;
                 document.getElementById("settings-max-step-retries").value = data.max_step_retries ?? 2;
+                document.getElementById("settings-max-parallel-plan-steps").value = data.max_parallel_plan_steps ?? 0;
                 document.getElementById("settings-max-context-chars").value = data.max_context_chars || 12000;
                 document.getElementById("settings-context-window-tokens").value = data.context_window_tokens ?? 0;
                 document.getElementById("settings-context-output-reserve").value = data.context_output_reserve_tokens ?? 8192;
@@ -2772,6 +2773,7 @@
                 projects: localProjects,
                 max_step_iterations: parseInt(document.getElementById("settings-max-step-iterations").value, 10) || 30,
                 max_step_retries: Math.max(0, parseInt(document.getElementById("settings-max-step-retries").value, 10) || 0),
+                max_parallel_plan_steps: Math.max(0, parseInt(document.getElementById("settings-max-parallel-plan-steps").value, 10) || 0),
                 max_context_chars: parseInt(document.getElementById("settings-max-context-chars").value, 10) || 12000,
                 context_window_tokens: Math.max(0, parseInt(document.getElementById("settings-context-window-tokens").value, 10) || 0),
                 context_output_reserve_tokens: Math.max(256, parseInt(document.getElementById("settings-context-output-reserve").value, 10) || 8192),
@@ -3286,6 +3288,10 @@
                 <div style="display: flex; flex-direction: column; gap: 4px; margin-top: 6px;">
                     <label style="font-size: 11px; color: var(--text-normal);">Nouveaux agents autonomes après échec d'une étape</label>
                     <input type="number" id="settings-max-step-retries" class="approval-reason-input" style="margin: 0;" placeholder="2" min="0">
+                </div>
+                <div style="display: flex; flex-direction: column; gap: 4px; margin-top: 6px;">
+                    <label style="font-size: 11px; color: var(--text-normal);">Étapes simultanées (0 = automatique, ne limite pas le total)</label>
+                    <input type="number" id="settings-max-parallel-plan-steps" class="approval-reason-input" style="margin: 0;" placeholder="0" min="0" max="128">
                 </div>
                 <div style="display: flex; flex-direction: column; gap: 4px; margin-top: 6px;">
                     <label style="font-size: 11px; color: var(--text-normal);">Budget de contexte (caractères)</label>

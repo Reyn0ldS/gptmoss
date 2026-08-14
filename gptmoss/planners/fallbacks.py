@@ -385,9 +385,33 @@ def _assign_document_requirements(
 def _step(step_id: int, role: str, specialist: str, description: str,
           dependencies: List[int], expertise: List[str], required_artifacts: List[str],
           acceptance_criteria: List[str], verification_commands: List[str] | None = None) -> Dict[str, Any]:
-    return {"id": step_id, "role": role, "specialist": specialist, "description": description,
+    operation = {
+        "developer": "implement", "writer": "document_render", "qa": "validate",
+        "debugger": "repair", "coordinator": "audit",
+    }.get(role, "execute")
+    obligation = {
+        "implement": "implementation", "document_render": "document_render",
+        "validate": "independent_validation", "repair": "autonomous_repair",
+        "audit": "final_audit",
+    }.get(operation)
+    evidence = {
+        "implement": ["implementation_artifacts"],
+        "document_render": ["artifact_validation", "source_to_section_coverage"],
+        "validate": ["artifact_validation", "independent_tool_evidence"],
+        "repair": ["repair_history", "regression_validation"],
+        "audit": ["requirements_traceability", "delivery_assurance"],
+    }.get(operation, [])
+    step = {"id": step_id, "role": role, "specialist": specialist, "description": description,
             "dependencies": dependencies, "expertise": expertise,
             "required_artifacts": required_artifacts, "acceptance_criteria": acceptance_criteria,
             "verification_commands": verification_commands or [], "requirement_ids": [],
-            "owned_paths": list(required_artifacts), "status": "pending"}
+            "owned_paths": list(required_artifacts), "satisfies_obligations": [],
+            "required_evidence": [], "status": "pending"}
+    if obligation:
+        step.update({
+            "operation": operation,
+            "satisfies_obligations": [obligation],
+            "required_evidence": evidence,
+        })
+    return step
 

@@ -38,14 +38,13 @@ superviseur avec son jeton. Un port occupé est signalé avant de démarrer l'en
 5. Le contexte rassemble conversation, état, mémoire validée du projet, schémas d'outils
    et pièces jointes bornées ; `ContextBuilt` est publié.
 6. Le planner produit exigences, interfaces, dépendances, validations et opérations sans
-   quota d'étapes. Il doit seulement couvrir les obligations sémantiques du livrable
-   (inventaire source, implémentation, validation indépendante, réparation, audit). Un
-   travail de 24 h peut donc produire des dizaines d'étapes. Le texte utilisateur n'est
-   jamais réécrit : le workflow corpus est un booléen `corpus_auto_workflow`. Le plan est
-   normalisé, les exigences héritées sont fusionnées, puis `workload.py` compile le graphe
-   selon les métriques réelles. Un gros corpus est distribué en autant de partitions que
-   la charge le justifie, rejoint par une consolidation ; une petite tâche conserve son
-   graphe minimal.
+   quota d'étapes. `corpus_policy` transporte séparément les garanties locales sans
+   réécrire le texte utilisateur. Chaque porte déclare `operation`,
+   `satisfies_obligations` et `required_evidence`; le runtime ajoute uniquement les portes
+   absentes, contrôle leurs dépendances et refuse les preuves purement déclaratives. Un
+   travail de 24 h peut donc produire des dizaines d'étapes tandis qu'une tâche directe
+   regroupe ses obligations dans une seule unité. Après normalisation, `workload.py`
+   partitionne la charge réelle et rejoint les résultats par consolidation.
 7. Une réduction de périmètre requiert `ScopeApprovalRequested` avant toute exécution.
 
 ## Ordonnancement et exécution d'une étape
@@ -68,6 +67,10 @@ Le plan est la source de l'ordre : une étape n'est exécutable qu'après ses d�
 Les prérequis validés sont réutilisés, et les chemins possédés empêchent les spécialistes
 concurrents de modifier le même livrable. Une répétition sans preuve consomme le budget de
 stagnation ; une modification durable ou une nouvelle validation réussie le remet à zéro.
+Le volume total du DAG reste inchangé, mais le scheduler n'active qu'une vague bornée :
+`max_parallel_plan_steps=0` choisit automatiquement une valeur prudente (jusqu'à quatre),
+et une valeur positive ne limite que la concurrence. Les étapes restantes demeurent
+persistées et démarrent dès qu'une place est libre.
 
 Toutes les mutations applicatives de statut passent par la table de transitions du
 `StateEngine`. Chaque changement conserve ancien et nouvel état, motif, acteur,
@@ -100,8 +103,9 @@ exécution empêche deux boucles simultanées.
 ## Documents et corpus local
 
 1. La GUI accepte des fichiers isolés ou un dossier récursif (`webkitdirectory`). La case
-   d'inventaire automatique envoie `corpus_auto_workflow` sans modifier le texte de la
-   tâche. Pour un dossier, `POST /corpora` crée/reprend un manifeste durable ; chaque
+   d'inventaire automatique envoie `corpus_auto_workflow`; l'API construit le contrat
+   `corpus_policy` (preuves locales, lecture seule, couverture, citations, contradictions,
+   images et erreurs) sans modifier le texte de la tâche. Pour un dossier, `POST /corpora` crée/reprend un manifeste durable ; chaque
    source passe en binaire par `PUT /corpora/{id}/files`, avec chemin relatif et empreinte
    SHA-256.
 2. Le navigateur filtre les répertoires techniques et limite l'import à trois fichiers

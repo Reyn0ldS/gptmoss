@@ -103,6 +103,16 @@ def _operation(step: dict[str, Any]) -> str:
     declared = str(step.get("operation") or "").strip().lower()
     if declared:
         return declared
+    role = str(step.get("role") or "").strip().lower()
+    structural_roles = {
+        "developer": "implement",
+        "writer": "document_render",
+        "qa": "validate",
+        "debugger": "repair",
+        "coordinator": "audit",
+    }
+    if role in structural_roles:
+        return structural_roles[role]
     text = " ".join((
         str(step.get("description") or ""),
         str(step.get("specialist") or ""),

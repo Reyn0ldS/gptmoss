@@ -16,11 +16,22 @@ Le coordinateur fige dans `variables.delivery_contract` :
 - les obligations sémantiques (`plan_obligations`) : inventaire source, implémentation,
   validation indépendante, réparation autonome et audit final, selon la mission réelle.
   Le nombre d'étapes n'est pas un quota.
+- la politique locale `corpus_policy`, distincte du texte utilisateur : sources en lecture
+  seule, preuves locales, couverture des blocs/images, citations, contradictions et erreurs ;
+- les contrats d'étape `operation`, `satisfies_obligations` et `required_evidence`, ainsi
+  que leur ordre causal dans le DAG.
 
 Les plans anciens sans ces champs sont enrichis de façon déterministe et hors
 ligne. Les nouveaux plans doivent déclarer `requirements`, `scope_changes`,
 `interfaces`, `launch_commands`, puis `requirement_ids` et `owned_paths` dans
-chaque étape.
+chaque étape. Un plan incomplet est enrichi uniquement avec les portes manquantes ; le
+fallback n'est accepté qu'après la même validation que le plan du fournisseur.
+
+La présence d'un mot-clé n'est pas une preuve. La validation exige notamment que la
+rédaction dépende de l'inventaire, que le QA dépende d'un producteur distinct, que la
+réparation suive le QA et que l'audit final soit en aval des travaux obligatoires. Les
+artefacts déclarés doivent exister et les corpus contenant des documents ou images
+doivent présenter des appels `documents.read`/`read_image` dans l'historique agrégé.
 
 ## Réduction de périmètre
 

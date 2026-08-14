@@ -91,7 +91,12 @@ class ExecutionProgressMixin:
         exhaustive_assignment = any(
             marker in assignment for marker in exhaustive_markers
         ) or bool(re.search(r"\bint.gr", assignment))
-        if not (
+        explicit_source_gate = (
+            str(step.get("operation") or "").lower() in {"inventory", "extract"}
+            or "source_inventory" in step.get("satisfies_obligations", [])
+            or "source_coverage" in step.get("required_evidence", [])
+        )
+        if not explicit_source_gate and not (
             any(marker in assignment for marker in inventory_markers)
             and exhaustive_assignment
         ):

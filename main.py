@@ -125,6 +125,7 @@ def bootstrap_runtime(workspace_root: str):
     )
     max_step_iterations = settings.max_step_iterations
     max_step_retries = settings.max_step_retries
+    max_parallel_plan_steps = settings.max_parallel_plan_steps
     skill_coverage_threshold = settings.skill_coverage_threshold
     max_autonomous_skills_per_execution = settings.max_autonomous_skills_per_execution
     safe_shell_mode = settings.safe_shell_mode
@@ -186,6 +187,7 @@ def bootstrap_runtime(workspace_root: str):
         default_skills=default_skills,
         max_step_iterations=max_step_iterations,
         max_step_retries=max_step_retries,
+        max_parallel_plan_steps=max_parallel_plan_steps,
         continue_while_progress=continue_while_progress,
         agent_profile_registry=agent_profile_registry,
         skill_lifecycle=skill_lifecycle,

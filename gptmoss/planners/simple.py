@@ -8,6 +8,7 @@ from typing import Any, Dict, List
 
 from gptmoss.interfaces.llm import LLMProvider
 from gptmoss.interfaces.planner import PlannerProvider
+from gptmoss.core.corpus_policy import normalize_corpus_policy
 from gptmoss.core.document_planning import adapt_document_steps
 from gptmoss.core.domains import ProjectDomainRegistry
 from gptmoss.core.plan_obligations import attach_plan_obligations, collect_plan_obligations
@@ -281,6 +282,7 @@ class SimplePlanner(PlannerProvider):
         task: str,
         analysis: Dict[str, Any] | None = None,
         planning_mode: str | None = None,
+        corpus_policy: Dict[str, Any] | None = None,
     ) -> Dict[str, Any]:
         analysis = analysis or analyze_task_complexity(task)
         mode = normalize_planning_mode(planning_mode)
@@ -289,7 +291,10 @@ class SimplePlanner(PlannerProvider):
             return {"analysis": analysis,
                     "steps": [_step(0, "coordinator", "Task Specialist", f"Perform the user task: {task}", [], list(domains) or ["general"], [], ["The requested outcome is delivered."])],
                     "rationale": "Explicit direct planning mode."}
-        if _document_deliverable_task(task):
+        if (
+            _document_deliverable_task(task)
+            or bool((corpus_policy or {}).get("professional_delivery"))
+        ):
             return SimplePlanner._document_fallback(task, analysis)
         if mode == "full_team" and "software-engineering" in domains:
             analysis = {**analysis, "level": "high" if analysis["level"] in {"low", "moderate"} else analysis["level"]}
@@ -371,6 +376,7 @@ class SimplePlanner(PlannerProvider):
         task: str = "",
         workload_profile: Dict[str, Any] | None = None,
         corpus_auto_workflow: bool = False,
+        corpus_policy: Dict[str, Any] | None = None,
     ) -> None:
         steps = plan.get("steps")
         if not isinstance(steps, list) or not steps:
@@ -394,6 +400,7 @@ class SimplePlanner(PlannerProvider):
             for field in (
                 "expertise", "required_artifacts", "acceptance_criteria",
                 "verification_commands", "requirement_ids", "owned_paths",
+                "satisfies_obligations", "required_evidence",
             ):
                 value = step.get(field, [])
                 if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
@@ -413,6 +420,8 @@ class SimplePlanner(PlannerProvider):
             analysis=analysis,
             workload_profile=workload_profile or plan.get("workload_profile"),
             corpus_auto_workflow=corpus_auto_workflow,
+            corpus_policy=corpus_policy or plan.get("corpus_policy"),
+            repair=True,
         )
 
         binary_model_suffixes = (".pth", ".pt", ".ckpt", ".safetensors", ".onnx")
@@ -482,12 +491,18 @@ class SimplePlanner(PlannerProvider):
         corpus_auto_workflow = bool(
             kwargs.get("corpus_auto_workflow", variables.get("corpus_auto_workflow"))
         )
+        corpus_policy = normalize_corpus_policy(
+            kwargs.get("corpus_policy") or variables.get("corpus_policy"),
+            enabled=corpus_auto_workflow,
+            workload_profile=workload,
+        )
         obligations = collect_plan_obligations(
             task=task,
             planning_mode=planning_mode,
             analysis=analysis,
             workload_profile=workload,
             corpus_auto_workflow=corpus_auto_workflow,
+            corpus_policy=corpus_policy,
         )
         if planning_mode == "full_team" and analysis["level"] in {"low", "moderate"}:
             analysis = {
@@ -523,6 +538,7 @@ class SimplePlanner(PlannerProvider):
             f"{mode_instructions}\n"
             f"Deterministic task hints (signals, never a mandated step count): {json.dumps(analysis, ensure_ascii=False)}\n"
             f"Bounded local workload profile (counts only, never source content): {json.dumps(workload, ensure_ascii=False)}\n"
+            f"Deterministic local corpus policy (never rewrite the user task): {json.dumps(corpus_policy, ensure_ascii=False)}\n"
             "Required semantic delivery obligations (satisfy each with one or more real "
             "steps; never pad with dummy steps; there is no maximum step count): "
             f"{json.dumps(obligations, ensure_ascii=False)}\n"
@@ -536,7 +552,8 @@ class SimplePlanner(PlannerProvider):
             "Choose the number of steps dynamically from the real work. Create a step only for a distinct operation, owner, dependency boundary, artifact contract, or independent validation gate; merge redundant work. Do not shrink a large assignment to look small. The runtime may partition source work from the measured workload after this semantic plan is accepted. "
             "Parallelize independent work and depend on existing outputs so work is not repeated.\n"
             "Extract a top-level requirements array from the user's exact request before planning. Preserve every distinct requested outcome; never merge or truncate requirements merely to reduce plan size. Each requirement has id, statement, priority, mandatory, source='user', and acceptance. "
-            "Every step must contain id, role, specialist, description, dependencies, expertise, required_artifacts, acceptance_criteria, verification_commands, requirement_ids, owned_paths, and status='pending'. "
+            "Every step must contain id, role, specialist, operation, satisfies_obligations, required_evidence, description, dependencies, expertise, required_artifacts, acceptance_criteria, verification_commands, requirement_ids, owned_paths, and status='pending'. "
+            "operation and satisfies_obligations are explicit machine contracts, not prose labels. Required gates must be causally ordered and backed by concrete artifacts or tool evidence. "
             "requirement_ids trace exact requirements. owned_paths are non-overlapping relative file paths or globs that the specialist may modify. "
             "Array fields must be arrays; artifacts are concrete relative file paths.\n"
             "Implementation must be runnable and must not silently substitute random/mock behavior. If weights, hardware, datasets, or services are unavailable, build a truthful deterministic prototype and explicit adapter contract, document the limitation, and test both paths.\n"
@@ -578,6 +595,12 @@ class SimplePlanner(PlannerProvider):
                 step["verification_commands"] = self._coerce_string_array(step.get("verification_commands", []), ("command", "cmd", "description"))
                 step["requirement_ids"] = self._coerce_string_array(step.get("requirement_ids", []), ("id", "requirement_id", "name"))
                 step["owned_paths"] = self._coerce_string_array(step.get("owned_paths", []), ("path", "glob", "file"))
+                step["satisfies_obligations"] = self._coerce_string_array(
+                    step.get("satisfies_obligations", []), ("id", "obligation", "name")
+                )
+                step["required_evidence"] = self._coerce_string_array(
+                    step.get("required_evidence", []), ("id", "evidence", "name")
+                )
                 if analysis["level"] in {"low", "moderate"} and not step.get("specialist"):
                     role_title = str(step.get("role") or "Task").replace("_", " ").title()
                     step["specialist"] = f"{role_title} Specialist"
@@ -587,15 +610,20 @@ class SimplePlanner(PlannerProvider):
                 task=task,
                 workload_profile=workload,
                 corpus_auto_workflow=corpus_auto_workflow,
+                corpus_policy=corpus_policy,
             )
             if _document_deliverable_task(task):
                 plan_data["delivery_profile"] = "professional-local"
             plan_data["planning_mode"] = planning_mode
+            plan_data["corpus_policy"] = corpus_policy
             return plan_data
         except Exception as exc:
             logger.warning("Error or incomplete LLM plan; using adaptive fallback: %s", exc)
-            fallback = self._fallback_plan(task, analysis, planning_mode)
+            fallback = self._fallback_plan(
+                task, analysis, planning_mode, corpus_policy=corpus_policy
+            )
             fallback["planning_mode"] = planning_mode
+            fallback["corpus_policy"] = corpus_policy
             attach_plan_obligations(
                 fallback,
                 task=task,
@@ -603,6 +631,8 @@ class SimplePlanner(PlannerProvider):
                 analysis=analysis,
                 workload_profile=workload,
                 corpus_auto_workflow=corpus_auto_workflow,
-                validate=False,
+                corpus_policy=corpus_policy,
+                repair=True,
+                validate=True,
             )
             return fallback

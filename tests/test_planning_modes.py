@@ -118,8 +118,11 @@ def test_generated_plan_validation_uses_obligations_not_a_step_floor():
                   ["The requested outcome is delivered."]),
         ],
     }
-    with pytest.raises(ValueError, match="missing required delivery obligations"):
-        SimplePlanner._validate_generated_plan(incomplete, analysis, "auto", task=task)
+    SimplePlanner._validate_generated_plan(incomplete, analysis, "auto", task=task)
+    assert {step["role"] for step in incomplete["steps"]} >= {
+        "developer", "qa", "debugger", "coordinator",
+    }
+    assert incomplete["steps"][-1]["role"] == "coordinator"
 
 
 def test_generic_team_fallback_keeps_a_producer_and_auditor():
@@ -129,13 +132,13 @@ def test_generic_team_fallback_keeps_a_producer_and_auditor():
     SimplePlanner._validate_generated_plan(
         short, {**analysis, "level": "high"}, "short_team", task=task,
     )
-    assert [step["role"] for step in short["steps"]] == ["architect", "coordinator"]
+    assert [step["role"] for step in short["steps"]] == ["architect", "qa", "coordinator"]
 
     auto_high = SimplePlanner._fallback_plan(task, {**analysis, "level": "very_high"}, "auto")
     SimplePlanner._validate_generated_plan(
         auto_high, {**analysis, "level": "very_high"}, "auto", task=task,
     )
-    assert len(auto_high["steps"]) == 2
+    assert len(auto_high["steps"]) == 3
 
 
 def test_thirteen_steps_are_a_fallback_shape_not_a_global_fixed_count():

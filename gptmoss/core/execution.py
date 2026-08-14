@@ -32,6 +32,7 @@ from gptmoss.core.delivery import (
 )
 from gptmoss.core.adaptive import AdaptiveRuntimePolicy, tool_call_fingerprint
 from gptmoss.core.plan_obligations import attach_plan_obligations
+from gptmoss.core.corpus_policy import normalize_corpus_policy
 from gptmoss.core.professional_delivery import apply_professional_profile
 from gptmoss.core.delivery_package import build_delivery_package
 from gptmoss.core.delivery_coordinator import DeliveryCoordinator
@@ -107,6 +108,7 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
         default_skills: Optional[List[str]] = None,
         max_step_iterations: int = 30,
         max_step_retries: int = 2,
+        max_parallel_plan_steps: int = 0,
         continue_while_progress: bool = True,
         agent_profile_registry: Optional[AgentProfileRegistry] = None,
         skill_lifecycle: Optional[AutonomousSkillLifecycle] = None,
@@ -134,6 +136,7 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
         self.default_skills = [str(skill).lower() for skill in (default_skills or [])]
         self.max_step_iterations = max(1, int(max_step_iterations))
         self.max_step_retries = max(0, int(max_step_retries))
+        self.max_parallel_plan_steps = max(0, int(max_parallel_plan_steps))
         self.continue_while_progress = bool(continue_while_progress)
         self.adaptive_resource_management = bool(adaptive_resource_management)
         self.strict_skill_capabilities = bool(strict_skill_capabilities)
@@ -1079,6 +1082,11 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
                         getattr(self.llm_provider, "supports_vision", False)
                     ),
                 )
+                state.variables["corpus_policy"] = normalize_corpus_policy(
+                    state.variables.get("corpus_policy"),
+                    enabled=bool(state.variables.get("corpus_auto_workflow")),
+                    workload_profile=state.variables["workload_profile"],
+                )
             schemas = self.get_capabilities_schemas(
                 is_sub_agent=is_sub_agent,
                 allowed_capabilities=allowed_capabilities,
@@ -1107,6 +1115,7 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
                     planning_mode=state.variables.get("planning_mode"),
                     workload_profile=state.variables.get("workload_profile"),
                     corpus_auto_workflow=bool(state.variables.get("corpus_auto_workflow")),
+                    corpus_policy=state.variables.get("corpus_policy"),
                 )
             except ProviderUnavailableError:
                 raise
@@ -1182,6 +1191,9 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
                 self.artifact_store,
                 state.variables.get("attachment_ids", []),
             )
+            plan_result["corpus_policy"] = dict(
+                state.variables.get("corpus_policy") or {}
+            )
             if not is_sub_agent:
                 plan_result = compile_work_graph(
                     plan_result,
@@ -1195,6 +1207,8 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
                     analysis=plan_result.get("analysis"),
                     workload_profile=state.variables.get("workload_profile"),
                     corpus_auto_workflow=bool(state.variables.get("corpus_auto_workflow")),
+                    corpus_policy=state.variables.get("corpus_policy"),
+                    repair=True,
                     validate=True,
                 )
             plan_result = normalize_plan(plan_result)
@@ -1268,6 +1282,19 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
                 item.cancel()
             if unfinished:
                 await asyncio.gather(*unfinished, return_exceptions=True)
+
+    def _parallel_plan_step_limit(self) -> int:
+        """Return an in-flight limit without constraining total plan size."""
+        if self.max_parallel_plan_steps > 0:
+            return self.max_parallel_plan_steps
+        cpu_limit = max(1, min(4, ((os.cpu_count() or 2) + 1) // 2))
+        try:
+            provider_limit = int(
+                getattr(self.llm_provider, "recommended_parallel_requests", 0) or 0
+            )
+        except (TypeError, ValueError):
+            provider_limit = 0
+        return max(1, min(cpu_limit, provider_limit)) if provider_limit else cpu_limit
 
     async def _coordinate_plan_execution(
         self, execution_id: str, state, steps, task: str, run_step, running_tasks
@@ -1397,8 +1424,13 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
                     ))
                 break
                 
-            # Launch all ready steps concurrently
-            for step in ready_steps:
+            # Preserve an arbitrarily large DAG while bounding only the active
+            # provider wave. Pending steps remain durable and are scheduled as
+            # capacity becomes available.
+            parallel_limit = self._parallel_plan_step_limit()
+            parent_state.variables["plan_parallelism_limit"] = parallel_limit
+            capacity = max(0, parallel_limit - len(running_tasks))
+            for step in ready_steps[:capacity]:
                 step_id = step.get("id")
                 running_tasks[step_id] = asyncio.create_task(run_step(step))
                 

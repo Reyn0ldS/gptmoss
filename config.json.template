@@ -32,6 +32,7 @@
   "max_transitions_per_execution": 2000,
   "max_step_iterations": 30,
   "max_step_retries": 2,
+  "max_parallel_plan_steps": 0,
   "safe_shell_mode": true,
   "shell_timeout_seconds": 0,
   "shell_max_output_chars": 12000,

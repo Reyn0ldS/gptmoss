@@ -24,6 +24,7 @@ GUI_FILE_PATH = os.path.join(CURRENT_DIR, "gui.html")
 from gptmoss.core import EventBus, Event, StateEngine, RuntimeKernel, ExecutionEngine, DEFAULT_SYSTEM_PROMPT, RuntimeSettings, ProjectDomainRegistry
 from gptmoss.core.artifacts import ArtifactStore
 from gptmoss.core.document_model import DocumentModelStore
+from gptmoss.core.corpus_policy import build_corpus_policy
 from gptmoss.capabilities.documents import DocumentCapability
 from gptmoss.core.evolution import AgentProfileRegistry, AutonomousSkillLifecycle
 from gptmoss.core.skills import SkillRegistry
@@ -179,6 +180,7 @@ PUBLIC_EXECUTION_VARIABLE_KEYS = (
     "attachment_ids",
     "corpus_ids",
     "corpus_auto_workflow",
+    "corpus_policy",
     "corpus_summaries",
     "role_name",
     "parent_execution_id",
@@ -188,6 +190,7 @@ PUBLIC_EXECUTION_VARIABLE_KEYS = (
     "document_model_checkpoint",
     "active_skills",
     "delivery_contract",
+    "plan_parallelism_limit",
     "requested_skills",
 )
 
@@ -458,12 +461,20 @@ async def submit_task(req: SubmitTaskRequest):
     corpus_auto_workflow = bool(req.corpus_auto_workflow) and bool(
         requested_corpora or requested_attachments
     )
+    corpus_policy = build_corpus_policy(
+        enabled=corpus_auto_workflow,
+        source_kind="corpus" if requested_corpora else "attachments",
+        # A selected folder explicitly requests the professional corpus path.
+        # Loose attachments remain useful evidence without forcing a report.
+        professional_delivery=bool(requested_corpora),
+    )
     variables.update({
         "project_id": project_id,
         "attachment_ids": requested_attachments,
         "corpus_ids": requested_corpora,
         "corpus_summaries": corpus_summaries,
         "corpus_auto_workflow": corpus_auto_workflow,
+        "corpus_policy": corpus_policy,
         "planning_mode": planning_mode,
         "task_title": task_title_from_text(req.task.strip()),
     })
@@ -1504,6 +1515,7 @@ async def get_settings():
         config.setdefault("max_step_iterations", 30)
         config.setdefault("vision_mode", "auto")
         config.setdefault("max_step_retries", 2)
+        config.setdefault("max_parallel_plan_steps", 0)
         config.setdefault("max_context_chars", 12_000)
         config.setdefault("context_window_tokens", 0)
         config.setdefault("context_output_reserve_tokens", 8_192)
@@ -1566,6 +1578,9 @@ async def get_settings():
         "projects": [{"id": "proj-default", "name": "Projet Par Défaut"}],
         "max_step_iterations": getattr(app_state.execution_engine, "max_step_iterations", 30),
         "max_step_retries": getattr(app_state.execution_engine, "max_step_retries", 2),
+        "max_parallel_plan_steps": getattr(
+            app_state.execution_engine, "max_parallel_plan_steps", 0
+        ),
         "max_context_chars": getattr(app_state.execution_engine.context_engine, "max_history_chars", 12_000),
         "context_window_tokens": getattr(llm, "context_window_tokens", 0),
         "context_output_reserve_tokens": getattr(llm, "context_output_reserve_tokens", 8_192),
@@ -1699,6 +1714,7 @@ async def update_settings(req: SettingsRequest):
         "projects": req.projects,
         "max_step_iterations": req.max_step_iterations,
         "max_step_retries": req.max_step_retries,
+        "max_parallel_plan_steps": req.max_parallel_plan_steps,
         "max_context_chars": req.max_context_chars,
         "context_window_tokens": req.context_window_tokens,
         "context_output_reserve_tokens": req.context_output_reserve_tokens,
@@ -1746,6 +1762,7 @@ async def update_settings(req: SettingsRequest):
     app_state.execution_engine.default_skills = [skill.lower() for skill in req.default_skills]
     app_state.execution_engine.max_step_iterations = req.max_step_iterations
     app_state.execution_engine.max_step_retries = req.max_step_retries
+    app_state.execution_engine.max_parallel_plan_steps = req.max_parallel_plan_steps
     app_state.execution_engine.document_engine_enabled = req.document_engine_enabled
     app_state.execution_engine.document_checkpoint_enabled = req.document_checkpoint_enabled
     app_state.execution_engine.document_target_section_words = req.document_target_section_words
