@@ -553,6 +553,21 @@ class QwenProvider(LLMProvider):
                 
         if not system_msg_found:
             fallback_messages.insert(0, {"role": "system", "content": system_instruction})
+        if require_tool:
+            required_names = [
+                item.get("name") for item in tools_desc if item.get("name")
+            ]
+            sole_tool = required_names[0] if len(required_names) == 1 else "the required tool"
+            fallback_messages.append({
+                "role": "user",
+                "content": (
+                    "[REQUIRED TOOL PROTOCOL — FINAL INSTRUCTION] "
+                    f"Call {sole_tool} now. Your entire response must be the single JSON "
+                    "tool_call object defined above, with valid arguments. Do not explain, "
+                    "plan, inspect, summarize, or add Markdown fences. A prose response is "
+                    "invalid and will not execute."
+                ),
+            })
         
         on_text_delta = kwargs.pop("on_text_delta", None)
         on_context_fitted = kwargs.pop("on_context_fitted", None)

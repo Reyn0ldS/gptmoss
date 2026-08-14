@@ -189,7 +189,11 @@ async def test_prompt_tool_protocol_makes_required_choice_explicit():
         await provider.close()
 
     system_prompt = captured["messages"][0]["content"]
+    final_prompt = captured["messages"][-1]["content"]
     assert "A tool call is REQUIRED for this turn" in system_prompt
+    assert "Call filesystem__append now" in final_prompt
+    assert "entire response must be the single JSON" in final_prompt
+    assert "Do not explain, plan, inspect" in final_prompt
     assert response["tool_calls"][0]["function"]["name"] == "filesystem__append"
 
 

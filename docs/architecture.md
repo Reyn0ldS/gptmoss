@@ -67,6 +67,9 @@ réparer un document long déjà créé, l'itération suivante ne reçoit que le
 `filesystem__append` et impose un appel ; pour un artefact absent, le même mécanisme
 emploie `filesystem__write`. Le filtrage est temporaire et levé après la mutation,
 ce qui garantit un progrès durable sans figer le nombre d'itérations du plan.
+Quand le serveur compatible OpenAI utilise le protocole textuel de secours, le
+nom de l'unique outil obligatoire est répété dans le dernier message transmis ;
+il ne peut ainsi être masqué par un long historique de réparations.
 Un défaut qui exige de retirer du contenu (doublon, référence invalide, lien externe
 ou placeholder) bascule explicitement vers une reconstruction incrémentale : un
 premier `filesystem__write` borné initialise la version propre, puis les tours
