@@ -420,6 +420,27 @@ async def test_owned_long_artifact_can_be_built_with_bounded_append_calls(tmp_pa
     )
 
 
+def test_writer_gate_nudge_requires_one_bounded_append_on_existing_artifact(tmp_path):
+    engine, state = _engine(tmp_path)
+    state.get_execution("writer-nudge")
+    project = tmp_path / "projects" / "proj-default"
+    project.mkdir(parents=True)
+    (project / "dossier.md").write_text("# Existing\n\nValid content.\n", encoding="utf-8")
+    step = {"role": "writer", "required_artifacts": ["dossier.md"]}
+
+    nudge = engine._writer_incremental_repair_nudge(
+        "writer-nudge",
+        "writer",
+        step,
+        ["dossier.md: words=4288 is below required minimum 9000"],
+    )
+
+    assert "exactly one valid filesystem__append tool call" in nudge
+    assert "400-800 word chunk" in nudge
+    assert "do not send the whole document" in nudge
+    assert "undeclared part files" in nudge
+
+
 @pytest.mark.asyncio
 async def test_kernel_stores_planning_mode_and_title():
     state = StateEngine()

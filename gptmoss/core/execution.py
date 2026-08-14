@@ -671,6 +671,39 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
                 return True
         return False
 
+    def _writer_incremental_repair_nudge(
+        self,
+        execution_id: str,
+        role_key: str,
+        step: Dict[str, Any],
+        issues: List[str],
+    ) -> str:
+        """Turn long-document gate failures into one bounded executable action."""
+        if role_key != "writer" or not any(
+            marker in issue
+            for issue in issues
+            for marker in ("words=", "empty required section", "lack a local reference")
+        ):
+            return ""
+        artifacts = [str(path).strip() for path in step.get("required_artifacts", []) if str(path).strip()]
+        if not artifacts:
+            return ""
+        target = artifacts[0]
+        exists = self._artifact_exists(execution_id, target)
+        action = "filesystem__append" if exists else "filesystem__write"
+        continuity = (
+            "Preserve the existing valid content and append the next missing or underdeveloped section"
+            if exists else
+            "Create only the first complete section"
+        )
+        return (
+            f" Do not answer with a plan and do not send the whole document in one call. "
+            f"Your next response must be exactly one valid {action} tool call targeting '{target}'. "
+            f"{continuity} in a bounded 400-800 word chunk with nearby valid local citations. "
+            "Repeat with another bounded append call on later iterations until every gate passes; "
+            "never create undeclared part files."
+        )
+
     def _step_completion_issues(self, execution_id: str, step: Dict[str, Any], response: str) -> List[str]:
         """Evaluate machine-checkable delivery gates before accepting prose as completion."""
         issues = []
@@ -2708,11 +2741,15 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
                 if completion_issues:
                     if self._can_engine_finalize(execution_id, step):
                         return self._engine_delivery(execution_id, step)
+                    repair_nudge = self._writer_incremental_repair_nudge(
+                        execution_id, role_for_step, step, completion_issues,
+                    )
                     convo.messages.append({
                         "role": "system",
                         "content": (
                             "Delivery rejected by automatic quality gates. Continue working autonomously with tools. "
                             "Before finishing you must: " + "; ".join(completion_issues) + "."
+                            + repair_nudge
                         ),
                         "timestamp": time.time(),
                     })
