@@ -2822,15 +2822,27 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
                             "The model repeatedly emitted malformed or truncated textual tool calls; "
                             "no unvalidated fragment was executed. Retry this step with smaller, valid calls."
                         )
+                    malformed_issues = self._step_completion_issues(
+                        execution_id, step, response_text,
+                    )
+                    required_repair_tool = self._writer_incremental_repair_tool(
+                        execution_id, role_for_step, step, malformed_issues,
+                    )
+                    repair_nudge = self._writer_incremental_repair_nudge(
+                        execution_id, role_for_step, step, malformed_issues,
+                    )
+                    if required_repair_tool:
+                        runtime["required_next_tool"] = required_repair_tool
                     convo.messages.append({
                         "role": "system",
                         "content": (
                             "Your previous textual tool call was not executed because its JSON was malformed or truncated. "
                             "Do not repeat the same oversized payload. Emit only one complete valid tool-call JSON object with "
-                            "all closing quotes/braces. Keep source modules compact; split a large implementation into smaller "
-                            "cohesive files and write one complete file per call. For a large text artifact, write the first "
-                            "bounded section to its declared path, then append later sections to that same owned path with "
-                            "filesystem.append; do not create undeclared temporary part files."
+                            "all closing quotes/braces. Keep source modules compact and split a large implementation into smaller "
+                            "cohesive files. If a text artifact is absent, write only its first bounded section; if it already "
+                            "exists, preserve it and use append or a targeted paragraph replacement. Never overwrite an existing "
+                            "long document merely to recover from malformed JSON; do not create undeclared temporary part files."
+                            + repair_nudge
                         ),
                         "timestamp": time.time(),
                     })
@@ -3023,6 +3035,34 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
             if str(path or "").strip()
         }
 
+    @classmethod
+    def _active_document_artifacts(cls, state) -> set[str]:
+        """Return active required paths governed by the document validator."""
+        plan = state.current_plan if isinstance(state.current_plan, dict) else {}
+        document_paths = {
+            cls._normalized_workspace_path(item.get("path"))
+            for item in plan.get("artifact_validations", [])
+            if (
+                isinstance(item, dict)
+                and str(item.get("validator") or "").lower() == "document"
+                and str(item.get("path") or "").strip()
+            )
+        }
+        return cls._active_required_artifacts(state) & document_paths
+
+    @staticmethod
+    def _active_required_repair_tool(state) -> str:
+        """Read the transient tool constraint for the active plan step."""
+        plan = state.current_plan if isinstance(state.current_plan, dict) else {}
+        steps = plan.get("steps") if isinstance(plan.get("steps"), list) else []
+        index = int(state.current_step or 0)
+        if index < 0 or index >= len(steps) or not isinstance(steps[index], dict):
+            return ""
+        step_id = str(steps[index].get("id", index))
+        runtimes = state.variables.get("step_runtime")
+        runtime = runtimes.get(step_id) if isinstance(runtimes, dict) else None
+        return str(runtime.get("required_next_tool") or "") if isinstance(runtime, dict) else ""
+
     @staticmethod
     def _shell_requests_deletion(command: str) -> bool:
         return bool(re.search(
@@ -3060,6 +3100,7 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
         if is_mutation and path:
             lock_paths.append(path)
         protected_artifacts = self._active_required_artifacts(state)
+        protected_document_artifacts = self._active_document_artifacts(state)
         protected_targets = {
             target for target in lock_paths
             if self._normalized_workspace_path(target) in protected_artifacts
@@ -3084,6 +3125,38 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
                 + ", ".join(denied)
                 + ". Repair the declared artifact in place with filesystem.write or "
                 "filesystem.append; a required delivery may not be removed."
+            )
+        role = str(state.variables.get("role_key") or "coordinator").lower()
+        required_repair_tool = self._active_required_repair_tool(state)
+        normalized_path = self._normalized_workspace_path(path)
+        overwrites_existing_document = (
+            role == "writer"
+            and capability.lower() == "filesystem"
+            and action.lower() == "write"
+            and normalized_path in protected_document_artifacts
+            and self._artifact_exists(execution_id, path)
+            and required_repair_tool != "filesystem__write"
+        )
+        shell_mutates_document = (
+            role == "writer"
+            and capability.lower() == "shell"
+            and action.lower() == "execute"
+            and any(
+                self._normalized_workspace_path(target) in protected_document_artifacts
+                and self._artifact_exists(execution_id, target)
+                for target in shell_paths
+            )
+        )
+        if overwrites_existing_document or shell_mutates_document:
+            denied = sorted(protected_targets or ({path} if path else set(shell_paths)))
+            self.telemetry.record(
+                "required_document_overwrite_blocked", execution_id, paths=denied,
+            )
+            return (
+                "Error: Global overwrite blocked for existing required document artifact(s): "
+                + ", ".join(denied)
+                + ". Preserve valid content with filesystem.append or filesystem.replace_paragraph. "
+                "A full filesystem.write is allowed only when the automatic quality gate explicitly requires it."
             )
         empties_required_artifact = (
             capability.lower() == "filesystem"

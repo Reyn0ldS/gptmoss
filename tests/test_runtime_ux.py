@@ -605,6 +605,81 @@ async def test_active_required_artifact_cannot_be_deleted_by_its_writer(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_writer_cannot_globally_overwrite_existing_document_without_gate(tmp_path):
+    engine, state = _engine(tmp_path)
+    execution = state.get_execution("guarded-document")
+    execution.variables["role_key"] = "writer"
+    execution.current_plan = {
+        "steps": [{
+            "id": 0,
+            "role": "writer",
+            "required_artifacts": ["dossier.md"],
+            "owned_paths": ["dossier.md"],
+        }],
+        "artifact_validations": [{
+            "path": "dossier.md",
+            "validator": "document",
+            "constraints": {"minimums": {"words": 2}},
+        }],
+    }
+    execution.current_step = 0
+    project = tmp_path / "projects" / "proj-default"
+    project.mkdir(parents=True)
+    target = project / "dossier.md"
+    target.write_text("validated durable draft", encoding="utf-8")
+
+    blocked = await engine._call_tool(
+        "guarded-document", "filesystem", "write",
+        {"path": "dossier.md", "content": "short replacement"},
+    )
+    assert "Global overwrite blocked" in blocked
+    assert target.read_text(encoding="utf-8") == "validated durable draft"
+
+    execution.variables["step_runtime"] = {
+        "0": {"required_next_tool": "filesystem__write"},
+    }
+    allowed = await engine._call_tool(
+        "guarded-document", "filesystem", "write",
+        {"path": "dossier.md", "content": "gate-authorized replacement"},
+    )
+    assert "written successfully" in allowed
+    assert target.read_text(encoding="utf-8") == "gate-authorized replacement"
+
+
+@pytest.mark.asyncio
+async def test_writer_cannot_bypass_document_overwrite_guard_with_shell(tmp_path):
+    engine, state = _engine(tmp_path)
+    execution = state.get_execution("guarded-shell-document")
+    execution.variables["role_key"] = "writer"
+    execution.current_plan = {
+        "steps": [{
+            "id": 0,
+            "role": "writer",
+            "required_artifacts": ["dossier.md"],
+            "owned_paths": ["dossier.md"],
+        }],
+        "artifact_validations": [{
+            "path": "dossier.md", "validator": "document", "constraints": {},
+        }],
+    }
+    project = tmp_path / "projects" / "proj-default"
+    project.mkdir(parents=True)
+    target = project / "dossier.md"
+    target.write_text("validated durable draft", encoding="utf-8")
+    command = (
+        "Set-Content -LiteralPath dossier.md -Value replaced"
+        if sys.platform == "win32" else "printf replaced > dossier.md"
+    )
+
+    result = await engine._call_tool(
+        "guarded-shell-document", "shell", "execute", {"command": command},
+    )
+
+    assert "Global overwrite blocked" in result
+    assert target.read_text(encoding="utf-8") == "validated durable draft"
+
+
+@pytest.mark.asyncio
 async def test_shell_cannot_bypass_required_artifact_deletion_guard(tmp_path):
     engine, state = _engine(tmp_path)
     execution = state.get_execution("protected-shell-delivery")

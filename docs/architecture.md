@@ -78,6 +78,10 @@ Les doublons et les affirmations non sourcées utilisent plutôt
 `filesystem__replace_paragraph` : le validateur fournit un préfixe normalisé,
 l'outil remplace une seule occurrence et publie atomiquement le fichier. Chaque
 correction produit ainsi un progrès mesurable sans réécriture globale.
+La contrainte d'outil survit au rejet d'un appel textuel malformé. En complément,
+la couche de mutation refuse qu'un rédacteur écrase spontanément un document
+obligatoire existant, y compris par le shell ; `filesystem__write` n'est autorisé
+sur ce document que lorsqu'un gate global l'exige explicitement.
 La politique de mutation interdit également la suppression, directe ou via le
 shell, d'un artefact obligatoire de l'étape active, ainsi que son écrasement par
 un contenu vide. Une correction destructive doit employer une écriture contrôlée,

@@ -1371,3 +1371,92 @@ async def test_repeated_malformed_text_tool_calls_trip_safe_retry_circuit(tmp_pa
     assert execution.status == "failed"
     assert "repeatedly emitted malformed or truncated" in execution.results["error"]
     assert execution.variables.get("tool_call_history", []) == []
+
+
+@pytest.mark.asyncio
+async def test_malformed_writer_call_preserves_targeted_repair_constraint(tmp_path):
+    class CapturingProvider(MockLLMProvider):
+        def __init__(self):
+            super().__init__()
+            self.requests = []
+
+        async def completion(self, messages, **kwargs):
+            self.requests.append({
+                "messages": [dict(message) for message in messages],
+                "tools": kwargs.get("tools"),
+                "tool_choice": kwargs.get("tool_choice"),
+            })
+            return await super().completion(messages, **kwargs)
+
+    repeated = (
+        "This duplicated professional decision paragraph contains enough words "
+        "for a deterministic targeted repair without rebuilding the document."
+    )
+    llm = CapturingProvider()
+    delivery = json.dumps({
+        "summary": "repaired", "artifacts": ["report.md"],
+        "evidence": ["deterministic gate"], "risks": [], "next_action": "",
+    })
+    llm.add_response(content=delivery)
+    llm.add_response(content=(
+        '```json\n{"tool_call":{"name":"filesystem__replace_paragraph",'
+        '"arguments":{"path":"report.md","paragraph_prefix":"truncated\n```'
+    ))
+    llm.add_response(tool_calls=[{
+        "id": "repair", "type": "function",
+        "function": {
+            "name": "filesystem__replace_paragraph",
+            "arguments": {
+                "path": "report.md",
+                "paragraph_prefix": repeated,
+                "content": "",
+                "occurrence": 2,
+            },
+        },
+    }])
+    llm.add_response(content=delivery)
+    engine, state = _engine(tmp_path, llm, max_iterations=10)
+    execution = state.get_execution("malformed-writer-repair")
+    execution.variables.update({
+        "role_key": "writer", "role_name": "Writer", "specialist": "Writer",
+    })
+    execution.current_plan = {
+        "steps": [{
+            "id": 0, "role": "writer", "specialist": "Writer",
+            "description": "Repair a professional report", "dependencies": [],
+            "expertise": [], "required_artifacts": ["report.md"],
+            "acceptance_criteria": ["No duplicate paragraphs"],
+            "verification_commands": [], "owned_paths": ["report.md"],
+        }],
+        "artifact_validations": [{
+            "path": "report.md", "validator": "document", "required": True,
+            "constraints": {
+                "max_duplicate_paragraphs": 0,
+                "duplicate_min_words": 8,
+            },
+        }],
+    }
+    project = tmp_path / "projects" / "proj-default"
+    project.mkdir(parents=True)
+    target = project / "report.md"
+    target.write_text(
+        f"# Review\n\n{repeated}\n\n{repeated}\n", encoding="utf-8",
+    )
+
+    await engine.execute_task("malformed-writer-repair", "Repair the report")
+
+    assert execution.status == "completed"
+    assert target.read_text(encoding="utf-8").count(repeated) == 1
+    constrained = llm.requests[2]
+    tool_names = [
+        tool["function"]["name"] for tool in (constrained["tools"] or [])
+    ]
+    assert tool_names == ["filesystem__replace_paragraph"]
+    assert constrained["tool_choice"] == "required"
+    system_text = "\n".join(
+        str(message.get("content") or "")
+        for message in constrained["messages"]
+        if message.get("role") == "system"
+    )
+    assert "Never overwrite an existing long document" in system_text
+    assert "exactly one valid filesystem__replace_paragraph" in system_text
