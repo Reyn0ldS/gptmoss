@@ -350,10 +350,14 @@ def validate_document(path: Path, constraints: Dict[str, Any]) -> ValidationRepo
     counts = Counter(paragraph for paragraph in normalized_paragraphs if paragraph)
     duplicate_count = sum(count - 1 for count in counts.values() if count > 1)
     if "max_duplicate_paragraphs" in constraints and duplicate_count > max_duplicates:
+        duplicate_samples = [
+            paragraph[:120] for paragraph, count in counts.items() if count > 1
+        ]
         _failure(
             report,
             f"document contains {duplicate_count} duplicate paragraph occurrence(s); "
-            f"maximum is {max_duplicates}",
+            f"maximum is {max_duplicates}; repeated paragraph prefix(es): "
+            + "; ".join(duplicate_samples[:5]),
         )
 
     allowed_sources = {_normalize_source(source) for source in required_sources}
@@ -492,6 +496,9 @@ def validate_document(path: Path, constraints: Dict[str, Any]) -> ValidationRepo
         "required_sources_total": len(required_sources),
         "source_units_covered": source_units_covered,
         "source_units_total": source_units_total,
+        "empty_required_sections": len(empty_headings),
+        "invalid_local_references": len(invalid_references),
+        "uncited_required_sources": len(missing_sources),
     }
     report["metrics"] = metrics
     for metric, minimum in (constraints.get("minimums") or {}).items():

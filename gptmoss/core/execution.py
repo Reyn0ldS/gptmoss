@@ -516,6 +516,17 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
                         normalized["content"] = ExecutionRescueMixin._strip_code_fence(
                             "\n".join(content.strip().splitlines()[1:]), candidate,
                         )
+            if action.lower() == "replace_paragraph":
+                if "paragraph_prefix" not in normalized:
+                    for alias in ("prefix", "old_text", "match_text"):
+                        if normalized.get(alias):
+                            normalized["paragraph_prefix"] = normalized.pop(alias)
+                            break
+                if "content" not in normalized:
+                    for alias in ("new_text", "replacement", "text", "body"):
+                        if alias in normalized:
+                            normalized["content"] = normalized.pop(alias)
+                            break
         return normalized
 
     def _fake_dependency_packages(self, execution_id: str) -> List[str]:
@@ -679,15 +690,17 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
         issues: List[str],
     ) -> str:
         """Return the exact mutation required to repair a long writer delivery."""
+        targeted_markers = ("duplicate paragraph", "lack a local reference")
         replacement_markers = (
-            "duplicate paragraph", "invalid local reference", "external link",
-            "placeholder marker", "reasoning tag",
+            "invalid local reference", "external link", "placeholder marker",
+            "reasoning tag",
         )
         if role_key != "writer" or not any(
             marker in issue
             for issue in issues
             for marker in (
                 "words=", "empty required section", "lack a local reference",
+                *targeted_markers,
                 *replacement_markers,
             )
         ):
@@ -696,6 +709,8 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
         if not artifacts:
             return ""
         target = artifacts[0]
+        if any(marker in issue for issue in issues for marker in targeted_markers):
+            return "filesystem__replace_paragraph"
         if any(marker in issue for issue in issues for marker in replacement_markers):
             return "filesystem__write"
         exists = self._artifact_exists(execution_id, target)
@@ -716,6 +731,15 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
             return ""
         artifacts = [str(path).strip() for path in step.get("required_artifacts", []) if str(path).strip()]
         target = artifacts[0]
+        if action == "filesystem__replace_paragraph":
+            return (
+                f" Do not answer with a plan. Your next response must be exactly one valid "
+                f"{action} tool call targeting '{target}'. Use a paragraph prefix reported by "
+                "the gate. For a duplicate, remove occurrence=2 with empty content. For an "
+                "unsupported claim, replace occurrence=1 with one corrected, evidence-grounded "
+                "paragraph containing a valid nearby bounded local citation. Change exactly one "
+                "paragraph per iteration; never rewrite or delete the whole document."
+            )
         if action == "filesystem__append":
             continuity = (
                 "Preserve the existing valid content and append the next missing or underdeveloped section"
@@ -830,7 +854,9 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
             durable_mutation = any(
                 (
                     item.get("capability") == "filesystem"
-                    and item.get("action") in {"write", "delete"}
+                    and item.get("action") in {
+                        "write", "append", "replace_paragraph", "delete",
+                    }
                     and "Error" not in str(item.get("result") or "")
                 )
                 or (
@@ -2019,7 +2045,9 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
                     1 for item in failed_history
                     if (
                         item.get("capability") == "filesystem"
-                        and item.get("action") in {"write", "delete"}
+                        and item.get("action") in {
+                            "write", "append", "replace_paragraph", "delete",
+                        }
                         and "Error" not in str(item.get("result") or "")
                     )
                 )
@@ -2607,7 +2635,9 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
                     "and avoid repeating prerequisite sections. Treat the checkpoint and previous-section memory as the "
                     "canonical source of continuity. Build an oversized owned artifact with one filesystem.write call for "
                     "its first bounded section followed by filesystem.append calls for later sections; do not create undeclared "
-                    "temporary part files. Never invent a source, citation locator, diagram, metric, or validation result."
+                    "temporary part files. When a quality gate reports the normalized prefix of one duplicate or unsupported "
+                    "paragraph, repair only that occurrence with filesystem.replace_paragraph instead of rebuilding the artifact. "
+                    "Never invent a source, citation locator, diagram, metric, or validation result."
                 )
             else:
                 specialized_prompt = "Coordinate the current step and synthesize prerequisite results without repeating completed work."
@@ -3006,7 +3036,9 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
         state = self.state_engine.get_execution(execution_id)
         if state.status == "cancelled":
             raise asyncio.CancelledError()
-        is_mutation = capability.lower() == "filesystem" and action.lower() in {"write", "append", "delete"}
+        is_mutation = capability.lower() == "filesystem" and action.lower() in {
+            "write", "append", "replace_paragraph", "delete",
+        }
         path = str(arguments.get("path") or "")
         if is_mutation and not path.strip():
             return (

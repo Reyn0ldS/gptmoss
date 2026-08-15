@@ -59,7 +59,7 @@ planification et politique de leurs implémentations actuelles.
 
 | Capacité | Actions | Frontière principale |
 |---|---|---|
-| `filesystem` | `read`, `write`, `append`, `list_dir`, `delete` | Résolution dans le workspace de l'exécution ; écriture incrémentale des grands artefacts sur leur chemin déclaré ; sous-dossiers et suppression configurables. |
+| `filesystem` | `read`, `write`, `append`, `replace_paragraph`, `list_dir`, `delete` | Résolution dans le workspace de l'exécution ; écriture incrémentale et remplacement atomique d'un paragraphe ciblé sur son chemin déclaré ; sous-dossiers et suppression configurables. |
 | `documents` | `inventory`, `search`, `read`, `read_chunk`, `read_image`, `read_images` | Pièces explicitement jointes uniquement ; texte normalisé et images sélectionnées par lots multimodaux bornés. |
 
 Les quality gates pilotent aussi le protocole d'outils. Si un rédacteur doit
@@ -70,10 +70,14 @@ ce qui garantit un progrès durable sans figer le nombre d'itérations du plan.
 Quand le serveur compatible OpenAI utilise le protocole textuel de secours, le
 nom de l'unique outil obligatoire est répété dans le dernier message transmis ;
 il ne peut ainsi être masqué par un long historique de réparations.
-Un défaut qui exige de retirer du contenu (doublon, référence invalide, lien externe
+Un défaut global qui exige de retirer du contenu (référence invalide, lien externe
 ou placeholder) bascule explicitement vers une reconstruction incrémentale : un
 premier `filesystem__write` borné initialise la version propre, puis les tours
 suivants emploient `filesystem__append`.
+Les doublons et les affirmations non sourcées utilisent plutôt
+`filesystem__replace_paragraph` : le validateur fournit un préfixe normalisé,
+l'outil remplace une seule occurrence et publie atomiquement le fichier. Chaque
+correction produit ainsi un progrès mesurable sans réécriture globale.
 La politique de mutation interdit également la suppression, directe ou via le
 shell, d'un artefact obligatoire de l'étape active, ainsi que son écrasement par
 un contenu vide. Une correction destructive doit employer une écriture contrôlée,

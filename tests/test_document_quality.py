@@ -63,6 +63,29 @@ def test_unconfigured_markdown_validation_remains_format_only(tmp_path):
     assert report["metrics"]["duplicate_paragraphs"] == 1
 
 
+def test_duplicate_failure_exposes_machine_actionable_paragraph_prefix(tmp_path):
+    document = tmp_path / "duplicate.md"
+    paragraph = (
+        "This repeated architectural decision paragraph is long enough for the "
+        "quality validator to identify and repair deterministically."
+    )
+    document.write_text(
+        f"# Review\n\n{paragraph}\n\n{paragraph}\n",
+        encoding="utf-8",
+    )
+
+    report = validate_artifact(
+        document,
+        validator="document",
+        constraints={"max_duplicate_paragraphs": 0, "duplicate_min_words": 8},
+    )
+
+    assert not report["valid"]
+    failure = next(item for item in report["failures"] if "duplicate paragraph" in item)
+    assert "repeated paragraph prefix(es):" in failure
+    assert "this repeated architectural decision paragraph" in failure
+
+
 def test_document_validator_accepts_complete_local_traceable_content(tmp_path):
     document = tmp_path / "architecture.md"
     document.write_text(VALID_DOCUMENT, encoding="utf-8")

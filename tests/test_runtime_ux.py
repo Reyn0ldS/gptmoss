@@ -72,6 +72,83 @@ def test_progress_signature_reuses_digest_when_mtime_and_size_match(tmp_path, mo
     assert hashes["count"] == 2
 
 
+def test_verified_document_quality_progress_is_not_limited_by_edit_credits(tmp_path):
+    engine, state = _engine(tmp_path)
+    execution = state.get_execution("quality-progress")
+    repeated = (
+        "This repeated professional paragraph contains enough material words to "
+        "be detected reliably by the document quality validator."
+    )
+    execution.current_plan = {
+        "artifact_validations": [{
+            "path": "dossier.md",
+            "validator": "document",
+            "constraints": {
+                "max_duplicate_paragraphs": 0,
+                "duplicate_min_words": 8,
+            },
+        }],
+        "steps": [],
+    }
+    step = {"required_artifacts": ["dossier.md"]}
+    project = tmp_path / "projects" / "proj-default"
+    project.mkdir(parents=True)
+    target = project / "dossier.md"
+    target.write_text(f"# Review\n\n{repeated}\n\n{repeated}\n", encoding="utf-8")
+    before = engine._progress_signature("quality-progress", step)
+    execution.variables["quality_edit_credits"] = {"dossier.md": 2}
+
+    target.write_text(f"# Review\n\n{repeated}\n", encoding="utf-8")
+    after = engine._progress_signature("quality-progress", step)
+
+    improved, reason = engine._quality_improved(
+        "quality-progress", before, after,
+    )
+    assert improved is True
+    assert reason == "document_quality_improved"
+
+
+def test_quality_progress_cannot_hide_regression_in_another_artifact(tmp_path):
+    engine, state = _engine(tmp_path)
+    execution = state.get_execution("quality-regression")
+    repeated = (
+        "This repeated professional paragraph contains enough material words to "
+        "be detected reliably by the document quality validator."
+    )
+    constraints = {
+        "max_duplicate_paragraphs": 0,
+        "duplicate_min_words": 8,
+    }
+    execution.current_plan = {
+        "artifact_validations": [
+            {"path": "one.md", "validator": "document", "constraints": constraints},
+            {"path": "two.md", "validator": "document", "constraints": constraints},
+        ],
+        "steps": [],
+    }
+    step = {"required_artifacts": ["one.md", "two.md"]}
+    project = tmp_path / "projects" / "proj-default"
+    project.mkdir(parents=True)
+    one = project / "one.md"
+    two = project / "two.md"
+    one.write_text(f"# One\n\n{repeated}\n\n{repeated}\n", encoding="utf-8")
+    two.write_text(f"# Two\n\n{repeated}\n", encoding="utf-8")
+    before = engine._progress_signature("quality-regression", step)
+    execution.variables["quality_edit_credits"] = {"one.md": 2, "two.md": 2}
+
+    one.write_text(f"# One\n\n{repeated}\n", encoding="utf-8")
+    two.write_text(
+        f"# Two\n\n{repeated}\n\n{repeated}\n\n{repeated}\n",
+        encoding="utf-8",
+    )
+    after = engine._progress_signature("quality-regression", step)
+
+    assert engine._quality_improved("quality-regression", before, after) == (
+        False,
+        "no_quality_delta",
+    )
+
+
 def test_leading_subdirectory_cd_rewrites_python_to_portable_interpreter(tmp_path):
     project = tmp_path / "project"
     child = project / "child"
@@ -421,6 +498,80 @@ async def test_owned_long_artifact_can_be_built_with_bounded_append_calls(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_owned_document_paragraph_can_be_repaired_without_global_rewrite(tmp_path):
+    engine, state = _engine(tmp_path)
+    execution = state.get_execution("paragraph-repair")
+    execution.variables["delivery_contract"] = {
+        "steps": [{"step_id": 0, "role": "writer", "owned_paths": ["dossier.md"]}]
+    }
+    execution.variables["plan_step_id"] = 0
+    execution.variables["role_key"] = "writer"
+    repeated = (
+        "This material architectural paragraph is deliberately repeated so the "
+        "targeted repair can remove only its second occurrence safely."
+    )
+    project = tmp_path / "projects" / "proj-default"
+    project.mkdir(parents=True)
+    target = project / "dossier.md"
+    target.write_text(
+        f"# Decision\n\n{repeated}\n\n{repeated}\n\nFinal paragraph.\n",
+        encoding="utf-8",
+    )
+
+    removed = await engine._call_tool(
+        "paragraph-repair", "filesystem", "replace_paragraph",
+        {
+            "path": "dossier.md",
+            "paragraph_prefix": "this material architectural paragraph is deliberately repeated so the targeted repair",
+            "content": "",
+            "occurrence": 2,
+        },
+    )
+    corrected = (
+        "This material architectural paragraph now has a bounded local source "
+        "reference. [architecture.docx > blocks 2-3]"
+    )
+    replaced = await engine._call_tool(
+        "paragraph-repair", "filesystem", "replace_paragraph",
+        {
+            "path": "dossier.md",
+            "paragraph_prefix": "THIS material, architectural paragraph is deliberately repeated so the targeted repair!",
+            "content": corrected,
+        },
+    )
+
+    content = target.read_text(encoding="utf-8")
+    assert "occurrence 2 replaced successfully" in removed
+    assert "occurrence 1 replaced successfully" in replaced
+    assert repeated not in content
+    assert corrected in content
+    assert content.startswith("# Decision")
+    assert content.endswith("Final paragraph.\n")
+
+
+@pytest.mark.asyncio
+async def test_paragraph_repair_rejects_ambiguous_short_prefix(tmp_path):
+    engine, state = _engine(tmp_path)
+    state.get_execution("short-prefix")
+    project = tmp_path / "projects" / "proj-default"
+    project.mkdir(parents=True)
+    target = project / "dossier.md"
+    target.write_text("A paragraph that must remain intact.\n", encoding="utf-8")
+
+    result = await engine._call_tool(
+        "short-prefix", "filesystem", "replace_paragraph",
+        {
+            "path": "dossier.md",
+            "paragraph_prefix": "too short",
+            "content": "replacement",
+        },
+    )
+
+    assert "at least 24 normalized characters" in result
+    assert target.read_text(encoding="utf-8") == "A paragraph that must remain intact.\n"
+
+
+@pytest.mark.asyncio
 async def test_active_required_artifact_cannot_be_deleted_by_its_writer(tmp_path):
     engine, state = _engine(tmp_path)
     execution = state.get_execution("protected-delivery")
@@ -544,7 +695,7 @@ def test_writer_gate_can_constrain_the_next_turn_to_the_required_mutation(tmp_pa
     )
 
 
-def test_writer_duplicate_gate_requires_bounded_clean_rewrite(tmp_path):
+def test_writer_duplicate_gate_requires_one_targeted_paragraph_repair(tmp_path):
     engine, state = _engine(tmp_path)
     state.get_execution("writer-rewrite")
     project = tmp_path / "projects" / "proj-default"
@@ -560,10 +711,31 @@ def test_writer_duplicate_gate_requires_bounded_clean_rewrite(tmp_path):
         "writer-rewrite", "writer", step, issues,
     )
 
-    assert required == "filesystem__write"
-    assert "next response must be exactly one valid filesystem__write" in nudge
-    assert "first clean, complete section" in nudge
-    assert "remaining non-duplicated sections" in nudge
+    assert required == "filesystem__replace_paragraph"
+    assert "exactly one valid filesystem__replace_paragraph" in nudge
+    assert "remove occurrence=2" in nudge
+    assert "never rewrite or delete the whole document" in nudge
+
+
+def test_writer_unsupported_claim_gate_requires_cited_paragraph_repair(tmp_path):
+    engine, state = _engine(tmp_path)
+    state.get_execution("writer-citation-repair")
+    project = tmp_path / "projects" / "proj-default"
+    project.mkdir(parents=True)
+    (project / "dossier.md").write_text("unsupported", encoding="utf-8")
+    step = {"role": "writer", "required_artifacts": ["dossier.md"]}
+    issues = ["dossier.md: 4 material paragraph(s) lack a local reference: claim"]
+
+    required = engine._writer_incremental_repair_tool(
+        "writer-citation-repair", "writer", step, issues,
+    )
+    nudge = engine._writer_incremental_repair_nudge(
+        "writer-citation-repair", "writer", step, issues,
+    )
+
+    assert required == "filesystem__replace_paragraph"
+    assert "corrected, evidence-grounded paragraph" in nudge
+    assert "valid nearby bounded local citation" in nudge
 
 
 @pytest.mark.asyncio

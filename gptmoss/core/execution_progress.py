@@ -18,6 +18,87 @@ from gptmoss.core.execution_plan import (
 
 
 class ExecutionProgressMixin:
+    def _artifact_quality_defects(
+        self, execution_id: str, step: Dict[str, Any]
+    ) -> tuple:
+        """Return machine defects whose monotonic reduction proves real progress."""
+        state = self.state_engine.get_execution(execution_id)
+        specifications = {
+            str(item.get("path") or "").replace("\\", "/"): item
+            for item in (state.current_plan or {}).get("artifact_validations", [])
+            if isinstance(item, dict) and item.get("path")
+        }
+        filesystem = self.get_capability("filesystem")
+        if not filesystem or not hasattr(filesystem, "_resolve_path"):
+            return ()
+        defects = []
+        for raw_path in step.get("required_artifacts", []):
+            path = str(raw_path).replace("\\", "/")
+            specification = specifications.get(path)
+            if not specification or not self._artifact_exists(execution_id, path):
+                continue
+            constraints = dict(specification.get("constraints") or {})
+            try:
+                report = validate_artifact(
+                    filesystem._resolve_path(path, execution_id),
+                    validator=specification.get("validator"),
+                    constraints=constraints,
+                )
+            except (OSError, PermissionError, TypeError, ValueError):
+                continue
+            metrics = report.get("metrics") or {}
+            minimums = constraints.get("minimums") or {}
+            if not isinstance(minimums, dict):
+                minimums = {}
+
+            def deficit(name: str, actual_name: str | None = None) -> int:
+                required = max(0, int(minimums.get(name) or 0))
+                actual = max(0, int(metrics.get(actual_name or name) or 0))
+                return max(0, required - actual)
+
+            defect_vector = (
+                max(0, int(metrics.get("empty_required_sections") or 0)),
+                max(0, int(metrics.get("invalid_local_references") or 0)),
+                max(0, int(metrics.get("uncited_required_sources") or 0)),
+                max(
+                    0,
+                    int(metrics.get("duplicate_paragraphs") or 0)
+                    - int(constraints.get("max_duplicate_paragraphs") or 0),
+                ),
+                max(0, int(metrics.get("unsupported_claim_paragraphs") or 0)),
+                max(0, int(metrics.get("placeholder_markers") or 0)),
+                (
+                    max(0, int(metrics.get("external_links") or 0))
+                    if constraints.get("forbid_external_links") else 0
+                ),
+                max(
+                    0,
+                    int(metrics.get("required_headings_total") or 0)
+                    - int(metrics.get("required_headings_covered") or 0),
+                ),
+                max(
+                    0,
+                    int(metrics.get("requirement_ids_total") or 0)
+                    - int(metrics.get("requirement_ids_covered") or 0),
+                ),
+                max(
+                    0,
+                    int(metrics.get("traceability_ids_total") or 0)
+                    - int(metrics.get("traceability_ids_covered") or 0),
+                ),
+                max(
+                    0,
+                    int(metrics.get("required_sources_total") or 0)
+                    - int(metrics.get("required_sources_cited") or 0),
+                ),
+                deficit("words"),
+                deficit("local_references"),
+                deficit("cited_sources"),
+                deficit("headings"),
+            )
+            defects.append((path, defect_vector))
+        return tuple(sorted(defects))
+
     def _artifact_exists(self, execution_id: str, path: str) -> bool:
         filesystem = self.get_capability("filesystem")
         if not filesystem or not hasattr(filesystem, "_resolve_path"):
@@ -396,6 +477,7 @@ class ExecutionProgressMixin:
             tuple(sorted(self._missing_artifacts(execution_id, step))),
             latest_failure_count,
             tuple(sorted(source_coverage)),
+            self._artifact_quality_defects(execution_id, step),
         )
 
     def _quality_improved(self, execution_id: str, previous: tuple, current: tuple) -> tuple[bool, str]:
@@ -418,6 +500,31 @@ class ExecutionProgressMixin:
         current_sources = set(current[4]) if len(current) > 4 else set()
         if current_sources - previous_sources:
             return True, "new_source_coverage"
+        previous_quality = dict(previous[5]) if len(previous) > 5 else {}
+        current_quality = dict(current[5]) if len(current) > 5 else {}
+        if previous_quality and previous_quality.keys() == current_quality.keys():
+            before = tuple(
+                value
+                for path in sorted(previous_quality)
+                for value in previous_quality[path]
+            )
+            after = tuple(
+                value
+                for path in sorted(current_quality)
+                for value in current_quality[path]
+            )
+            if (
+                len(before) == len(after)
+                and all(
+                    current_value <= previous_value
+                    for previous_value, current_value in zip(before, after)
+                )
+                and any(
+                    current_value < previous_value
+                    for previous_value, current_value in zip(before, after)
+                )
+            ):
+                return True, "document_quality_improved"
 
         changed = sorted(
             path for path in set(previous_files) & set(current_files)
