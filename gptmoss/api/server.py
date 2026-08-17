@@ -1542,6 +1542,7 @@ async def get_settings():
         config = _load_runtime_config()
         config.pop("api_key", None)
         config.setdefault("max_step_iterations", 30)
+        config.setdefault("ssl_verify", True)
         config.setdefault("vision_mode", "auto")
         config.setdefault("max_step_retries", 2)
         config.setdefault("max_parallel_plan_steps", 0)
@@ -1613,15 +1614,15 @@ async def get_settings():
         "max_context_chars": getattr(app_state.execution_engine.context_engine, "max_history_chars", 12_000),
         "context_window_tokens": getattr(llm, "context_window_tokens", 0),
         "context_output_reserve_tokens": getattr(llm, "context_output_reserve_tokens", 8_192),
-        "max_upload_bytes": getattr(_artifact_store(), "max_bytes", 0),
-        "max_attachment_text_chars": getattr(_artifact_store(), "max_text_chars", 0),
+        "max_upload_bytes": getattr(_artifact_store(), "max_bytes", DEFAULT_MAX_UPLOAD_BYTES) or DEFAULT_MAX_UPLOAD_BYTES,
+        "max_attachment_text_chars": getattr(_artifact_store(), "max_text_chars", DEFAULT_MAX_ATTACHMENT_TEXT_CHARS) or DEFAULT_MAX_ATTACHMENT_TEXT_CHARS,
         "max_transitions_per_execution": getattr(
             app_state.state_engine, "max_transitions_per_execution",
             DEFAULT_MAX_TRANSITIONS_PER_EXECUTION,
         ),
-        "safe_shell_mode": True,
+        "safe_shell_mode": bool(getattr(app_state.execution_engine.get_capability("shell"), "safe_mode", True)),
         "shell_timeout_seconds": getattr(app_state.execution_engine.get_capability("shell"), "timeout_seconds", 0),
-        "shell_max_output_chars": getattr(app_state.execution_engine.get_capability("shell"), "max_output_chars", 12_000),
+        "shell_max_output_chars": getattr(app_state.execution_engine.get_capability("shell"), "max_output_chars", 12_000) or 12_000,
         "default_skills": []
     }
 

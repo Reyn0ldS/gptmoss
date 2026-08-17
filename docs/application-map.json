@@ -254,12 +254,12 @@
     "shell_timeout_seconds",
     "shell_max_output_chars",
     "default_skills",
-    "projects"
-    ,"document_engine_enabled"
-    ,"document_checkpoint_enabled"
-    ,"document_target_section_words"
-    ,"diagram_rendering"
-    ,"docx_embed_diagrams"
+    "projects",
+    "document_engine_enabled",
+    "document_checkpoint_enabled",
+    "document_target_section_words",
+    "diagram_rendering",
+    "docx_embed_diagrams"
   ],
   "gui_surfaces": [
     {
@@ -272,7 +272,7 @@
     },
     {
       "id": "execution-observation",
-      "evidence": ["setupWebSocket", "/ws/events", "/unified-feed", "fetchExecutionDetails", "/document", "appendLlmStream", "applyConversationScroll", "switchPlanView", "plan-graph"]
+      "evidence": ["setupWebSocket", "/ws/events", "/unified-feed", "fetchExecutionDetails", "/document", "appendLlmStream", "applyConversationScroll", "switchPlanView", "plan-graph", "document-progress"]
     },
     {
       "id": "library",
@@ -300,7 +300,8 @@
     ["workspace/agents", "persistent specialist profiles"],
     ["workspace/skills", "user and generated skills"],
     ["workspace/evolution/events.jsonl", "skill evolution history"],
-    ["<project>/.gptmoss/deliveries/<execution_id>", "professional delivery package"]
+    ["<project>/.gptmoss/deliveries/<execution_id>", "professional delivery package"],
+    ["<project>/.gptmoss/document-state/<execution_id>.document.json", "long-document section checkpoints"]
   ],
   "features": [
     {
@@ -389,6 +390,7 @@
     "docs/coverage-matrix.md",
     "docs/offline-package-manifest.md",
     "docs/symbol-relations.md",
-    "docs/architecture-remediation.md"
+    "docs/architecture-remediation.md",
+    "docs/local-document-workflow.md"
   ]
 }

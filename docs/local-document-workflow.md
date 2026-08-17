@@ -4,7 +4,7 @@ Ce guide explique comment utiliser GPTMOSS pour analyser un corpus local, rédig
 
 ## Périmètre
 
-Formats prioritaires pris en charge sans dépendance documentaire externe :
+Formats pris en charge localement :
 
 | Format | Type de contenu API | Structure conservée |
 |---|---|---|
@@ -14,14 +14,15 @@ Formats prioritaires pris en charge sans dépendance documentaire externe :
 | Markdown | `text/markdown` | titres, paragraphes, listes, tableaux et blocs de code |
 | HTML local | `text/html` | titre, titres, texte, listes, tableaux, code et citations, sans script ni chargement de ressource |
 | JSON et CSV | `application/json`, `text/csv` | contenu textuel normalisé |
+| PDF texte | `application/pdf` | texte par page via `pypdf` ; les pages sans texte sont signalées. Pas d'OCR. |
 
-Le PDF, l'OCR et la conversion graphique haute fidélité ne font pas partie de ce workflow. Ils pourront être ajoutés plus tard comme adaptateurs optionnels. Un fichier DOCX ou PPTX n'est pas rendu comme dans Office : GPTMOSS en extrait la structure utile au raisonnement.
+Un fichier DOCX ou PPTX n'est pas rendu comme dans Office : GPTMOSS en extrait la structure utile au raisonnement. La conversion graphique haute fidélité n'est pas promise.
 
 ## Garanties locales et sécurité
 
 Le workflow reçoit uniquement des fichiers téléversés ou déjà présents dans le workspace autorisé. Il ne consulte pas les liens trouvés dans un HTML, un DOCX ou un PPTX, ne charge pas les images distantes et n'exécute pas les scripts intégrés. Une URL fournie à la place d'un chemin local est refusée.
 
-Les fichiers OOXML sont inspectés comme des archives : traversée de chemin, chiffrement, membre anormalement volumineux, volume décompressé excessif et ratio de compression dangereux sont refusés. Ces limites de sécurité restent actives même lorsque les budgets fonctionnels valent `0`.
+Les fichiers OOXML sont inspectés comme des archives : traversée de chemin, chiffrement, membre anormalement volumineux, volume décompressé excessif et ratio de compression dangereux sont refusés. Ces limites de sécurité restent actives indépendamment des plafonds `max_upload_bytes` et `max_attachment_text_chars` (entiers `≥ 1`).
 
 Les fichiers, représentations normalisées, index et rapports restent sous le workspace local. Seuls les extraits sélectionnés sont envoyés au serveur de modèle configuré. Pour qu'aucun contenu ne quitte la machine, utilisez un serveur de modèle local ou hébergé dans le réseau isolé de l'organisation.
 
@@ -273,13 +274,14 @@ python scripts/validate_document.py --help
 
 # Tests des parseurs, de la recherche, des agents et du validateur
 python -m pytest -q tests/test_documents.py tests/test_corpus.py `
-  tests/test_document_capability.py tests/test_document_quality.py
+  tests/test_document_capability.py tests/test_document_quality.py `
+  tests/test_long_document_engine.py tests/test_diagrams_and_docx.py
 
 # Suite complète GPTMOSS
 python -m pytest -q
 ```
 
-Le workflow n'ajoute aucune dépendance Python : DOCX et PPTX sont lus avec XML et ZIP de la bibliothèque standard. Le SHA-256 de `requirements-runtime.txt` dans `offline-runtime-manifest.json` ne change donc pas pour cette fonction. Les tests du paquet vérifient néanmoins que le Python portable versionné exécute le point d'entrée documentaire.
+DOCX et PPTX sont lus avec XML et ZIP de la bibliothèque standard. Le texte PDF utilise `pypdf`, déjà épinglé dans `requirements-runtime.txt` et le runtime portable. Les tests du paquet vérifient que le Python portable versionné exécute le point d'entrée documentaire.
 
 ## Diagnostic
 
@@ -304,4 +306,4 @@ Le workflow n'ajoute aucune dépendance Python : DOCX et PPTX sont lus avec XML 
 - le contrôle des affirmations sans source est heuristique et configurable ; la revue humaine reste nécessaire pour une décision critique ;
 - la validité structurelle et la traçabilité ne prouvent pas à elles seules la justesse métier de chaque décision.
 
-Le plan d'intégration, les phases validées et les critères globaux de fin sont suivis dans [document-workflow-plan.md](document-workflow-plan.md).
+Le contrat vivant est ce guide, [architecture.md](architecture.md) et [delivery-graph.md](delivery-graph.md). [document-workflow-plan.md](document-workflow-plan.md) est un journal historique, plus le tracker d'intégration.

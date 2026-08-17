@@ -144,6 +144,7 @@ La configuration active est `workspace/config.json`. Au démarrage, GPTMOSS la n
   "api_key": "votre-cle-api",
   "base_url": "https://votre-serveur/v1",
   "model_name": "votre-modele",
+  "vision_mode": "auto",
   "ssl_verify": true,
   "ssl_cert_path": "",
   "denied_capabilities": [],
@@ -173,6 +174,7 @@ La configuration active est `workspace/config.json`. Au démarrage, GPTMOSS la n
   "max_transitions_per_execution": 2000,
   "max_step_iterations": 30,
   "max_step_retries": 2,
+  "max_parallel_plan_steps": 0,
   "safe_shell_mode": true,
   "shell_timeout_seconds": 0,
   "shell_max_output_chars": 12000,
@@ -193,6 +195,7 @@ La configuration active est `workspace/config.json`. Au démarrage, GPTMOSS la n
 | `api_key` | Jeton transmis à l'API LLM. | Le définir dans une configuration locale, jamais dans Git. |
 | `base_url` | Racine compatible OpenAI, habituellement terminée par `/v1`. | L'URL de votre fournisseur. |
 | `model_name` | Nom exact du modèle de chat. | Celui exposé par votre fournisseur. |
+| `vision_mode` | `auto` active la vision si le nom contient `vision`, `-vl`, `omni` ou `multimodal`. `enabled` / `disabled` forcent le flag local, sans interroger le serveur. | `auto`, ou `enabled` si le backend voit les images mais que le nom ne porte aucun marqueur. |
 | `ssl_verify` | Vérification TLS. | `true`. |
 | `ssl_cert_path` | Chemin d'un certificat d'autorité personnalisé. | Vide, sauf PKI interne. |
 | `denied_capabilities` | Capacités ou actions interdites. | Par ex. `['shell']` ou `['filesystem.delete']`. |
@@ -219,29 +222,37 @@ La configuration active est `workspace/config.json`. Au démarrage, GPTMOSS la n
 | `max_transitions_per_execution` | Historique chronologique conservé par exécution ; les plus anciennes transitions sont élaguées. | `2000`. |
 | `max_step_iterations` | Budget de base de stagnation. En mode adaptatif il grandit avec le contrat ; tout progrès réel permet de continuer. | `30`, sans plafond fixe. |
 | `max_step_retries` | Base de reprises autonomes, augmentée selon la taille du contrat en mode adaptatif. | `2`, sans plafond fixe. |
+| `max_parallel_plan_steps` | Nombre d'étapes simultanées. `0` choisit une vague prudente ; le total du DAG n'est pas limité. | `0`. |
+| `document_engine_enabled` | Active le moteur de rédaction longue section par section. | `true`. |
+| `document_checkpoint_enabled` | Conserve des points de reprise documentaires atomiques. | `true`. |
+| `document_target_section_words` | Objectif de mots par section (80–20000). | `450`. |
+| `diagram_rendering` | Valide et rend les diagrammes déclaratifs en SVG. | `true`. |
+| `docx_embed_diagrams` | Intègre les diagrammes rendus dans le paquet DOCX. | `true`. |
 | `projects` | Projets proposés dans l'interface. | Voir ci-dessous. |
 | `safe_shell_mode` | Active le blocage des commandes destructrices connues. | `true`. |
 | `shell_timeout_seconds` | Délai explicite ; `0` sélectionne automatiquement un budget selon test, build, installation ou commande générale. | `0`. |
 | `shell_max_output_chars` | Taille cumulée stdout/stderr renvoyée au modèle ; le processus écrit d’abord dans des fichiers temporaires afin de borner la RAM. | `12000`. |
 | `default_skills` | Skills appliqués par défaut. | `[]` pour la sélection automatique. |
 
-Les variables d'environnement `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `OPENAI_MODEL_NAME` et `DASHSCOPE_API_KEY` servent de valeurs de secours quand le champ équivalent n'est pas renseigné. `main.py` charge `.env` au démarrage.
+Les variables d'environnement `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `OPENAI_MODEL_NAME` et `DASHSCOPE_API_KEY` servent de valeurs de secours quand le champ équivalent n'est pas renseigné. `main.py` charge `.env` au démarrage. `config.json.template` est le preset copié à l'installation (fournisseur et modèle de votre site). Les défauts Pydantic de `RuntimeSettings` (`dashscope` / `qwen-turbo`) ne s'appliquent que si aucun fichier de configuration n'existe encore.
+
+`0` est légal seulement pour `max_delegation_depth`, `max_autonomous_skills_per_execution`, `max_parallel_plan_steps`, `context_window_tokens` et `shell_timeout_seconds`. `max_upload_bytes`, `max_attachment_text_chars` et `shell_max_output_chars` exigent un entier `≥ 1`.
 
 ## Moteur de documents longs et diagrammes
 
-GPTMOSS n'ajoute aucun modÃ¨le IA pour les documents volumineux : Qwen reste le
-seul rÃ©dacteur. Le moteur interne dÃ©coupe la mission en contrats de sections,
-conserve la mÃ©moire de terminologie et de dÃ©cisions, puis consolide les sections
-validÃ©es. Le nombre d'Ã©tapes est estimÃ© selon les sources, livrables, objectifs
-de mots, exigences de preuve et diagrammes.
+GPTMOSS n'ajoute aucun modèle IA pour les documents volumineux : le fournisseur
+configuré reste le seul rédacteur. Le moteur interne découpe la mission en contrats
+de sections, conserve la mémoire de terminologie et de décisions, puis consolide
+les sections validées. Le nombre d'étapes est estimé selon les sources, livrables,
+objectifs de mots, exigences de preuve et diagrammes.
 
-Les checkpoints JSON atomiques sont placÃ©s sous
+Les checkpoints JSON atomiques sont placés sous
 `.gptmoss/document-state/<execution>.document.json`. L'endpoint
 `GET /executions/{execution_id}/document` et le panneau **Document long format**
 affichent l'avancement et permettent la reprise. Les tableaux Markdown deviennent
 de vrais tableaux DOCX ; les blocs `mermaid` ou `diagram` valides sont rendus en
-SVG et intÃ©grÃ©s dans `word/media/`. Une figure invalide est explicitement
-signalÃ©e, jamais remplacÃ©e par une image trompeuse.
+SVG et intégrés dans `word/media/`. Une figure invalide est explicitement
+signalée, jamais remplacée par une image trompeuse.
 
 Options dédiées : `document_engine_enabled`, `document_checkpoint_enabled`,
 `document_target_section_words`, `diagram_rendering` et `docx_embed_diagrams`.
@@ -281,12 +292,12 @@ L'interface Web contient les réglages, organisés en panneaux Modèle, Sécurit
 Invoke-RestMethod http://127.0.0.1:8000/api/settings
 ```
 
-`POST /api/settings` attend tous les champs de configuration. La clé peut être laissée vide pour conserver la clé déjà chargée, mais évitez de journaliser sa valeur. Les changements de fournisseur, de politique et de répertoire sont appliqués sans redémarrage ; redémarrez toutefois le service si vous voulez une configuration simple et reproductible.
+`POST /api/settings` accepte le modèle `RuntimeSettings` (champs omis = défauts Pydantic). La GUI envoie l'ensemble des champs visibles, y compris `max_transitions_per_execution`. La clé peut être laissée vide pour conserver la clé déjà chargée, mais évitez de journaliser sa valeur. Les changements de fournisseur, de politique et de répertoire sont appliqués sans redémarrage ; redémarrez toutefois le service si vous voulez une configuration simple et reproductible.
 
 ### Configurer GPTMOSS depuis la GUI
 
 1. Ouvrez <http://127.0.0.1:8000> puis cliquez sur **Paramètres** dans le bas de la barre latérale.
-2. Utilisez les boutons **Modèle**, **Sécurité shell**, **Skills** et **Projets** pour atteindre le panneau concerné.
+2. Utilisez les boutons **Modèle**, **Exécution et sécurité**, **Documents**, **Skills** et **Projets** pour atteindre le panneau concerné. Les budgets de contexte, de stagnation et le moteur documentaire sont dans **Exécution et sécurité** / **Documents**, pas seulement sous Modèle.
 3. Modifiez les valeurs, puis cliquez sur **Enregistrer**. Les valeurs sont appliquées au runtime et enregistrées dans `workspace/config.json`.
 4. Si vous changez le dossier de travail, vérifiez les projets et les droits avant de soumettre une nouvelle tâche. Un redémarrage est conseillé après ce changement pour repartir d'un état simple.
 
@@ -297,7 +308,7 @@ Invoke-RestMethod http://127.0.0.1:8000/api/settings
 | Adresse API | URL compatible OpenAI du fournisseur. | Inclure `/v1` si le fournisseur l’exige. |
 | Clé API | Secret du fournisseur. Le champ reste vide à la réouverture pour ne pas l’exposer. | Laisser vide si la clé actuelle doit être conservée. |
 | Modèle par défaut | Modèle utilisé pour les nouvelles étapes. | Utiliser le nom exact fourni par l’API. |
-| Capacité vision | `auto` détecte les modèles vision/omni/VL ; les modes forcés reflètent la capacité réelle du serveur. | `auto`, puis vérifier le diagnostic. |
+| Capacité vision | `auto` active la vision si le nom du modèle contient `vision`, `-vl`, `omni` ou `multimodal`. `enabled` / `disabled` forcent le flag local sans interroger le serveur. | `auto`, ou `enabled` si Diagnostics affiche encore `vision: false` alors que le backend lit les images. |
 | Vérifier le certificat SSL | Active la validation TLS ; le chemin de certificat apparaît si nécessaire. | Laisser activé. |
 | Budget d'historique | Plancher adaptatif de conversation ; il reste subordonné à la fenêtre totale du modèle. | 12 000 est un bon départ. |
 | Fenêtre totale du modèle | `0` sélectionne automatiquement une enveloppe prudente et apprend une limite exacte après un refus du backend. | `0`, ou la valeur contractuelle du serveur. |
@@ -307,13 +318,13 @@ Invoke-RestMethod http://127.0.0.1:8000/api/settings
 | Budget sans progrès | Nombre de tours consécutifs sans modification durable ni nouvelle preuve avant reprise ou échec. | 20 à 40 ; ce n'est pas une durée maximale. |
 | Reprises autonomes | Nombre de nouveaux spécialistes chargés de reprendre les artefacts et preuves d'une tentative échouée. | 2 est un bon départ. |
 
-#### Panneau Sécurité shell
+#### Panneau Exécution et sécurité
 
 | Réglage GUI | Effet | Recommandation |
 |---|---|---|
 | Mode shell sécurisé | Bloque des motifs de commandes destructrices connus. | Toujours activé. |
 | Délai shell | Valeur explicite sans plafond fixe ; `0` applique un budget automatique adapté au type de commande. | `0`. |
-| Sortie shell maximale | Valeur explicite sans plafond fixe ; `0` conserve toute la sortie. | 12 000, ou `0`. |
+| Sortie shell maximale | Taille cumulée stdout/stderr renvoyée au modèle. Minimum 1 ; `0` est refusé. | `12000`. |
 | Validation humaine | Demande une confirmation avant les capacités cochées. | Conserver `shell` et le quality gate. |
 | Capacités interdites | Refuse la capacité, même si le modèle la demande. | Bloquer `filesystem` ou `shell` pour un agent d’analyse seule. |
 | Restriction du workspace | Empêche les accès hors du dossier de travail. | Toujours activée. |
@@ -410,7 +421,11 @@ Routes principales :
 | Méthode et route | Action |
 |---|---|
 | `GET /executions` | Liste des exécutions. |
-| `GET /executions/{id}` | État, plan, variables et conversation. |
+| `GET /` | Console HTML. |
+| `GET /health` | Santé du processus. |
+| `GET /readiness` | Prêt à accepter du travail. |
+| `GET /api/runtime-control` | Découverte du superviseur local. |
+| `GET /executions/{id}` | État, plan, conversation et variables **publiques** (allowlist, pas tout `state.variables`). |
 | `GET /executions/{id}/unified-feed` | Fil des messages, sous-agents compris. |
 | `GET /executions/{id}/metrics` | Compteurs et durées de télémétrie. |
 | `GET /executions/{id}/delivery` | Métadonnées ou téléchargement ZIP du paquet professionnel assuré. |
@@ -441,10 +456,12 @@ Routes principales :
 | `DELETE /corpora/{id}` | Retire le manifeste du corpus sans effacer les preuves déjà utilisées. |
 | `GET` / `POST /memory` | Filtre par projet, portée et type, ou crée une proposition de mémoire. |
 | `PUT /memory/{id}` | Modifie valeur, provenance, validation et expiration. |
+| `POST /memory/{id}/validate` | Valide une entrée de mémoire. |
+| `DELETE /memory/{id}` | Supprime une entrée de mémoire. |
 | `GET /api/diagnostics` | Capacités, compatibilité vision, métriques, traces et erreurs. |
 | `GET /api/audit` | Journal local expurgé des changements de réglages. |
 | `GET` / `POST /api/settings` | Lit ou modifie les réglages. |
-| `POST /api/settings/test-connection` | Teste réellement l'endpoint OpenAI-compatible `/models`. |
+| `POST /api/settings/test-connection` | Teste le catalogue `/models` puis une complétion minimale `/chat/completions`. |
 | `POST /api/settings/reveal-secret` | Révèle temporairement la clé, uniquement en local et après confirmation. |
 
 ### Contrôler une exécution
@@ -522,6 +539,7 @@ Les tâches de rédaction professionnelle activent le profil `professional-local
 | `pending` | Créée, pas encore exécutée. |
 | `running` | En planification ou exécution. |
 | `paused` | Pause manuelle ou attente d'approbation. |
+| `waiting_provider` | Fournisseur LLM temporairement indisponible ; reprise planifiée. |
 | `completed` | Toutes les étapes sont terminées. |
 | `failed` | Une étape a échoué. |
 | `cancelled` | Annulée par l'utilisateur ou le parent. |
@@ -533,7 +551,8 @@ Une règle de politique peut viser une capacité entière (`shell`) ou une actio
 | Capacité | Actions | Utilisation et limites |
 |---|---|---|
 | `filesystem` | `read`, `write`, `append`, `replace_paragraph`, `list_dir`, `delete` | Les chemins sont résolus par rapport au projet de l'exécution. `write` écrase un fichier existant ; `append` construit un grand artefact autorisé par ajouts bornés ; `replace_paragraph` corrige atomiquement une occurrence ciblée sans reconstruire le document ; `delete` ne supprime un dossier que s'il est vide. |
-| `shell` | `execute` | Lance une commande dans le projet. Avec un délai à `0`, le runtime choisit un budget par catégorie ; une sortie maximale à `0` est conservée entièrement. `python` utilise l'interpréteur courant, y compris dans les pipelines Windows. |
+| `shell` | `execute` | Lance une commande dans le projet. Avec un délai à `0`, le runtime choisit un budget par catégorie (120 s par défaut, 900 s tests/build, 1800 s installation). `shell_max_output_chars` est un entier `≥ 1` (défaut 12000). `python` utilise l'interpréteur courant, y compris dans les pipelines Windows. |
+| `memory` | `search`, `propose` | Recherche les souvenirs validés du projet ; une proposition reste non validée. |
 | `agent` | `spawn`, `status`, `execute_subtask` | Crée ou suit une sous-tâche. La délégation imbriquée accepte une tâche nouvelle ; la répétition d’une tâche ancêtre est bloquée. |
 | `devteam` | `build_project`, `approve_quality_gate` | Pipeline de développement avec les mêmes règles de délégation et d’approbation. |
 | `documents` | `inventory`, `search`, `read`, `read_chunk`, `read_image`, `read_images` | Pagine et lit avec provenance uniquement les documents/images explicitement joints ; les images sont chargées par lots multimodaux bornés. Aucun lien distant n'est suivi. |
@@ -652,7 +671,7 @@ Le nombre total d'étapes n'est pas plafonné par un quota de complexité : le p
 
 | Élément | Fichier | Comportement |
 |---|---|---|
-| État et conversations | `state_store.json` | Exécutions, plans et messages persistants. |
+| État et conversations | index `state_store.json` + sidecars | Persistance v3 : index atomique et générations immuables par exécution/conversation. |
 | Mémoire persistante | `memories.json` | Entrées indexées avec provenance, date, durée de vie et validation. |
 | Mémoire de session | mémoire du processus | Non persistée ; propre à la session. |
 | Télémétrie | `telemetry.jsonl` | Événements horodatés et données assainies. |
@@ -682,8 +701,8 @@ La mémoire durable est typée (`fact`, `decision`, `preference`, `constraint`, 
 | L'outil n'est pas appelé | Vérifier la politique, les skills sélectionnés et la compatibilité tool-calling du modèle. GPTMOSS normalise les balises textuelles `<tool_call>` de Qwen et utilise un repli par prompt si l'appel natif échoue. |
 | Exécution bloquée en pause | Lire l'état puis appeler `/approve` ou `/reject` si une approbation est en attente ; sinon `/resume`. |
 | Accès fichier refusé | Le chemin sort du workspace, contient une traversée ou les sous-dossiers sont désactivés. Utiliser un chemin relatif au projet. |
-| Commande shell expirée | Simplifier la commande ou la découper ; la limite par défaut est 60 secondes. |
-| Image non analysée | Choisir un modèle vision dont le nom contient `vision`, `-vl` ou `omni`, ou fournir une transcription texte. |
+| Commande shell expirée | Simplifier ou découper la commande. `shell_timeout_seconds=0` choisit 120 s (général), 900 s (tests/build) ou 1800 s (installation). |
+| Image non analysée | Vérifier Diagnostics (`vision: true`). En `auto`, le nom doit contenir `vision`, `-vl`, `omni` ou `multimodal`. Sinon passer `vision_mode` à `enabled`, ou fournir une transcription. |
 | Skill absent | Vérifier le nom, le frontmatter, l'encodage UTF-8 et redémarrer le serveur. |
 | `No module named venv` | Utiliser la dernière version complète du dépôt, qui contient le runtime préparé `python-3.13.14-embed-amd64`. Ne pas le remplacer par une archive embeddable nue. Le mode portable n'utilise pas `venv`. |
 | Dépendances absentes sur la machine hors-ligne | Le runtime n'a pas été transféré complètement. Reprendre le paquet autonome depuis Git ou exécuter `prepare-offline-source.bat` sur la machine connectée avant de transférer tout le dossier. |
@@ -777,7 +796,7 @@ Dans **Paramètres > Modèle** :
 
 1. le champ de clé reste vide à la réouverture ; vide signifie « conserver le secret chargé » ;
 2. **Afficher 15 s** demande une confirmation, fonctionne uniquement depuis la machine locale, interdit la mise en cache HTTP et journalise l'action sans la valeur ;
-3. **Tester la connexion** avertit avant d'envoyer la clé au `base_url`, appelle réellement `<base_url>/models`, contrôle le statut HTTP et indique si le modèle configuré est listé ;
+3. **Tester la connexion** avertit avant d'envoyer la clé au `base_url`, appelle réellement `<base_url>/models` puis une complétion minimale `/chat/completions`, et indique si le modèle configuré est listé ;
 4. **Enregistrer** présente d'abord la liste des champs modifiés sans afficher le secret ;
 5. si TLS, la restriction workspace, le shell sûr ou la validation humaine du shell sont affaiblis, il faut saisir exactement `CONFIRMER`.
 

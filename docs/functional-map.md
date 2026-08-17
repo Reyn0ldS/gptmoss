@@ -123,7 +123,7 @@ exécution empêche deux boucles simultanées.
    explicite et auditable.
 4. `POST /artifacts` décode et stocke un fichier isolé avec un nom sûr.
 5. La signature effective détermine le parseur, pas seulement l'extension annoncée.
-6. TXT/Markdown/CSV/JSON/XML/HTML, DOCX, PPTX et PDF sont normalisés en blocs avec
+6. TXT/Markdown/CSV/JSON/HTML, DOCX, PPTX et PDF texte sont normalisés en blocs avec
    provenance ; les archives sont soumises aux limites de taille et de ratio.
 7. L'index documentaire est reconstruit/synchronisé puis devient interrogeable.
 8. L'exécution ne voit que les artefacts explicitement attachés. La capacité `documents`
@@ -131,6 +131,9 @@ exécution empêche deux boucles simultanées.
    lots bornés via `read_image`/`read_images`.
 9. Les citations internes se fondent sur les identifiants, fichiers et positions locales ;
    aucune preuve Internet n'est fabriquée pour un mode corpus local.
+10. Une rédaction longue initialise un checkpoint sous `.gptmoss/document-state`.
+    `GET /executions/{id}/document` et le panneau **Document long format** exposent
+    l'avancement. Les blocs `mermaid`/`diagram` valides deviennent un SVG intégré au DOCX.
 
 Un upload invalide renvoie une erreur client ; une indisponibilité de stockage renvoie un
 diagnostic temporaire. Les écritures utilisent des chemins compatibles UNC et un nom de

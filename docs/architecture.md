@@ -45,8 +45,8 @@ pas un ordonnanceur distribué ni une implémentation de cron.
 | Domaines projet | `core/domains.py` | Catégories génériques et extensions de marqueurs propres à chaque projet, sans hypothèse métier globale. |
 | Contexte et mémoire | `core/context.py`, `memory/json_store.py`, `capabilities/memory.py` | Contexte borné et mémoire gouvernée par projet, validation, provenance, TTL, déduplication et supersession. |
 | Capacités | `capabilities/*` | Actions outillées exposées au modèle et contrôlées par la politique. |
-| Documents | `core/documents.py`, `core/artifacts.py`, `core/corpus_policy.py`, `capabilities/documents.py` | Détection sûre, manifestes de corpus par dossier, politique locale en lecture seule, déduplication SHA-256, normalisation, indexation, inventaire, recherche et lecture locale des pièces jointes. |
-| Qualité et livraison | `core/delivery.py`, `core/delivery_feedback.py`, `core/evidence_graph.py`, `document_quality.py`, `professional_delivery.py`, `delivery_package.py` | Contrat gelé, classification des défauts, réouverture du propriétaire d'obligation, graphe de preuves borné, réparations et paquet professionnel DOCX/ZIP signé par empreintes. |
+| Documents | `core/documents.py`, `core/artifacts.py`, `core/corpus_policy.py`, `core/document_model.py`, `core/document_planning.py`, `core/long_document_engine.py`, `capabilities/documents.py` | Détection sûre, corpus par dossier, politique locale, SHA-256, indexation, inventaire, lecture, moteur de sections longues et checkpoints `.gptmoss/document-state`. |
+| Qualité et livraison | `core/delivery.py`, `core/delivery_feedback.py`, `core/evidence_graph.py`, `core/document_quality.py`, `core/professional_delivery.py`, `core/delivery_package.py`, `core/diagrams/model.py`, `core/diagrams/renderer.py`, `core/diagrams/validator.py` | Contrat gelé, classification des défauts, graphe de preuves, diagrammes SVG, paquet DOCX/ZIP signé. |
 | Évolution | `core/skills.py`, `core/evolution.py` | Découverte de procédures, profils de spécialistes et évolution locale traçable. |
 | Configuration | `core/settings.py` | Contrat Pydantic unique partagé par bootstrap, API, GUI et tests ; valeurs sûres et limites strictes. |
 | Persistance | `core/state.py`, `core/durable_io.py`, `core/observability.py` | Index `state_store.json` plus sidecars par exécution/conversation, migration/quarantaine, historique borné et télémétrie locale. |
@@ -80,6 +80,10 @@ local dans la colonne plan, sans script distant.
 |---|---|---|
 | `filesystem` | `read`, `write`, `append`, `replace_paragraph`, `list_dir`, `delete` | Résolution dans le workspace de l'exécution ; écriture incrémentale et remplacement atomique d'un paragraphe ciblé sur son chemin déclaré ; sous-dossiers et suppression configurables. |
 | `documents` | `inventory`, `search`, `read`, `read_chunk`, `read_image`, `read_images` | Pièces explicitement jointes uniquement ; texte normalisé et images sélectionnées par lots multimodaux bornés. |
+| `memory` | `search`, `propose` | Lecture validée du projet ; une proposition agent reste non validée et non globale. |
+| `shell` | `execute` | Répertoire du projet, blocage destructif, timeout, sortie bornée et approbation selon politique. |
+| `agent` | `spawn`, `status`, `execute_subtask` | Lignée et profondeur de délégation, refus des cycles exacts. |
+| `devteam` | `approve_quality_gate`, `build_project` | Pipeline logiciel spécialisé et gate humain avant livraison. |
 
 Les quality gates pilotent aussi le protocole d'outils. Si un rédacteur doit
 réparer un document long déjà créé, l'itération suivante ne reçoit que le schéma
@@ -105,10 +109,6 @@ La politique de mutation interdit également la suppression, directe ou via le
 shell, d'un artefact obligatoire de l'étape active, ainsi que son écrasement par
 un contenu vide. Une correction destructive doit employer une écriture contrôlée,
 afin qu'un livrable ne disparaisse jamais entre deux passages des quality gates.
-| `memory` | `search`, `propose` | Lecture validée du projet ; une proposition agent reste non validée et non globale. |
-| `shell` | `execute` | Répertoire du projet, blocage destructif, timeout, sortie bornée et approbation selon politique. |
-| `agent` | `spawn`, `status`, `execute_subtask` | Lignée et profondeur de délégation, refus des cycles exacts. |
-| `devteam` | `approve_quality_gate`, `build_project` | Pipeline logiciel spécialisé et gate humain avant livraison. |
 
 Le décorateur de chaque capacité constitue la source de vérité. Le validateur compare
 automatiquement noms et actions au manifeste.

@@ -31,7 +31,13 @@ def test_documentation_describes_current_local_document_contract():
     assert "Uploads are limited to 10 MiB" not in skills
     assert "PDF and DOCX extraction deliberately remains" not in skills
     assert "ne consulte pas les liens" in guide
-    assert "aucune dépendance Python" in guide
+    assert "pypdf" in guide
+    assert "read_image" in combined
+    assert "0 conserve toute la sortie" not in readme
+    requirements = (ROOT / "requirements-runtime.txt").read_text(encoding="utf-8").lower()
+    assert "pypdf==" in requirements
+    assert "python-docx" not in requirements
+    assert "python-pptx" not in requirements
 
 
 def test_document_workflow_does_not_invalidate_offline_runtime_manifest():
