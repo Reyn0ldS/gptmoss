@@ -90,6 +90,113 @@ async def test_local_openai_compatible_tool_call_round_trip():
     assert provider.client.max_retries == 0
 
 
+@pytest.mark.asyncio
+async def test_native_tool_request_without_call_demotes_to_prompt_protocol():
+    provider = QwenProvider(
+        api_key="local-key",
+        base_url="http://127.0.0.1:9/v1",
+        default_model="local-model",
+    )
+    native_requests = []
+    fallback_requests = []
+
+    async def native_response(arguments, **_kwargs):
+        native_requests.append(arguments)
+        return {
+            "content": "I need to call filesystem__write next.",
+            "tool_calls": None,
+            "usage": {"prompt_tokens": 5, "completion_tokens": 7, "total_tokens": 12},
+        }
+
+    async def prompt_response(messages, tools, model, **_kwargs):
+        fallback_requests.append((messages, tools, model))
+        return {
+            "content": None,
+            "tool_calls": [{
+                "id": "prompt-write",
+                "type": "function",
+                "function": {
+                    "name": "filesystem__write",
+                    "arguments": {"path": "report.md", "content": "verified"},
+                },
+            }],
+            "usage": {"prompt_tokens": 8, "completion_tokens": 4, "total_tokens": 12},
+        }
+
+    provider._create_with_context_recovery = native_response
+    provider._prompt_based_tool_calling = prompt_response
+    tools = [{
+        "type": "function",
+        "function": {
+            "name": "filesystem__write",
+            "description": "Write a file",
+            "parameters": {"type": "object"},
+        },
+    }]
+    try:
+        first = await provider.completion(
+            messages=[{"role": "user", "content": "Write the report"}],
+            tools=tools,
+        )
+        second = await provider.completion(
+            messages=[{"role": "user", "content": "Use the tool now"}],
+            tools=tools,
+        )
+    finally:
+        await provider.close()
+
+    assert first["content"].startswith("I need to call")
+    assert provider._native_tools_supported is False
+    assert len(native_requests) == 1
+    assert len(fallback_requests) == 1
+    assert second["tool_calls"][0]["function"]["name"] == "filesystem__write"
+
+
+@pytest.mark.asyncio
+async def test_prompt_tool_protocol_makes_required_choice_explicit():
+    provider = QwenProvider(
+        api_key="local-key",
+        base_url="http://127.0.0.1:9/v1",
+        default_model="local-model",
+    )
+    captured = {}
+
+    async def prompt_response(arguments, **_kwargs):
+        captured.update(arguments)
+        return {
+            "content": '{"tool_call":{"name":"filesystem__append","arguments":{"path":"report.md","content":"chunk"}}}',
+            "tool_calls": None,
+            "usage": {"prompt_tokens": 8, "completion_tokens": 4, "total_tokens": 12},
+        }
+
+    provider._native_tools_supported = False
+    provider._create_with_context_recovery = prompt_response
+    tools = [{
+        "type": "function",
+        "function": {
+            "name": "filesystem__append",
+            "description": "Append text",
+            "parameters": {"type": "object"},
+        },
+    }]
+    try:
+        response = await provider.completion(
+            messages=[{"role": "user", "content": "Continue the report"}],
+            tools=tools,
+            tool_choice="required",
+        )
+    finally:
+        await provider.close()
+
+    system_prompt = captured["messages"][0]["content"]
+    final_prompt = captured["messages"][-1]["content"]
+    assert "A tool call is REQUIRED for this turn" in system_prompt
+    assert "Call filesystem__append now" in final_prompt
+    assert "entire response must be the single JSON" in final_prompt
+    assert "Do not explain, plan, inspect" in final_prompt
+    assert response["tool_calls"][0]["function"]["name"] == "filesystem__append"
+
+
 def test_qwen_textual_tool_calls_are_normalized_and_deterministic():
     xml_content = """<tool_call>
 <function=filesystem__write>

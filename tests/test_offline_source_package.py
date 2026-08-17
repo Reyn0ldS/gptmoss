@@ -62,6 +62,103 @@ def test_archive_extraction_rejects_parent_traversal(tmp_path):
     assert not (tmp_path / "outside.txt").exists()
 
 
+def test_dependency_install_uses_short_same_volume_temp_and_disables_bytecode(
+    tmp_path, monkeypatch
+):
+    build_root = tmp_path / ".gptmoss-offline-build"
+    site_packages = (
+        build_root / "python-3.13.14-embed-amd64" / "Lib" / "site-packages"
+    )
+    site_packages.mkdir(parents=True)
+    calls = []
+
+    def record(command, **kwargs):
+        calls.append((command, kwargs))
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(builder.subprocess, "run", record)
+    spec = builder.runtime_spec(builder.DEFAULT_VERSION, None, None)
+
+    builder.install_target_dependencies(spec, site_packages)
+
+    assert len(calls) == 2
+    command, options = calls[1]
+    assert "--no-compile" in command
+    assert command[command.index("--target") + 1] == str(site_packages)
+    environment = options["env"]
+    pip_temp = Path(environment["TEMP"])
+    assert pip_temp.parent == build_root
+    assert environment["TMP"] == environment["TEMP"]
+    assert environment["TMPDIR"] == environment["TEMP"]
+    assert environment["PYTHONDONTWRITEBYTECODE"] == "1"
+    assert environment["PIP_NO_COMPILE"] == "1"
+    assert options["check"] is True
+    assert not pip_temp.exists(), "pip temporary directory must be removed after install"
+
+
+def test_dependency_install_removes_same_volume_temp_after_pip_failure(
+    tmp_path, monkeypatch
+):
+    build_root = tmp_path / "build"
+    site_packages = build_root / "runtime" / "Lib" / "site-packages"
+    site_packages.mkdir(parents=True)
+    recorded_temp = None
+    calls = 0
+
+    def fail_install(command, **kwargs):
+        nonlocal calls, recorded_temp
+        calls += 1
+        if calls == 1:
+            return subprocess.CompletedProcess(command, 0)
+        recorded_temp = Path(kwargs["env"]["TEMP"])
+        assert recorded_temp.is_dir()
+        raise subprocess.CalledProcessError(2, command)
+
+    monkeypatch.setattr(builder.subprocess, "run", fail_install)
+    spec = builder.runtime_spec(builder.DEFAULT_VERSION, None, None)
+
+    with pytest.raises(subprocess.CalledProcessError):
+        builder.install_target_dependencies(spec, site_packages)
+
+    assert recorded_temp is not None
+    assert not recorded_temp.exists()
+
+
+def test_builder_selects_a_short_writable_parent_on_the_project_volume(
+    tmp_path, monkeypatch
+):
+    project = tmp_path / "very" / "deep" / "project"
+    project.mkdir(parents=True)
+    too_long = tmp_path / ("x" * 85)
+    short = tmp_path / "b"
+    monkeypatch.setattr(builder, "MAX_SAFE_BUILD_ROOT_CHARS", len(str(short.resolve())) + 2)
+
+    selected = builder.same_volume_build_parent(
+        project,
+        candidates=[too_long, short],
+    )
+
+    assert selected == short.resolve()
+    assert selected.anchor == project.resolve().anchor
+    assert not too_long.exists()
+    selected.rmdir()
+
+
+def test_builder_fails_with_actionable_diagnostic_without_short_parent(
+    tmp_path, monkeypatch
+):
+    project = tmp_path / "project"
+    project.mkdir()
+    denied = tmp_path / "denied"
+
+    def reject_mkdir(self, *args, **kwargs):
+        raise PermissionError("denied by test")
+
+    monkeypatch.setattr(Path, "mkdir", reject_mkdir)
+    with pytest.raises(RuntimeError, match="Enable Windows long paths"):
+        builder.same_volume_build_parent(project, candidates=[denied])
+
+
 def test_committed_runtime_matches_manifest():
     manifest = json.loads((PROJECT_ROOT / "offline-runtime-manifest.json").read_text(encoding="utf-8"))
     runtime = PROJECT_ROOT / manifest["runtime_directory"]

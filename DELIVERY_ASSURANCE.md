@@ -12,12 +12,29 @@ Le coordinateur fige dans `variables.delivery_contract` :
 - la matrice exigence → implémentation → validation indépendante ;
 - les changements de périmètre proposés ;
 - les chemins possédés par chaque spécialiste ;
-- les interfaces publiques, commandes de vérification et commandes de lancement.
+- les interfaces publiques, commandes de vérification et commandes de lancement ;
+- les obligations sémantiques (`plan_obligations`) : inventaire source, implémentation,
+  validation indépendante, réparation autonome et audit final, selon la mission réelle.
+  Le nombre d'étapes n'est pas un quota.
+- la politique locale `corpus_policy`, distincte du texte utilisateur : sources en lecture
+  seule, preuves locales, couverture des blocs/images, citations, contradictions et erreurs ;
+- les contrats d'étape `operation`, `satisfies_obligations` et `required_evidence`, ainsi
+  que leur ordre causal dans le DAG.
 
 Les plans anciens sans ces champs sont enrichis de façon déterministe et hors
 ligne. Les nouveaux plans doivent déclarer `requirements`, `scope_changes`,
 `interfaces`, `launch_commands`, puis `requirement_ids` et `owned_paths` dans
-chaque étape.
+chaque étape. Un plan incomplet est enrichi uniquement avec les portes manquantes ; le
+fallback n'est accepté qu'après la même validation que le plan du fournisseur.
+
+La présence d'un mot-clé n'est pas une preuve. La validation exige notamment que la
+rédaction dépende de l'inventaire, que le QA dépende d'un producteur distinct, que la
+réparation suive le QA et que l'audit final soit en aval des travaux obligatoires. Les
+artefacts déclarés doivent exister et les corpus contenant des documents ou images
+doivent présenter des appels `documents.read`/`read_image` dans l'historique agrégé.
+De même, analyser une API, une GUI ou une architecture classe correctement la mission
+dans le domaine logiciel sans créer une obligation d'implémentation : celle-ci exige une
+demande explicite de modification d'une cible logicielle.
 
 ## Réduction de périmètre
 
@@ -50,7 +67,9 @@ Une modification de contenu ne renouvelle plus indéfiniment le budget d'une
 - au maximum deux modifications préparatoires par fichier sans autre progrès.
 
 Après stagnation, un nouveau spécialiste reçoit les erreurs machines et reprend
-le workspace existant.
+le workspace existant. Un audit indépendant classifie le défaut : couverture
+source, paragraphe documentaire ou intégration logicielle. Il rouvre ensuite
+l'étape propriétaire de l'obligation, plus seulement le dernier debugger.
 
 Une reprise manuelle d'une exécution principale en échec remet à zéro uniquement
 le runtime de l'étape défaillante. Elle conserve le plan, les artefacts, les preuves
@@ -72,10 +91,15 @@ Avant `completed`, GPTMOSS évalue lui-même :
 7. l'exécution réelle des commandes de lancement CLI/API prévues.
 
 Le rapport est disponible dans `results.delivery_assurance` et dans l'interface.
-S'il échoue, le dernier réparateur est rouvert avec le rapport exact, puis
-l'auditeur final est rejoué. Les lots déjà validés ne sont pas relancés. Après
+S'il échoue, `delivery_feedback` classifie le défaut et rouvre le propriétaire
+de l'obligation (inventaire, rédacteur, debugger) avec le rapport exact, puis
+l'auditeur final est rejoué. Le dernier debugger reste seulement le repli si
+aucune cible n'est classée. Les lots déjà validés ne sont pas relancés. Après
 épuisement des reprises, le projet passe à `failed` au lieu de produire une
 fausse réussite.
+
+`plan.edges` documente le rôle de chaque dépendance. `GET /executions/{id}/evidence-graph`
+projette les preuves corpus en un graphe borné, distinct de l'historique d'outils.
 
 Le coordinateur évalue les commandes obligatoires à partir de son historique et
 de celui de tous ses sous-agents. Une validation QA exacte et réussie reste donc
@@ -112,6 +136,6 @@ industrielle) :
 python scripts/run_delivery_benchmarks.py
 ```
 
-Il échoue si un plan complexe est sous-dimensionné, réutilise trop de profils
-génériques, oublie la réparation autonome ou l'auditeur final, laisse une
+Il échoue si un plan complexe omet une obligation de livraison, réutilise trop de
+profils génériques, oublie la réparation autonome ou l'auditeur final, laisse une
 exigence sans implémentation/validation, ou crée un artefact sans propriétaire.

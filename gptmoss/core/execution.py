@@ -9,6 +9,7 @@ import os
 import re
 import shlex
 import sys
+from contextlib import AsyncExitStack
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 from gptmoss.core.event_bus import Event, EventBus
@@ -30,6 +31,14 @@ from gptmoss.core.delivery import (
     path_is_owned,
 )
 from gptmoss.core.adaptive import AdaptiveRuntimePolicy, tool_call_fingerprint
+from gptmoss.core.delivery_feedback import (
+    classify_assurance_report,
+    classify_issue_texts,
+    select_reopen_step,
+    steps_to_reopen,
+)
+from gptmoss.core.plan_obligations import attach_plan_obligations
+from gptmoss.core.corpus_policy import normalize_corpus_policy
 from gptmoss.core.professional_delivery import apply_professional_profile
 from gptmoss.core.delivery_package import build_delivery_package
 from gptmoss.core.delivery_coordinator import DeliveryCoordinator
@@ -41,223 +50,26 @@ from gptmoss.core.provider_recovery import (
 )
 from gptmoss.core.scheduler import Scheduler
 from gptmoss.core.long_document_engine import LongDocumentEngine
+from gptmoss.core.execution_plan import (
+    ROLE_ALIASES,
+    ROLE_DISPLAY_NAMES,
+    canonical_step_role,
+    infer_step_role,
+    merge_inherited_requirements,
+    normalize_plan,
+    parse_step_role,
+    requirement_validation_commands,
+    requirements_for_delegation,
+    requirements_request_mutation,
+)
+from gptmoss.core.execution_progress import ExecutionProgressMixin
+from gptmoss.core.execution_rescue import ExecutionRescueMixin
+from gptmoss.core.workload import (
+    build_workload_profile,
+    compile_work_graph,
+    partition_attachment_ids,
+)
 
-ROLE_DISPLAY_NAMES = {
-    "architect": "Architecte",
-    "security": "Analyste Sécurité",
-    "developer": "Développeur",
-    "qa": "Testeur QA",
-    "debugger": "Débugueur",
-    "writer": "Rédacteur Technique",
-    "coordinator": "Coordinateur",
-}
-
-ROLE_ALIASES = {
-    "architect": "architect", "architecte": "architect", "analyst": "architect", "analyste": "architect",
-    "security": "security", "sécurité": "security", "reviewer": "security", "analyste sécurité": "security",
-    "developer": "developer", "développeur": "developer", "coder": "developer", "codeur": "developer",
-    "qa": "qa", "tester": "qa", "testeur": "qa", "testeur qa": "qa",
-    "debugger": "debugger", "debug": "debugger", "débugueur": "debugger", "bug fixer": "debugger",
-    "writer": "writer", "rédacteur": "writer", "rédacteur technique": "writer", "documentation": "writer",
-    "coordinator": "coordinator", "coordinateur": "coordinator", "summary": "coordinator",
-}
-
-def canonical_step_role(value: Any) -> Optional[str]:
-    if value is None:
-        return None
-    return ROLE_ALIASES.get(str(value).strip().lower())
-
-def infer_step_role(description: str) -> Optional[str]:
-    desc_lower = str(description or "").lower()
-    # Debugger descriptions commonly contain "tests"; match them before QA.
-    if any(marker in desc_lower for marker in ("debug", "bug fixer", "débug", "corriger les erreurs")):
-        return "debugger"
-    if any(marker in desc_lower for marker in ("architect", "architecte", "technical specification", "spécification technique")):
-        return "architect"
-    if any(marker in desc_lower for marker in ("security", "sécurité", "compliance reviewer", "revue de conformité")):
-        return "security"
-    if any(marker in desc_lower for marker in ("qa", "tester", "testeur", "testing engineer", "unit tests")):
-        return "qa"
-    if any(marker in desc_lower for marker in ("developer", "coder", "développeur", "codeur")):
-        return "developer"
-    if any(marker in desc_lower for marker in ("technical writer", "writer", "rédacteur", "documentation")):
-        return "writer"
-    return None
-
-def parse_step_role(description: str) -> Optional[str]:
-    role = infer_step_role(description)
-    return ROLE_DISPLAY_NAMES.get(role) if role else None
-
-def normalize_plan(plan: Dict[str, Any]) -> Dict[str, Any]:
-    """Validate a planner response and normalize its stable execution contract."""
-    if not isinstance(plan, dict) or not isinstance(plan.get("steps"), list):
-        raise ValueError("A plan must contain a list of steps.")
-    steps = plan["steps"]
-    identifiers = []
-    identifier_keys = set()
-    for index, step in enumerate(steps):
-        if not isinstance(step, dict):
-            raise ValueError(f"Plan step {index} must be an object.")
-        step_id = step.get("id", index)
-        identifier_key = str(step_id)
-        if (
-            isinstance(step_id, bool) or not isinstance(step_id, (int, str))
-            or identifier_key in identifier_keys
-        ):
-            raise ValueError(f"Plan step {index} has an invalid or duplicate id.")
-        identifiers.append(step_id)
-        identifier_keys.add(identifier_key)
-        step["id"] = step_id
-        step["description"] = str(step.get("description") or "").strip()
-        if not step["description"]:
-            raise ValueError(f"Plan step {step_id} has no description.")
-        dependencies = step.get("dependencies") or []
-        if (
-            not isinstance(dependencies, list)
-            or any(isinstance(dep, bool) or not isinstance(dep, (int, str)) for dep in dependencies)
-            or len(set(map(str, dependencies))) != len(dependencies)
-        ):
-            raise ValueError(f"Plan step {step_id} has invalid dependencies.")
-        step["dependencies"] = dependencies
-        requested_role = step.get("role")
-        role = canonical_step_role(requested_role) if requested_role is not None else infer_step_role(step["description"])
-        if requested_role is not None and not role:
-            raise ValueError(f"Plan step {step_id} has unsupported role '{requested_role}'.")
-        if role:
-            step["role"] = role
-        specialist = str(step.get("specialist") or "").strip()
-        if specialist:
-            if len(specialist) > 160:
-                raise ValueError(f"Plan step {step_id} has an excessively long specialist title.")
-            step["specialist"] = specialist
-        for field in (
-            "expertise", "required_artifacts", "acceptance_criteria",
-            "verification_commands", "requirement_ids", "owned_paths",
-        ):
-            values = step.get(field) or []
-            if not isinstance(values, list) or any(not isinstance(value, str) for value in values):
-                raise ValueError(f"Plan step {step_id} has an invalid {field} list.")
-            step[field] = [value.strip() for value in values if value.strip()]
-        step["status"] = step.get("status", "pending")
-
-    identifier_set = set(identifiers)
-    for step in steps:
-        if step["id"] in step["dependencies"] or any(dep not in identifier_set for dep in step["dependencies"]):
-            raise ValueError(f"Plan step {step['id']} references an invalid dependency.")
-
-    completed = set()
-    while len(completed) < len(steps):
-        ready = [step["id"] for step in steps if step["id"] not in completed and set(step["dependencies"]) <= completed]
-        if not ready:
-            raise ValueError("Plan contains cyclical dependencies.")
-        completed.update(ready)
-    return plan
-
-
-def merge_inherited_requirements(
-    plan: Dict[str, Any], inherited: Any
-) -> Dict[str, Any]:
-    """Keep parent requirement identifiers valid in delegated child plans."""
-    if not isinstance(inherited, list) or not inherited:
-        return plan
-    requirements = plan.get("requirements")
-    if not isinstance(requirements, list):
-        requirements = []
-    else:
-        requirements = list(requirements)
-    known = {
-        str(item.get("id"))
-        for item in requirements
-        if isinstance(item, dict) and item.get("id")
-    }
-    requirements.extend(
-        dict(item) for item in inherited
-        if isinstance(item, dict) and item.get("id") and str(item["id"]) not in known
-    )
-    plan["requirements"] = requirements
-    return plan
-
-
-def requirements_for_delegation(
-    parent_requirements: Any, requirement_ids: Any
-) -> List[Dict[str, Any]]:
-    """Select complete requirement records, never bare identifiers, for a specialist."""
-    if not isinstance(parent_requirements, list):
-        return []
-    requirements = [
-        dict(requirement) for requirement in parent_requirements
-        if isinstance(requirement, dict) and requirement.get("id")
-    ]
-    selected_ids = {
-        str(requirement_id) for requirement_id in (requirement_ids or [])
-        if str(requirement_id).strip()
-    }
-    if selected_ids:
-        return [
-            requirement for requirement in requirements
-            if str(requirement.get("id")) in selected_ids
-        ]
-    return [
-        requirement for requirement in requirements
-        if requirement.get("mandatory", True)
-    ]
-
-
-def requirement_validation_commands(requirements: Any) -> List[str]:
-    """Extract explicit machine-validation commands quoted in requirement text."""
-    if not isinstance(requirements, list):
-        return []
-    commands = []
-    validation_pattern = re.compile(
-        r"(?i)(?:\bpytest\b|\bunittest\b|\bcompileall\b|"
-        r"\bnpm\s+(?:run\s+)?test\b|\bcargo\s+test\b|\bgo\s+test\b|"
-        r"\bdotnet\s+test\b|\bmvn(?:\.cmd)?\s+test\b|"
-        r"\bgradle(?:w)?\s+test\b|\bruff\s+check\b|\bmypy\b|\btsc\b)"
-    )
-    delimiter = chr(96)
-    quoted_command = re.compile(
-        re.escape(delimiter) + r"([^" + re.escape(delimiter) + r"\r\n]+)"
-        + re.escape(delimiter)
-    )
-    for requirement in requirements:
-        if not isinstance(requirement, dict):
-            continue
-        texts = [str(requirement.get("statement") or "")]
-        acceptance = requirement.get("acceptance")
-        if isinstance(acceptance, list):
-            texts.extend(str(item) for item in acceptance)
-        for text in texts:
-            for candidate in quoted_command.findall(text):
-                command = candidate.strip()
-                if validation_pattern.search(command) and command not in commands:
-                    commands.append(command)
-    return commands
-
-
-def requirements_request_mutation(requirements: Any) -> bool:
-    """Return whether the assignment explicitly asks for a durable edit."""
-    if not isinstance(requirements, list):
-        return False
-    explicit_filesystem_edit = re.compile(
-        r"(?i)\buse\s+(?:the\s+)?filesystem\s+(?:write|edit)\b"
-    )
-    direct_file_edit = re.compile(
-        r"(?i)^\s*(?:please\s+)?(?:edit|modify|write|create|fix|repair|update|"
-        r"delete|remove)\b[^\r\n]*(?:[A-Za-z0-9_.-]+[\\/])+[A-Za-z0-9_.-]+"
-    )
-    for requirement in requirements:
-        if not isinstance(requirement, dict):
-            continue
-        texts = [str(requirement.get("statement") or "")]
-        acceptance = requirement.get("acceptance")
-        if isinstance(acceptance, list):
-            texts.extend(str(item) for item in acceptance)
-        if any(
-            explicit_filesystem_edit.search(text) or direct_file_edit.search(text)
-            for text in texts
-        ):
-            return True
-    return False
 
 
 logger = logging.getLogger("gptmoss.execution")
@@ -283,7 +95,7 @@ class ProviderConfigurationError(RuntimeError):
         self.original_error = original_error
 
 
-class ExecutionEngine:
+class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
     """
     Execution Engine handles the execution loop of tasks step-by-step.
     Orchestrates LLM calls, capability execution, policy checks, and human approval flows.
@@ -302,6 +114,7 @@ class ExecutionEngine:
         default_skills: Optional[List[str]] = None,
         max_step_iterations: int = 30,
         max_step_retries: int = 2,
+        max_parallel_plan_steps: int = 0,
         continue_while_progress: bool = True,
         agent_profile_registry: Optional[AgentProfileRegistry] = None,
         skill_lifecycle: Optional[AutonomousSkillLifecycle] = None,
@@ -329,6 +142,7 @@ class ExecutionEngine:
         self.default_skills = [str(skill).lower() for skill in (default_skills or [])]
         self.max_step_iterations = max(1, int(max_step_iterations))
         self.max_step_retries = max(0, int(max_step_retries))
+        self.max_parallel_plan_steps = max(0, int(max_parallel_plan_steps))
         self.continue_while_progress = bool(continue_while_progress)
         self.adaptive_resource_management = bool(adaptive_resource_management)
         self.strict_skill_capabilities = bool(strict_skill_capabilities)
@@ -349,17 +163,19 @@ class ExecutionEngine:
         self.autonomous_specialization = bool(autonomous_specialization)
         self._capabilities: Dict[str, Any] = {}  # capability_name -> instance
         self._execution_locks: Dict[str, asyncio.Lock] = {}
+        self._active_execution_tasks: Dict[str, asyncio.Task] = {}
         self._path_locks: Dict[str, asyncio.Lock] = {}
+        self._progress_file_digest_cache: Dict[str, tuple] = {}
         self.scheduler = scheduler or Scheduler()
         self.provider_recovery = ProviderRecoveryCoordinator(
             event_bus, state_engine, llm_provider,
-            lambda execution_id, task: self.execute_task(execution_id, task),
+            self.start_execution,
             self.max_step_iterations, self.scheduler,
         )
         self.delivery_coordinator = DeliveryCoordinator(state_engine, self.get_capability)
         self.approval_coordinator = ApprovalCoordinator(
             state_engine, event_bus,
-            lambda execution_id, task: self.execute_task(execution_id, task),
+            self.start_execution,
         )
 
     def register_capability(self, capability_name: str, instance: Any):
@@ -368,6 +184,33 @@ class ExecutionEngine:
         # Ensure standard action methods are populated on instance
         instance.actions = get_actions(instance.__class__)
         logger.info(f"Registered capability: {capability_name}")
+
+    @staticmethod
+    def _bounded_dependency_results(
+        results: List[Dict[str, Any]], budget: int = 8_000
+    ) -> List[Dict[str, Any]]:
+        """Keep every prerequisite visible while bounding its delivery payload."""
+        if not results:
+            return []
+        allowance = max(80, max(1, int(budget)) // len(results) - 400)
+        bounded: List[Dict[str, Any]] = []
+        for item in results:
+            copy = dict(item)
+            delivery = json.dumps(
+                copy.get("delivery"), ensure_ascii=False, default=str
+            )
+            if len(delivery) > allowance:
+                notice = "… [prerequisite delivery compacted] …"
+                payload = max(0, allowance - len(notice))
+                head = (payload * 2) // 3
+                tail = payload - head
+                delivery = (
+                    delivery[:head] + notice + (delivery[-tail:] if tail else "")
+                )
+                copy["delivery_compacted"] = True
+            copy["delivery"] = delivery
+            bounded.append(copy)
+        return bounded
 
     def get_capability(self, capability_name: str) -> Optional[Any]:
         """Retrieve a registered capability by name."""
@@ -392,6 +235,48 @@ class ExecutionEngine:
 
     def _schedule_provider_resume(self, execution_id: str, delay_seconds: int = 30) -> None:
         self.provider_recovery.schedule(execution_id, delay_seconds)
+
+    def start_execution(self, execution_id: str, task: str) -> asyncio.Task:
+        """Start or reuse the one owned asyncio task for an execution."""
+        existing = self._active_execution_tasks.get(execution_id)
+        if existing is not None and not existing.done():
+            return existing
+        running = asyncio.create_task(
+            self.execute_task(execution_id, task),
+            name=f"gptmoss-execution:{execution_id}",
+        )
+        self._active_execution_tasks[execution_id] = running
+
+        def discard(completed: asyncio.Task) -> None:
+            if self._active_execution_tasks.get(execution_id) is completed:
+                self._active_execution_tasks.pop(execution_id, None)
+
+        running.add_done_callback(discard)
+        return running
+
+    async def cancel_active_execution(self, execution_id: str) -> bool:
+        """Cancel scheduled retries and interrupt an in-flight execution task."""
+        cancelled = self.scheduler.cancel(f"execution:{execution_id}")
+        cancelled = self.provider_recovery.cancel(execution_id) or cancelled
+        running = self._active_execution_tasks.get(execution_id)
+        if running is None or running.done():
+            return cancelled
+        if running is asyncio.current_task():
+            return cancelled
+        running.cancel()
+        await asyncio.gather(running, return_exceptions=True)
+        if self._active_execution_tasks.get(execution_id) is running:
+            self._active_execution_tasks.pop(execution_id, None)
+        return True
+
+    async def stop_active_executions(self) -> None:
+        """Interrupt all owned execution work before transports are closed."""
+        running = [task for task in self._active_execution_tasks.values() if not task.done()]
+        for task in running:
+            task.cancel()
+        if running:
+            await asyncio.gather(*running, return_exceptions=True)
+        self._active_execution_tasks.clear()
 
     def resume_waiting_provider_executions(self) -> None:
         """Restore automatic retries after a process restart."""
@@ -432,16 +317,26 @@ class ExecutionEngine:
                            run_at: Optional[float] = None) -> str:
         """Schedule one execution through the shared runtime timing service."""
         job_id = f"execution:{execution_id}"
+        self.scheduler.start()
+        due = float(run_at) if run_at is not None else time.time() + max(0.0, float(delay))
+        if due <= time.time():
+            self.start_execution(execution_id, task)
+            return job_id
         if self.scheduler.has(job_id):
             return job_id
+
+        def launch() -> None:
+            # The timing service must remain free to deliver provider backoffs
+            # while the owned execution task is running.
+            self.start_execution(execution_id, task)
+
         self.scheduler.schedule(
-            lambda: self.execute_task(execution_id, task),
+            launch,
             delay=delay,
-            run_at=run_at,
+            run_at=due,
             job_id=job_id,
             metadata={"kind": "execution", "execution_id": execution_id},
         )
-        self.scheduler.start()
         return job_id
 
     async def stop_provider_resume_tasks(self) -> None:
@@ -450,6 +345,7 @@ class ExecutionEngine:
     async def stop_runtime_services(self) -> None:
         await self.provider_recovery.stop()
         await self.scheduler.stop(cancel_pending=True)
+        await self.stop_active_executions()
         close_provider = getattr(self.llm_provider, "close", None)
         if close_provider:
             result = close_provider()
@@ -584,326 +480,6 @@ class ExecutionEngine:
             )
         return fingerprint, None
 
-    def _artifact_exists(self, execution_id: str, path: str) -> bool:
-        filesystem = self.get_capability("filesystem")
-        if not filesystem or not hasattr(filesystem, "_resolve_path"):
-            return False
-        try:
-            resolved = filesystem._resolve_path(path, execution_id)
-            return os.path.isfile(resolved) and os.path.getsize(resolved) > 0
-        except (OSError, PermissionError, ValueError):
-            return False
-
-    def _missing_artifacts(self, execution_id: str, step: Dict[str, Any]) -> List[str]:
-        return [path for path in step.get("required_artifacts", [])
-                if not self._artifact_exists(execution_id, path)]
-
-    def _step_artifact_validation_issues(
-        self, execution_id: str, step: Dict[str, Any]
-    ) -> List[str]:
-        """Validate each completed step artifact before allowing downstream reuse."""
-        state = self.state_engine.get_execution(execution_id)
-        specifications = {
-            str(item.get("path") or "").replace("\\", "/"): item
-            for item in (state.current_plan or {}).get("artifact_validations", [])
-            if isinstance(item, dict) and item.get("path")
-        }
-        filesystem = self.get_capability("filesystem")
-        if not filesystem or not hasattr(filesystem, "_resolve_path"):
-            return []
-        issues = []
-        for path in step.get("required_artifacts", []):
-            normalized = str(path).replace("\\", "/")
-            if not self._artifact_exists(execution_id, normalized):
-                continue
-            specification = specifications.get(normalized, {})
-            suffix = os.path.splitext(normalized)[1].lower()
-            validator = specification.get("validator")
-            constraints = dict(specification.get("constraints") or {})
-            # Even a planner without an explicit policy must not advance a
-            # generated text artifact containing placeholders or model-thought tags.
-            if not specification and suffix in {".md", ".txt", ".html"}:
-                validator = "document"
-                constraints["forbid_placeholders"] = True
-            try:
-                resolved = filesystem._resolve_path(normalized, execution_id)
-                report = validate_artifact(
-                    resolved, validator=validator, constraints=constraints,
-                )
-            except (OSError, PermissionError, TypeError, ValueError) as error:
-                issues.append(f"{normalized}: validation could not run: {error}")
-                continue
-            if not report.get("valid", False):
-                failures = report.get("failures") or ["artifact validation failed"]
-                issues.extend(f"{normalized}: {message}" for message in failures[:12])
-        return issues
-
-    def _document_coverage_issues(
-        self, execution_id: str, step: Dict[str, Any]
-    ) -> List[str]:
-        """Require tool evidence for assignments claiming exhaustive corpus inventory."""
-        state = self.state_engine.get_execution(execution_id)
-        attached = {
-            str(item) for item in state.variables.get("attachment_ids", []) if item
-        }
-        if not attached or not self.artifact_store:
-            return []
-        assignment = " ".join([
-            str(step.get("description") or ""),
-            " ".join(str(item) for item in step.get("acceptance_criteria", [])),
-        ]).casefold()
-        inventory_markers = ("inventory", "inventor", "inventaire")
-        exhaustive_markers = ("every", "all ", "complete", "exhaust", "integr")
-        exhaustive_assignment = any(
-            marker in assignment for marker in exhaustive_markers
-        ) or bool(re.search(r"\bint.gr", assignment))
-        if not (
-            any(marker in assignment for marker in inventory_markers)
-            and exhaustive_assignment
-        ):
-            return []
-        covered: Dict[str, set[int]] = {artifact_id: set() for artifact_id in attached}
-        history = state.variables.get("tool_call_history", [])
-        for item in history:
-            if item.get("capability") != "documents" or item.get("action") != "read":
-                continue
-            try:
-                payload = json.loads(str(item.get("result") or ""))
-            except (TypeError, ValueError):
-                continue
-            artifact_id = str(payload.get("artifact_id") or "")
-            if artifact_id not in covered:
-                continue
-            for block in payload.get("blocks") or []:
-                try:
-                    covered[artifact_id].add(int(block["order"]))
-                except (KeyError, TypeError, ValueError):
-                    continue
-        issues = []
-        inventory = {
-            str(item.get("artifact_id")): item
-            for item in self.artifact_store.document_index.inventory()
-            if str(item.get("artifact_id")) in attached
-        }
-        for artifact_id in sorted(attached):
-            item = inventory.get(artifact_id, {})
-            try:
-                total = int(item.get("block_count") or len(
-                    self.artifact_store.document(artifact_id).blocks
-                ))
-            except (OSError, KeyError, TypeError, ValueError):
-                issues.append(f"prove complete document coverage for attachment {artifact_id}")
-                continue
-            missing = sorted(set(range(total)) - covered.get(artifact_id, set()))
-            if missing:
-                display = ", ".join(str(index + 1) for index in missing[:20])
-                if len(missing) > 20:
-                    display += f", and {len(missing) - 20} more"
-                filename = str(item.get("filename") or artifact_id)
-                issues.append(
-                    f"read every normalized block of {filename}; "
-                    f"missing 1-based block(s): {display}"
-                )
-        return issues
-
-    def _capability_gaps(self, state) -> List[Dict[str, Any]]:
-        """Describe unavailable input modalities without pretending to use them."""
-        gaps = []
-        if not self.artifact_store:
-            return gaps
-        image_attachments = []
-        for artifact_id in state.variables.get("attachment_ids", []):
-            try:
-                metadata = self.artifact_store.get(artifact_id)
-            except (ValueError, FileNotFoundError, OSError, KeyError):
-                continue
-            if str(metadata.get("content_type") or "").startswith("image/"):
-                image_attachments.append(metadata.get("filename"))
-        if image_attachments and not getattr(self.llm_provider, "supports_vision", False):
-            gaps.append({
-                "capability": "vision",
-                "required_for": "Interpret attached image content",
-                "inputs": image_attachments,
-                "available": False,
-                "resolution": (
-                    "Configure a vision-capable provider, or restrict execution to "
-                    "documented adapters, configuration, routines, and validators."
-                ),
-            })
-        return gaps
-
-    def _progress_signature(self, execution_id: str, step: Dict[str, Any]) -> tuple:
-        """Fingerprint durable work without counting repeated reads or failed commands."""
-        filesystem = self.get_capability("filesystem")
-        files = []
-        if filesystem and hasattr(filesystem, "_get_workspace_for_execution"):
-            try:
-                root = filesystem._get_workspace_for_execution(execution_id)
-                ignored_directories = {".git", ".pytest_cache", "__pycache__", "node_modules", ".mypy_cache"}
-                for directory, directory_names, filenames in os.walk(root):
-                    directory_names[:] = sorted(
-                        name for name in directory_names if name not in ignored_directories
-                    )
-                    for filename in sorted(filenames):
-                        if filename.endswith((".pyc", ".pyo")):
-                            continue
-                        full_path = os.path.join(directory, filename)
-                        relative = os.path.relpath(full_path, root).replace(os.sep, "/")
-                        basename = filename.lower()
-                        if (
-                            re.match(r"^(?:tmp|temp)(?:[_-]|\.|$)", basename)
-                            or re.match(
-                                r"^(?:test|pytest)[_-]?(?:output|results?)(?:[_-].*)?\.",
-                                basename,
-                            )
-                            or basename in {
-                                "test_output.txt", "test_results.txt",
-                                ".coverage", "coverage.xml", "junit.xml",
-                            }
-                            or basename.endswith((".tmp", ".bak", ".log"))
-                        ):
-                            continue
-                        digest = hashlib.sha256()
-                        text_extensions = {
-                            ".py", ".pyi", ".md", ".txt", ".json", ".jsonl",
-                            ".yaml", ".yml", ".toml", ".ini", ".cfg", ".html",
-                            ".css", ".js", ".ts", ".tsx", ".jsx", ".xml",
-                            ".csv", ".sh", ".ps1", ".bat", ".cmd",
-                        }
-                        if os.path.splitext(filename)[1].lower() in text_extensions:
-                            try:
-                                with open(
-                                    full_path, "r", encoding="utf-8", newline=None
-                                ) as source:
-                                    while True:
-                                        chunk = source.read(1024 * 1024)
-                                        if not chunk:
-                                            break
-                                        digest.update(chunk.encode("utf-8"))
-                            except UnicodeDecodeError:
-                                digest = hashlib.sha256()
-                                with open(full_path, "rb") as source:
-                                    while True:
-                                        chunk = source.read(1024 * 1024)
-                                        if not chunk:
-                                            break
-                                        digest.update(chunk)
-                        else:
-                            with open(full_path, "rb") as source:
-                                while True:
-                                    chunk = source.read(1024 * 1024)
-                                    if not chunk:
-                                        break
-                                    digest.update(chunk)
-                        files.append((relative, digest.hexdigest()))
-                        if len(files) >= 2_000:
-                            break
-                    if len(files) >= 2_000:
-                        break
-            except (OSError, PermissionError, ValueError):
-                files = []
-
-        execution_state = self.state_engine.get_execution(execution_id)
-        history = execution_state.variables.get("tool_call_history", [])
-        role_key = (
-            canonical_step_role(step.get("role"))
-            or infer_step_role(step.get("description", ""))
-        )
-        current_commands = requirement_validation_commands(
-            (execution_state.current_plan or {}).get("requirements", [])
-        )
-        inherited_commands = (
-            requirement_validation_commands(
-                execution_state.variables.get("inherited_requirements", [])
-            )
-            if role_key in {"developer", "qa", "debugger", "coordinator"}
-            else []
-        )
-        declared_commands = [
-            str(command).strip() for command in step.get("verification_commands", [])
-            if str(command).strip()
-        ]
-        declared_commands.extend(
-            command for command in [*current_commands, *inherited_commands]
-            if command not in declared_commands
-        )
-        successful_commands = sorted({
-            declared
-            for item in history
-            for declared in declared_commands
-            if item.get("capability") == "shell" and item.get("action") == "execute"
-            and "EXIT_CODE: 0" in str(item.get("result") or "")
-            and commands_equivalent(
-                declared, str(item.get("arguments", {}).get("command") or "")
-            )
-        })
-        latest_failure_count = None
-        for item in reversed(history):
-            if item.get("capability") != "shell" or item.get("action") != "execute":
-                continue
-            observed_command = str(item.get("arguments", {}).get("command") or "").strip()
-            if declared_commands:
-                if not any(
-                    commands_equivalent(declared, observed_command)
-                    for declared in declared_commands
-                ):
-                    continue
-            elif not re.search(
-                r"(?i)(?:\bpytest\b|\bunittest\b|\bnpm\s+(?:run\s+)?test\b|"
-                r"\bcargo\s+test\b|\bgo\s+test\b|\bdotnet\s+test\b|"
-                r"\bmvn(?:\.cmd)?\s+test\b|\bgradle(?:w)?\s+test\b|"
-                r"\bcompileall\b|\bruff\s+check\b|\bmypy\b|\btsc\b)",
-                observed_command,
-            ):
-                continue
-            result_text = str(item.get("result") or "")
-            if "EXIT_CODE: 0" in result_text:
-                latest_failure_count = 0
-            else:
-                counts = [int(value) for value in re.findall(
-                    r"(\d+)\s+(?:failed|error|errors|failure|failures)",
-                    result_text,
-                    flags=re.IGNORECASE,
-                )]
-                latest_failure_count = sum(counts) if counts else 1_000_000
-            break
-        return (
-            tuple(files),
-            tuple(successful_commands),
-            tuple(sorted(self._missing_artifacts(execution_id, step))),
-            latest_failure_count,
-        )
-
-    def _quality_improved(self, execution_id: str, previous: tuple, current: tuple) -> tuple[bool, str]:
-        """Reward measurable delivery improvement, with bounded credit for code churn."""
-        previous_files = dict(previous[0])
-        current_files = dict(current[0])
-        new_files = set(current_files) - set(previous_files)
-        if new_files:
-            return True, "new_artifact"
-        if set(current[1]) - set(previous[1]):
-            return True, "new_successful_verification"
-        if len(current[2]) < len(previous[2]):
-            return True, "required_artifact_completed"
-        previous_failures = previous[3] if len(previous) > 3 else None
-        current_failures = current[3] if len(current) > 3 else None
-        if (previous_failures is not None and current_failures is not None
-                and current_failures < previous_failures):
-            return True, "fewer_machine_failures"
-
-        changed = sorted(
-            path for path in set(previous_files) & set(current_files)
-            if previous_files[path] != current_files[path]
-        )
-        if changed:
-            state = self.state_engine.get_execution(execution_id)
-            credits = state.variables.setdefault("quality_edit_credits", {})
-            credited = [path for path in changed if int(credits.get(path, 0)) < 2]
-            if credited:
-                for path in credited:
-                    credits[path] = int(credits.get(path, 0)) + 1
-                return True, "bounded_productive_edit"
-        return False, "no_quality_delta"
 
     @staticmethod
     def _normalize_tool_arguments(capability: str, action: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
@@ -931,21 +507,32 @@ class ExecutionEngine:
                     if normalized.get(alias):
                         normalized["path"] = normalized.pop(alias)
                         break
-            if action.lower() == "write" and "content" not in normalized:
+            if action.lower() in {"write", "append"} and "content" not in normalized:
                 for alias in ("text", "source", "body"):
                     if alias in normalized:
                         normalized["content"] = normalized.pop(alias)
                         break
-            if action.lower() == "write" and not normalized.get("path"):
+            if action.lower() in {"write", "append"} and not normalized.get("path"):
                 content = normalized.get("content")
                 if isinstance(content, str):
                     first_line = content.strip().splitlines()[0] if content.strip() else ""
                     candidate = first_line.removeprefix("File:").strip().strip(chr(34) + chr(39) + "`")
                     if re.fullmatch(r"[\w .()/-]+\.[A-Za-z0-9]{1,10}", candidate.replace(chr(92), "/")):
                         normalized["path"] = candidate
-                        normalized["content"] = ExecutionEngine._strip_code_fence(
+                        normalized["content"] = ExecutionRescueMixin._strip_code_fence(
                             "\n".join(content.strip().splitlines()[1:]), candidate,
                         )
+            if action.lower() == "replace_paragraph":
+                if "paragraph_prefix" not in normalized:
+                    for alias in ("prefix", "old_text", "match_text"):
+                        if normalized.get(alias):
+                            normalized["paragraph_prefix"] = normalized.pop(alias)
+                            break
+                if "content" not in normalized:
+                    for alias in ("new_text", "replacement", "text", "body"):
+                        if alias in normalized:
+                            normalized["content"] = normalized.pop(alias)
+                            break
         return normalized
 
     def _fake_dependency_packages(self, execution_id: str) -> List[str]:
@@ -1082,174 +669,6 @@ class ExecutionEngine:
                 pass
         return issues
 
-    @staticmethod
-    def _strip_code_fence(content: str, path: str = "") -> str:
-        text = str(content or "").strip()
-        suffix = os.path.splitext(path)[1].lower()
-        if suffix != ".md" and "```" in text:
-            fenced = re.findall(r"```[^\r\n]*\r?\n(.*?)\r?\n```", text, flags=re.DOTALL)
-            if fenced:
-                text = max(fenced, key=len).strip()
-        elif text.startswith("```"):
-            first_newline = text.find("\n")
-            if first_newline >= 0:
-                text = text[first_newline + 1:]
-            if text.rstrip().endswith("```"):
-                text = text.rstrip()[:-3]
-        lines = text.strip().splitlines()
-        if lines and path and lines[0].strip().replace(chr(92), "/") == path.replace(chr(92), "/"):
-            lines.pop(0)
-        return "\n".join(lines).strip() + "\n"
-
-    def _source_contract_summary(self, execution_id: str) -> str:
-        filesystem = self.get_capability("filesystem")
-        if not filesystem or not hasattr(filesystem, "_get_workspace_for_execution"):
-            return ""
-        root = filesystem._get_workspace_for_execution(execution_id)
-        summaries = []
-        source_root = os.path.join(root, "src")
-        if not os.path.isdir(source_root):
-            return ""
-        for directory, _, filenames in os.walk(source_root):
-            for filename in sorted(filenames):
-                if not filename.endswith(".py"):
-                    continue
-                full_path = os.path.join(directory, filename)
-                relative = os.path.relpath(full_path, root).replace(os.sep, "/")
-                try:
-                    with open(full_path, "r", encoding="utf-8") as source_file:
-                        tree = ast.parse(source_file.read())
-                except (OSError, UnicodeError, SyntaxError):
-                    continue
-                def signature(node):
-                    positional = list(node.args.posonlyargs) + list(node.args.args)
-                    defaults = [None] * (len(positional) - len(node.args.defaults)) + list(node.args.defaults)
-                    parameters = []
-                    for argument, default in zip(positional, defaults):
-                        parameter = argument.arg
-                        if default is not None:
-                            parameter += "=" + ast.unparse(default)[:80]
-                        parameters.append(parameter)
-                    if node.args.vararg:
-                        parameters.append("*" + node.args.vararg.arg)
-                    elif node.args.kwonlyargs:
-                        parameters.append("*")
-                    for argument, default in zip(node.args.kwonlyargs, node.args.kw_defaults):
-                        parameter = argument.arg
-                        if default is not None:
-                            parameter += "=" + ast.unparse(default)[:80]
-                        parameters.append(parameter)
-                    if node.args.kwarg:
-                        parameters.append("**" + node.args.kwarg.arg)
-                    return node.name + "(" + ", ".join(parameters) + ")"
-
-                entries = []
-                for node in tree.body:
-                    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                        entries.append("function " + signature(node))
-                    elif isinstance(node, ast.ClassDef):
-                        methods = [signature(child) for child in node.body
-                                   if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)) and not child.name.startswith("__")]
-                        entries.append("class " + node.name + " methods=" + ",".join(methods[:20]))
-                summaries.append(relative + ": " + "; ".join(entries))
-        return "\n".join(summaries)[:6000]
-
-    @staticmethod
-    def _rescue_content_issues(path: str, content: str) -> List[str]:
-        issues = []
-        suffix = os.path.splitext(path)[1].lower()
-        if suffix == ".py":
-            try:
-                ast.parse(content)
-            except SyntaxError as exc:
-                issues.append(f"invalid Python syntax at line {exc.lineno}: {exc.msg}")
-        normalized_path = path.replace(chr(92), "/").lower()
-        if normalized_path.startswith("tests/") or "/tests/" in normalized_path:
-            lower = content.lower()
-            if re.search(r"(?:from|import)\s+src\.[a-z_]\w*", lower):
-                issues.append("tests import src.<package> instead of the canonical package identity")
-            if any(marker in lower for marker in ("mockmesh", "magicmock", "unittest.mock", "# mocking", "np.random")):
-                issues.append("tests contain mocks, replicated implementation, or random data")
-            if "def test_" not in lower:
-                issues.append("test file contains no pytest test function")
-        geometry_markers = re.search(r"\b(?:mesh|geometry|vertex|vertices|face|faces|topology)\b", content, re.IGNORECASE)
-        if geometry_markers:
-            if re.search(r"\b(?:np\.random|numpy\.random|random\.random|random\.randint)\b", content):
-                issues.append("geometry implementation uses random output")
-        return issues
-
-    async def _rescue_missing_artifacts(self, execution_id: str, step: Dict[str, Any],
-                                        prerequisite_outputs: List[Dict[str, Any]]) -> List[str]:
-        """Use a clean, concise LLM context when a tool loop stalls before creating files."""
-        state = self.state_engine.get_execution(execution_id)
-        missing = self._missing_artifacts(execution_id, step)
-        text_suffixes = {".py", ".md", ".txt", ".json", ".html", ".css", ".js",
-                         ".toml", ".yaml", ".yml", ".bat", ".ps1", ".sh"}
-        candidates = [path for path in missing if os.path.splitext(path)[1].lower() in text_suffixes][:4]
-        if state.variables.get("attachment_ids"):
-            # A detached rescue prompt does not contain the complete attached
-            # corpus and therefore cannot honestly synthesize grounded prose.
-            source_document_suffixes = {".md", ".txt", ".json", ".html"}
-            candidates = [
-                path for path in candidates
-                if os.path.splitext(path)[1].lower() not in source_document_suffixes
-            ]
-        contracts = self._source_contract_summary(execution_id)
-        rescued = []
-        for path in candidates:
-            rescue_messages = [
-                {"role": "system", "content": (
-                    "You are GPTMOSS's artifact rescue engineer. Return only the complete raw file content requested: "
-                    "no markdown fence, no explanation, no placeholder, no TODO. The file must be runnable, dependency-light, "
-                    "deterministic, and honest about unavailable external models."
-                )},
-                {"role": "user", "content": (
-                    f"Main outcome: {state.variables.get('parent_task', state.variables.get('task', ''))}\n"
-                    f"Specialist: {step.get('specialist', state.variables.get('role_name', ''))}\n"
-                    f"Assignment: {step.get('description', '')}\n"
-                    f"Expertise: {json.dumps(step.get('expertise', []), ensure_ascii=False)}\n"
-                    f"Acceptance criteria: {json.dumps(step.get('acceptance_criteria', []), ensure_ascii=False)}\n"
-                    f"All required files: {json.dumps(step.get('required_artifacts', []), ensure_ascii=False)}\n"
-                    f"Generate this missing file now: {path}\n"
-                    f"Actual neighboring source contracts (import and test these; do not replicate or mock them):\n{contracts}\n"
-                    f"Prerequisite delivery summaries:\n{json.dumps(prerequisite_outputs, ensure_ascii=False)[:3000]}\n"
-                    "It must integrate with the stated neighboring modules through clear contracts."
-                )},
-            ]
-            content = ""
-            for attempt in range(2):
-                await self.event_bus.publish(Event(
-                    type="ArtifactRescueRequested",
-                    payload={"execution_id": execution_id, "path": path, "attempt": attempt + 1},
-                ))
-                response = await self._completion_with_recovery(
-                    execution_id, messages=rescue_messages, temperature=0.1,
-                )
-                content = self._strip_code_fence(response.get("content", ""), path)
-                content_issues = self._rescue_content_issues(path, content)
-                if len(content.strip()) >= 20 and not content_issues:
-                    break
-                content = ""
-                rescue_messages.append({
-                    "role": "user",
-                    "content": "Regenerate the complete file. Previous output was rejected: " + "; ".join(content_issues or ["content was empty or too short"]),
-                })
-            if not content:
-                continue
-            policy = await self.policy_provider.check_action(
-                execution_id=execution_id, capability="filesystem", action="write",
-                arguments={"path": path, "content": content}, context={"artifact_rescue": True},
-            )
-            if policy.decision != "allow":
-                continue
-            result = await self._call_tool(execution_id, "filesystem", "write", {"path": path, "content": content})
-            self._record_tool_result(execution_id, "filesystem", "write", {"path": path}, result)
-            if self._artifact_exists(execution_id, path):
-                rescued.append(path)
-                await self.event_bus.publish(Event(
-                    type="ArtifactRescued", payload={"execution_id": execution_id, "path": path},
-                ))
-        return rescued
 
     @staticmethod
     def _is_structured_delivery(response: str) -> bool:
@@ -1268,6 +687,113 @@ class ExecutionEngine:
             ):
                 return True
         return False
+
+    def _writer_incremental_repair_tool(
+        self,
+        execution_id: str,
+        role_key: str,
+        step: Dict[str, Any],
+        issues: List[str],
+    ) -> str:
+        """Return the exact mutation required to repair a long writer delivery."""
+        targeted_markers = ("duplicate paragraph", "lack a local reference")
+        replacement_markers = (
+            "invalid local reference", "external link", "placeholder marker",
+            "reasoning tag",
+        )
+        if role_key != "writer" or not any(
+            marker in issue
+            for issue in issues
+            for marker in (
+                "words=", "empty required section", "lack a local reference",
+                *targeted_markers,
+                *replacement_markers,
+            )
+        ):
+            return ""
+        artifacts = [str(path).strip() for path in step.get("required_artifacts", []) if str(path).strip()]
+        if not artifacts:
+            return ""
+        target = artifacts[0]
+        if any(marker in issue for issue in issues for marker in targeted_markers):
+            return "filesystem__replace_paragraph"
+        if any(marker in issue for issue in issues for marker in replacement_markers):
+            return "filesystem__write"
+        exists = self._artifact_exists(execution_id, target)
+        return "filesystem__append" if exists else "filesystem__write"
+
+    def _writer_incremental_repair_nudge(
+        self,
+        execution_id: str,
+        role_key: str,
+        step: Dict[str, Any],
+        issues: List[str],
+    ) -> str:
+        """Turn long-document gate failures into one bounded executable action."""
+        action = self._writer_incremental_repair_tool(
+            execution_id, role_key, step, issues,
+        )
+        if not action:
+            return ""
+        artifacts = [str(path).strip() for path in step.get("required_artifacts", []) if str(path).strip()]
+        target = artifacts[0]
+        if action == "filesystem__replace_paragraph":
+            return (
+                f" Do not answer with a plan. Your next response must be exactly one valid "
+                f"{action} tool call targeting '{target}'. Use a paragraph prefix reported by "
+                "the gate. For a duplicate, remove occurrence=2 with empty content. For an "
+                "unsupported claim, replace occurrence=1 with one corrected, evidence-grounded "
+                "paragraph containing a valid nearby bounded local citation. Change exactly one "
+                "paragraph per iteration; never rewrite or delete the whole document."
+            )
+        if action == "filesystem__append":
+            continuity = (
+                "Preserve the existing valid content and append the next missing or underdeveloped section"
+            )
+        elif self._artifact_exists(execution_id, target):
+            continuity = (
+                "Replace the defective document with only the first clean, complete section; "
+                "later turns will append the remaining non-duplicated sections"
+            )
+        else:
+            continuity = "Create only the first complete section"
+        return (
+            f" Do not answer with a plan and do not send the whole document in one call. "
+            f"Your next response must be exactly one valid {action} tool call targeting '{target}'. "
+            f"{continuity} in a bounded 400-800 word chunk with nearby valid local citations. "
+            "Repeat with another bounded append call on later iterations until every gate passes; "
+            "never create undeclared part files."
+        )
+
+    @staticmethod
+    def _schemas_for_required_tool(
+        schemas: List[Dict[str, Any]], required_tool: str,
+    ) -> List[Dict[str, Any]]:
+        """Expose only the mutation mandated by the preceding quality gate."""
+        if not required_tool:
+            return schemas
+        return [
+            schema for schema in schemas
+            if schema.get("function", {}).get("name") == required_tool
+        ]
+
+    @staticmethod
+    def _required_tool_succeeded(
+        messages: List[Dict[str, Any]],
+        tool_calls: List[Dict[str, Any]],
+        required_tool: str,
+    ) -> bool:
+        expected_ids = {
+            str(call.get("id") or "")
+            for call in tool_calls
+            if call.get("function", {}).get("name") == required_tool
+        }
+        return bool(expected_ids) and any(
+            message.get("role") == "tool"
+            and str(message.get("tool_call_id") or "") in expected_ids
+            and not str(message.get("content") or "").lstrip().startswith("Error:")
+            for message in messages
+        )
 
     def _step_completion_issues(self, execution_id: str, step: Dict[str, Any], response: str) -> List[str]:
         """Evaluate machine-checkable delivery gates before accepting prose as completion."""
@@ -1334,7 +860,9 @@ class ExecutionEngine:
             durable_mutation = any(
                 (
                     item.get("capability") == "filesystem"
-                    and item.get("action") in {"write", "delete"}
+                    and item.get("action") in {
+                        "write", "append", "replace_paragraph", "delete",
+                    }
                     and "Error" not in str(item.get("result") or "")
                 )
                 or (
@@ -1379,6 +907,25 @@ class ExecutionEngine:
             "capability": capability.lower(), "action": action.lower(),
             "arguments": dict(arguments), "result": str(result),
         })
+        if capability.lower() == "documents" and action.lower() in {
+            "read_image", "read_images",
+        }:
+            try:
+                payload = json.loads(str(result))
+            except (TypeError, ValueError):
+                return
+            requested = []
+            if action.lower() == "read_image" and payload.get("artifact_id"):
+                requested = [payload["artifact_id"]]
+            elif isinstance(payload.get("images"), list):
+                requested = [
+                    item.get("artifact_id") for item in payload["images"]
+                    if isinstance(item, dict) and item.get("artifact_id")
+                ]
+            pending = state.variables.setdefault("pending_visual_artifact_ids", [])
+            for artifact_id in requested:
+                if artifact_id not in pending:
+                    pending.append(artifact_id)
 
     def _can_engine_finalize(self, execution_id: str, step: Dict[str, Any]) -> bool:
         """Detect converged work even when a model keeps calling tools or formats its finale badly."""
@@ -1459,9 +1006,12 @@ class ExecutionEngine:
         """Create/resume the provider-neutral long-document checkpoint."""
         if not self.document_engine_enabled or not self.document_checkpoint_enabled:
             return
-        if not any(marker in str(task).casefold() for marker in (
+        policy = state.variables.get("corpus_policy") if hasattr(state, "variables") else {}
+        professional = isinstance(policy, dict) and policy.get("professional_delivery")
+        if not professional and not any(marker in str(task).casefold() for marker in (
             "dossier", "rapport", "livrable", "long-form", "document-analysis",
             "rédige", "redige", "write a document", "professional document",
+            "professional report",
         )):
             return
         workspace = self._delivery_workspace(execution_id)
@@ -1652,6 +1202,20 @@ class ExecutionEngine:
         # 2. Plan generation (if not already planned)
         if not state.current_plan:
             is_sub_agent = state.variables.get("parent_execution_id") is not None
+            if not is_sub_agent and self.artifact_store:
+                state.variables["workload_profile"] = build_workload_profile(
+                    self.artifact_store,
+                    state.variables.get("attachment_ids", []),
+                    corpus_summaries=state.variables.get("corpus_summaries", []),
+                    supports_vision=bool(
+                        getattr(self.llm_provider, "supports_vision", False)
+                    ),
+                )
+                state.variables["corpus_policy"] = normalize_corpus_policy(
+                    state.variables.get("corpus_policy"),
+                    enabled=bool(state.variables.get("corpus_auto_workflow")),
+                    workload_profile=state.variables["workload_profile"],
+                )
             schemas = self.get_capabilities_schemas(
                 is_sub_agent=is_sub_agent,
                 allowed_capabilities=allowed_capabilities,
@@ -1677,6 +1241,10 @@ class ExecutionEngine:
                     parent_execution_id=state.variables.get("parent_execution_id"),
                     delegated_step=state.variables.get("delegated_step"),
                     project_domains=state.variables.get("project_domains"),
+                    planning_mode=state.variables.get("planning_mode"),
+                    workload_profile=state.variables.get("workload_profile"),
+                    corpus_auto_workflow=bool(state.variables.get("corpus_auto_workflow")),
+                    corpus_policy=state.variables.get("corpus_policy"),
                 )
             except ProviderUnavailableError:
                 raise
@@ -1752,11 +1320,33 @@ class ExecutionEngine:
                 self.artifact_store,
                 state.variables.get("attachment_ids", []),
             )
+            plan_result["corpus_policy"] = dict(
+                state.variables.get("corpus_policy") or {}
+            )
+            if not is_sub_agent:
+                plan_result = compile_work_graph(
+                    plan_result,
+                    state.variables.get("workload_profile"),
+                    planning_mode=str(state.variables.get("planning_mode") or "auto"),
+                )
+                attach_plan_obligations(
+                    plan_result,
+                    task=task,
+                    planning_mode=str(state.variables.get("planning_mode") or "auto"),
+                    analysis=plan_result.get("analysis"),
+                    workload_profile=state.variables.get("workload_profile"),
+                    corpus_auto_workflow=bool(state.variables.get("corpus_auto_workflow")),
+                    corpus_policy=state.variables.get("corpus_policy"),
+                    repair=True,
+                    validate=True,
+                )
+            plan_result = normalize_plan(plan_result)
             self.telemetry.record("plan_generated", execution_id, duration_ms=round((time.perf_counter() - planning_started) * 1000, 2), steps=len(plan_result.get("steps", [])))
             state.current_plan = plan_result
             self._initialize_document_state(execution_id, task, plan_result, state)
             state.variables["delivery_contract"] = build_delivery_contract(
-                state.current_plan, task
+                state.current_plan, task,
+                repair_obligations=not bool(state.variables.get("parent_execution_id")),
             )
             state.current_step = 0
             await self.event_bus.publish(Event(
@@ -1769,7 +1359,8 @@ class ExecutionEngine:
             self._initialize_document_state(execution_id, task, state.current_plan, state)
         if not isinstance(state.variables.get("delivery_contract"), dict):
             state.variables["delivery_contract"] = build_delivery_contract(
-                state.current_plan, task
+                state.current_plan, task,
+                repair_obligations=not bool(state.variables.get("parent_execution_id")),
             )
         delivery_contract = state.variables["delivery_contract"]
         scope_changes = delivery_contract.get("scope_changes", [])
@@ -1812,9 +1403,29 @@ class ExecutionEngine:
                 execution_id, state, steps, task, step
             )
 
-        await self._coordinate_plan_execution(
-            execution_id, state, steps, task, run_step, running_tasks
-        )
+        try:
+            await self._coordinate_plan_execution(
+                execution_id, state, steps, task, run_step, running_tasks
+            )
+        finally:
+            unfinished = [item for item in running_tasks.values() if not item.done()]
+            for item in unfinished:
+                item.cancel()
+            if unfinished:
+                await asyncio.gather(*unfinished, return_exceptions=True)
+
+    def _parallel_plan_step_limit(self) -> int:
+        """Return an in-flight limit without constraining total plan size."""
+        if self.max_parallel_plan_steps > 0:
+            return self.max_parallel_plan_steps
+        cpu_limit = max(1, min(4, ((os.cpu_count() or 2) + 1) // 2))
+        try:
+            provider_limit = int(
+                getattr(self.llm_provider, "recommended_parallel_requests", 0) or 0
+            )
+        except (TypeError, ValueError):
+            provider_limit = 0
+        return max(1, min(cpu_limit, provider_limit)) if provider_limit else cpu_limit
 
     async def _coordinate_plan_execution(
         self, execution_id: str, state, steps, task: str, run_step, running_tasks
@@ -1871,10 +1482,9 @@ class ExecutionEngine:
                     ))
                     if not assurance_report.get("passed", False):
                         repair_round = int(state.variables.get("assurance_repair_round", 0))
-                        repair_step = next(
-                            (item for item in reversed(steps)
-                             if canonical_step_role(item.get("role")) == "debugger"),
-                            None,
+                        target = classify_assurance_report(assurance_report)
+                        repair_step = select_reopen_step(
+                            state.current_plan or {"steps": steps}, target
                         )
                         repair_budget = (
                             self._step_retry_budget(task, repair_step)
@@ -1882,23 +1492,30 @@ class ExecutionEngine:
                         )
                         if repair_step is not None and repair_round < repair_budget:
                             state.variables["assurance_repair_round"] = repair_round + 1
-                            repair_step["status"] = "pending"
-                            repair_step.pop("assigned_execution_id", None)
-                            repair_step["retry_context"] = (
+                            reopened = steps_to_reopen(
+                                state.current_plan or {"steps": steps}, target, repair_step
+                            )
+                            context = (
                                 "Independent delivery assurance rejected the assembled project. "
                                 "Fix these machine-observed defects without redoing validated work:\n"
                                 + json.dumps(assurance_report, ensure_ascii=False)[:10_000]
                             )
-                            for downstream in steps:
-                                if canonical_step_role(downstream.get("role")) == "coordinator":
-                                    downstream["status"] = "pending"
-                                    downstream.pop("assigned_execution_id", None)
+                            for item in reopened:
+                                item["status"] = "pending"
+                                item.pop("assigned_execution_id", None)
+                                item["retry_context"] = context
+                            if target.required_tool:
+                                runtime = state.variables.setdefault("step_runtime", {}).setdefault(
+                                    str(repair_step.get("id")), {}
+                                )
+                                runtime["required_next_tool"] = target.required_tool
                             await self.event_bus.publish(Event(
                                 type="DeliveryRepairScheduled",
                                 payload={
                                     "execution_id": execution_id,
                                     "round": repair_round + 1,
                                     "step_id": repair_step.get("id"),
+                                    "obligation": target.obligation,
                                 },
                             ))
                             continue
@@ -1944,8 +1561,13 @@ class ExecutionEngine:
                     ))
                 break
                 
-            # Launch all ready steps concurrently
-            for step in ready_steps:
+            # Preserve an arbitrarily large DAG while bounding only the active
+            # provider wave. Pending steps remain durable and are scheduled as
+            # capacity becomes available.
+            parallel_limit = self._parallel_plan_step_limit()
+            parent_state.variables["plan_parallelism_limit"] = parallel_limit
+            capacity = max(0, parallel_limit - len(running_tasks))
+            for step in ready_steps[:capacity]:
                 step_id = step.get("id")
                 running_tasks[step_id] = asyncio.create_task(run_step(step))
                 
@@ -2073,6 +1695,9 @@ class ExecutionEngine:
                         "description": dependency_step.get("description"),
                         "delivery": dependency_step.get("delivery") or dependency_step.get("result"),
                     })
+                dependency_results = self._bounded_dependency_results(
+                    dependency_results
+                )
                 handoff = json.dumps(dependency_results, ensure_ascii=False)
                 if len(handoff) > 8_000:
                     handoff = handoff[:8_000] + "\n… [dependency handoff truncated]"
@@ -2125,7 +1750,13 @@ class ExecutionEngine:
                     key: value for key, value in step.items()
                     if key not in {"id", "dependencies", "status", "assigned_execution_id", "delivery", "result", "error"}
                 }
-                sub_exec.variables["attachment_ids"] = state.variables.get("attachment_ids", [])
+                sub_exec.variables["attachment_ids"] = partition_attachment_ids(
+                    state.variables.get("attachment_ids", []),
+                    step.get("source_partition"),
+                )
+                sub_exec.variables["workload_profile"] = state.variables.get(
+                    "workload_profile", {}
+                )
                 owned_artifacts = {
                     str(path).replace("\\", "/")
                     for path in step.get("required_artifacts", [])
@@ -2166,7 +1797,7 @@ class ExecutionEngine:
                     ))
 
                 if sub_exec.status in ("pending", "running"):
-                    asyncio.create_task(self.execute_task(sub_id, sub_exec.variables["task"]))
+                    self.start_execution(sub_id, sub_exec.variables["task"])
 
                 # Wait for sub-agent completion
                 while True:
@@ -2201,7 +1832,7 @@ class ExecutionEngine:
                         self.state_engine.transition_execution(
                             sub_state, "running", reason="parent resumed", actor="runtime"
                         )
-                        asyncio.create_task(self.execute_task(sub_id, sub_exec.variables["task"]))
+                        self.start_execution(sub_id, sub_exec.variables["task"])
 
                     if sub_state.status == "paused" and sub_state.variables.get("pending_approval"):
                         pending_child = dict(sub_state.variables["pending_approval"])
@@ -2429,7 +2060,9 @@ class ExecutionEngine:
                     1 for item in failed_history
                     if (
                         item.get("capability") == "filesystem"
-                        and item.get("action") in {"write", "delete"}
+                        and item.get("action") in {
+                            "write", "append", "replace_paragraph", "delete",
+                        }
                         and "Error" not in str(item.get("result") or "")
                     )
                 )
@@ -2850,6 +2483,13 @@ class ExecutionEngine:
                     )
                 ),
             )
+            required_next_tool = str(runtime.get("required_next_tool") or "")
+            if required_next_tool:
+                constrained_schemas = self._schemas_for_required_tool(
+                    schemas, required_next_tool,
+                )
+                if constrained_schemas:
+                    schemas = constrained_schemas
 
             # Compile context
             context = await self.context_engine.compile_context(
@@ -2859,9 +2499,23 @@ class ExecutionEngine:
                 capabilities_schemas=schemas
             )
             if self.artifact_store and state.variables.get("attachment_ids"):
-                attachment_text_budget = self.artifact_store.max_text_chars
-                if not attachment_text_budget and self.adaptive_resource_management:
-                    attachment_text_budget = int(context.get("context_budget_chars") or 0)
+                provider_budget = int(
+                    getattr(self.llm_provider, "context_input_budget_chars", 0) or 0
+                )
+                history_used = sum(
+                    len(str(item.get("content") or ""))
+                    for item in context.get("conversation_history", [])
+                )
+                reserved_prompt = max(12_000, provider_budget // 3) if provider_budget else 12_000
+                available_for_sources = max(
+                    4_000,
+                    provider_budget - history_used - reserved_prompt,
+                ) if provider_budget else int(context.get("context_budget_chars") or 12_000)
+                configured_attachment_budget = int(self.artifact_store.max_text_chars or 0)
+                attachment_text_budget = min(
+                    available_for_sources,
+                    configured_attachment_budget or available_for_sources,
+                )
                 attachment_query = "\n".join(
                     str(value)
                     for value in (
@@ -2876,11 +2530,36 @@ class ExecutionEngine:
                     )
                     if value
                 )[:8_000]
+                pending_images = list(dict.fromkeys(
+                    str(item) for item in state.variables.get(
+                        "pending_visual_artifact_ids", []
+                    ) if item
+                ))
+                provider_input_tokens = int(
+                    getattr(self.llm_provider, "context_input_budget_tokens", 0) or 0
+                )
+                visual_slots = (
+                    max(0, min(4, (provider_input_tokens - 4_096) // 4_096))
+                    if provider_input_tokens else 4
+                )
+                automatic_images = (
+                    visual_slots if iteration == 1 and not pending_images else 0
+                )
                 context["attachments"] = self.artifact_store.context_items(
                     state.variables["attachment_ids"],
                     getattr(self.llm_provider, "supports_vision", False),
                     max_text_chars=attachment_text_budget,
                     query=attachment_query,
+                    max_items=max(8, min(96, attachment_text_budget // 2_000)),
+                    max_images=(
+                        min(visual_slots, max(automatic_images, len(pending_images)))
+                        if getattr(self.llm_provider, "supports_vision", False) else 0
+                    ),
+                    max_image_bytes=min(
+                        8 * 1024 * 1024,
+                        max(256 * 1024, available_for_sources * 8),
+                    ),
+                    preferred_artifact_ids=pending_images,
                 )
 
             # Request LLM completion
@@ -2917,7 +2596,8 @@ class ExecutionEngine:
                     "without Internet access. Initial excerpts are selected from the whole corpus "
                     "for this assignment and include source, section, block range, and chunk ID. "
                     "Use documents.inventory, documents.search, documents.read, and "
-                    "documents.read_chunk to verify coverage or retrieve omitted sections. "
+                    "documents.read_chunk to retrieve text; use documents.read_image or "
+                    "documents.read_images to load specific images in bounded batches. "
                     "The documents.read start_block parameter is a zero-based normalized-block "
                     "offset, while local citation locators are one-based. A PPTX commonly has "
                     "multiple normalized blocks per slide: cite its provenance slide_number "
@@ -2968,7 +2648,11 @@ class ExecutionEngine:
                     "For long documents, work section-by-section from the declared section contracts: meet each target "
                     "word count, cite bounded local evidence near factual claims, preserve terminology and requirement IDs, "
                     "and avoid repeating prerequisite sections. Treat the checkpoint and previous-section memory as the "
-                    "canonical source of continuity. Never invent a source, citation locator, diagram, metric, or validation result."
+                    "canonical source of continuity. Build an oversized owned artifact with one filesystem.write call for "
+                    "its first bounded section followed by filesystem.append calls for later sections; do not create undeclared "
+                    "temporary part files. When a quality gate reports the normalized prefix of one duplicate or unsupported "
+                    "paragraph, repair only that occurrence with filesystem.replace_paragraph instead of rebuilding the artifact. "
+                    "Never invent a source, citation locator, diagram, metric, or validation result."
                 )
             else:
                 specialized_prompt = "Coordinate the current step and synthesize prerequisite results without repeating completed work."
@@ -2988,6 +2672,10 @@ class ExecutionEngine:
                 f"\nExternal tool declarations: {json.dumps((state.current_plan or {}).get('external_tools', []), ensure_ascii=False)}."
                 f"\nExecution routines: {json.dumps((state.current_plan or {}).get('execution_routines', []), ensure_ascii=False)}."
                 f"\nArtifact validation specifications: {json.dumps((state.current_plan or {}).get('artifact_validations', []), ensure_ascii=False)}."
+                "\nArtifact validation specifications are enforced automatically by the execution engine after your structured "
+                "delivery response. Do not invoke repository-only validator scripts or fabricate constraints/report inputs. "
+                "Create and read back only your owned artifacts, then return the structured response to trigger validation; "
+                "if the engine rejects it, repair the reported violations and retry."
                 f"\nLong-document checkpoint: {json.dumps(state.variables.get('document_model_checkpoint', ''), ensure_ascii=False)}."
                 f"\nSection progress: {json.dumps(state.variables.get('document_sections', []), ensure_ascii=False)}."
                 f"\nDocument continuity memory: {state.variables.get('document_memory', 'none')}."
@@ -3013,6 +2701,7 @@ class ExecutionEngine:
                         + source_contracts
                     )
             llm_messages.append({"role": "system", "content": role_prompt})
+            visual_attachments = []
             for attachment in context.get("attachments", []):
                 if attachment.get("text") is not None:
                     llm_messages.append({
@@ -3026,10 +2715,7 @@ class ExecutionEngine:
                         ),
                     })
                 elif attachment.get("image_url"):
-                    llm_messages.append({"role": "user", "content": [
-                        {"type": "text", "text": f"Attached image: {attachment['filename']}"},
-                        {"type": "image_url", "image_url": {"url": attachment["image_url"]}},
-                    ]})
+                    visual_attachments.append(attachment)
                 else:
                     llm_messages.append({"role": "system", "content": f"Attachment {attachment['filename']}: {attachment['note']}"})
             if context.get("context_summary"):
@@ -3042,18 +2728,76 @@ class ExecutionEngine:
                     )[:8_000],
                 })
             llm_messages.extend(context["conversation_history"])
+            # Requested images are deliberately the most recent messages so
+            # provider compaction preserves them ahead of older conversation.
+            for attachment in visual_attachments:
+                llm_messages.append({"role": "user", "content": [
+                    {"type": "text", "text": (
+                        f"Attached image: {attachment['filename']} "
+                        f"[artifact_id:{attachment['id']}]"
+                    )},
+                    {"type": "image_url", "image_url": {"url": attachment["image_url"]}},
+                ]})
 
             await self.event_bus.publish(Event(
                 type="LLMRequest",
                 payload={"execution_id": execution_id, "messages": llm_messages}
             ))
 
+            async def on_text_delta(delta: str) -> None:
+                await self.event_bus.publish(Event(
+                    type="LLMDelta",
+                    payload={
+                        "execution_id": execution_id,
+                        "delta": delta,
+                        "step_index": state.current_step,
+                    },
+                ))
+
             llm_started = time.perf_counter()
+            submitted_visual_ids: set[str] = set()
+
+            def record_fitted_context(messages: List[Dict[str, Any]]) -> None:
+                submitted_visual_ids.clear()
+                for message in messages:
+                    content = message.get("content")
+                    if not isinstance(content, list):
+                        continue
+                    has_image = any(
+                        isinstance(part, dict) and part.get("type") == "image_url"
+                        for part in content
+                    )
+                    if not has_image:
+                        continue
+                    text = " ".join(
+                        str(part.get("text") or "") for part in content
+                        if isinstance(part, dict) and part.get("type") == "text"
+                    )
+                    submitted_visual_ids.update(
+                        re.findall(r"\[artifact_id:([^\]]+)\]", text)
+                    )
+
             llm_response = await self._completion_with_recovery(
                 execution_id,
                 messages=llm_messages,
-                tools=schemas if schemas else None
+                tools=schemas if schemas else None,
+                tool_choice="required" if required_next_tool else None,
+                on_text_delta=on_text_delta,
+                on_context_fitted=record_fitted_context,
             )
+            if visual_attachments:
+                visualized = state.variables.setdefault(
+                    "visualized_artifact_ids", []
+                )
+                delivered_ids = set(submitted_visual_ids)
+                for artifact_id in delivered_ids:
+                    if artifact_id not in visualized:
+                        visualized.append(artifact_id)
+                state.variables["pending_visual_artifact_ids"] = [
+                    item for item in state.variables.get(
+                        "pending_visual_artifact_ids", []
+                    ) if item not in delivered_ids
+                ]
             self.telemetry.record("llm_completed", execution_id, duration_ms=round((time.perf_counter() - llm_started) * 1000, 2), message_count=len(llm_messages), tool_calls=len(llm_response.get("tool_calls") or []))
 
             await self.event_bus.publish(Event(
@@ -3078,7 +2822,7 @@ class ExecutionEngine:
             if not tool_calls:
                 response_text = llm_response.get("content") or ""
                 if re.search(
-                    r"(?:\"?tool_call\"?\s*:|\"?name\"?\s*:\s*\"?(?:filesystem|shell|agent|devteam)__)",
+                    r"(?:<tool_code\b|\"?tool_call\"?\s*:|\"?name\"?\s*:\s*\"?(?:filesystem|shell|agent|devteam)__)",
                     response_text,
                     flags=re.IGNORECASE,
                 ):
@@ -3093,13 +2837,27 @@ class ExecutionEngine:
                             "The model repeatedly emitted malformed or truncated textual tool calls; "
                             "no unvalidated fragment was executed. Retry this step with smaller, valid calls."
                         )
+                    malformed_issues = self._step_completion_issues(
+                        execution_id, step, response_text,
+                    )
+                    required_repair_tool = self._writer_incremental_repair_tool(
+                        execution_id, role_for_step, step, malformed_issues,
+                    )
+                    repair_nudge = self._writer_incremental_repair_nudge(
+                        execution_id, role_for_step, step, malformed_issues,
+                    )
+                    if required_repair_tool:
+                        runtime["required_next_tool"] = required_repair_tool
                     convo.messages.append({
                         "role": "system",
                         "content": (
                             "Your previous textual tool call was not executed because its JSON was malformed or truncated. "
                             "Do not repeat the same oversized payload. Emit only one complete valid tool-call JSON object with "
-                            "all closing quotes/braces. Keep source modules compact; split a large implementation into smaller "
-                            "cohesive files and write one complete file per call."
+                            "all closing quotes/braces. Keep source modules compact and split a large implementation into smaller "
+                            "cohesive files. If a text artifact is absent, write only its first bounded section; if it already "
+                            "exists, preserve it and use append or a targeted paragraph replacement. Never overwrite an existing "
+                            "long document merely to recover from malformed JSON; do not create undeclared temporary part files."
+                            + repair_nudge
                         ),
                         "timestamp": time.time(),
                     })
@@ -3109,11 +2867,20 @@ class ExecutionEngine:
                 if completion_issues:
                     if self._can_engine_finalize(execution_id, step):
                         return self._engine_delivery(execution_id, step)
+                    repair_nudge = self._writer_incremental_repair_nudge(
+                        execution_id, role_for_step, step, completion_issues,
+                    )
+                    required_repair_tool = self._writer_incremental_repair_tool(
+                        execution_id, role_for_step, step, completion_issues,
+                    )
+                    if required_repair_tool:
+                        runtime["required_next_tool"] = required_repair_tool
                     convo.messages.append({
                         "role": "system",
                         "content": (
                             "Delivery rejected by automatic quality gates. Continue working autonomously with tools. "
                             "Before finishing you must: " + "; ".join(completion_issues) + "."
+                            + repair_nudge
                         ),
                         "timestamp": time.time(),
                     })
@@ -3137,6 +2904,10 @@ class ExecutionEngine:
             )
             if pause_result is not None:
                 return pause_result
+            if required_next_tool and self._required_tool_succeeded(
+                convo.messages, tool_calls, required_next_tool,
+            ):
+                runtime.pop("required_next_tool", None)
 
             tool_history = state.variables.get("tool_call_history", [])
             if (self._missing_artifacts(execution_id, step) and len(tool_history) >= 8
@@ -3258,19 +3029,162 @@ class ExecutionEngine:
             path for path in paths if path.strip().lower() not in ignored
         ))
 
+    @staticmethod
+    def _normalized_workspace_path(path: str) -> str:
+        normalized = os.path.normcase(os.path.normpath(str(path or "").strip()))
+        while normalized.startswith(f".{os.sep}"):
+            normalized = normalized[2:]
+        return normalized
+
+    @classmethod
+    def _active_required_artifacts(cls, state) -> set[str]:
+        """Return artifacts whose deletion would invalidate the active step."""
+        plan = state.current_plan if isinstance(state.current_plan, dict) else {}
+        steps = plan.get("steps") if isinstance(plan.get("steps"), list) else []
+        index = int(state.current_step or 0)
+        if index < 0 or index >= len(steps) or not isinstance(steps[index], dict):
+            return set()
+        return {
+            cls._normalized_workspace_path(path)
+            for path in steps[index].get("required_artifacts", [])
+            if str(path or "").strip()
+        }
+
+    @classmethod
+    def _active_document_artifacts(cls, state) -> set[str]:
+        """Return active required paths governed by the document validator."""
+        plan = state.current_plan if isinstance(state.current_plan, dict) else {}
+        document_paths = {
+            cls._normalized_workspace_path(item.get("path"))
+            for item in plan.get("artifact_validations", [])
+            if (
+                isinstance(item, dict)
+                and str(item.get("validator") or "").lower() == "document"
+                and str(item.get("path") or "").strip()
+            )
+        }
+        return cls._active_required_artifacts(state) & document_paths
+
+    @staticmethod
+    def _active_required_repair_tool(state) -> str:
+        """Read the transient tool constraint for the active plan step."""
+        plan = state.current_plan if isinstance(state.current_plan, dict) else {}
+        steps = plan.get("steps") if isinstance(plan.get("steps"), list) else []
+        index = int(state.current_step or 0)
+        if index < 0 or index >= len(steps) or not isinstance(steps[index], dict):
+            return ""
+        step_id = str(steps[index].get("id", index))
+        runtimes = state.variables.get("step_runtime")
+        runtime = runtimes.get(step_id) if isinstance(runtimes, dict) else None
+        return str(runtime.get("required_next_tool") or "") if isinstance(runtime, dict) else ""
+
+    @staticmethod
+    def _shell_requests_deletion(command: str) -> bool:
+        return bool(re.search(
+            r"(?:\b(?:del|erase|rm|rmdir|rd|remove-item)\b|\.unlink\s*\()",
+            str(command or ""),
+            flags=re.IGNORECASE,
+        ))
+
     async def _call_tool(self, execution_id: str, capability: str, action: str, arguments: Dict[str, Any]) -> str:
         """Invoke a tool while enforcing specialist ownership and path serialization."""
-        if self.state_engine.get_execution(execution_id).status == "cancelled":
+        state = self.state_engine.get_execution(execution_id)
+        if state.status == "cancelled":
             raise asyncio.CancelledError()
-        is_mutation = capability.lower() == "filesystem" and action.lower() in {"write", "delete"}
+        is_mutation = capability.lower() == "filesystem" and action.lower() in {
+            "write", "append", "replace_paragraph", "delete",
+        }
         path = str(arguments.get("path") or "")
+        if is_mutation and not path.strip():
+            return (
+                f"Error: Invalid arguments for {capability}.{action}; missing required "
+                "argument(s): path. Correct the tool call and retry."
+            )
+        command = str(arguments.get("command") or "")
         shell_paths = (
-            self._shell_mutation_paths(str(arguments.get("command") or ""))
+            self._shell_mutation_paths(command)
             if capability.lower() == "shell" and action.lower() == "execute"
             else []
         )
+        lock_paths = list(shell_paths)
+        if capability.lower() == "shell" and action.lower() == "execute":
+            from gptmoss.capabilities.shell import ShellCapability
+            for target in ShellCapability._shell_mutation_targets(command):
+                if target and target not in lock_paths:
+                    lock_paths.append(target)
+        if is_mutation and path:
+            lock_paths.append(path)
+        protected_artifacts = self._active_required_artifacts(state)
+        protected_document_artifacts = self._active_document_artifacts(state)
+        protected_targets = {
+            target for target in lock_paths
+            if self._normalized_workspace_path(target) in protected_artifacts
+        }
+        deletes_required_artifact = (
+            capability.lower() == "filesystem"
+            and action.lower() == "delete"
+            and self._normalized_workspace_path(path) in protected_artifacts
+        ) or (
+            capability.lower() == "shell"
+            and action.lower() == "execute"
+            and self._shell_requests_deletion(command)
+            and bool(protected_targets)
+        )
+        if deletes_required_artifact:
+            denied = sorted(protected_targets or {path})
+            self.telemetry.record(
+                "required_artifact_deletion_blocked", execution_id, paths=denied,
+            )
+            return (
+                "Error: Deletion blocked for active required artifact(s): "
+                + ", ".join(denied)
+                + ". Repair the declared artifact in place with filesystem.write or "
+                "filesystem.append; a required delivery may not be removed."
+            )
+        role = str(state.variables.get("role_key") or "coordinator").lower()
+        required_repair_tool = self._active_required_repair_tool(state)
+        normalized_path = self._normalized_workspace_path(path)
+        overwrites_existing_document = (
+            role == "writer"
+            and capability.lower() == "filesystem"
+            and action.lower() == "write"
+            and normalized_path in protected_document_artifacts
+            and self._artifact_exists(execution_id, path)
+            and required_repair_tool != "filesystem__write"
+        )
+        shell_mutates_document = (
+            role == "writer"
+            and capability.lower() == "shell"
+            and action.lower() == "execute"
+            and any(
+                self._normalized_workspace_path(target) in protected_document_artifacts
+                and self._artifact_exists(execution_id, target)
+                for target in shell_paths
+            )
+        )
+        if overwrites_existing_document or shell_mutates_document:
+            denied = sorted(protected_targets or ({path} if path else set(shell_paths)))
+            self.telemetry.record(
+                "required_document_overwrite_blocked", execution_id, paths=denied,
+            )
+            return (
+                "Error: Global overwrite blocked for existing required document artifact(s): "
+                + ", ".join(denied)
+                + ". Preserve valid content with filesystem.append or filesystem.replace_paragraph. "
+                "A full filesystem.write is allowed only when the automatic quality gate explicitly requires it."
+            )
+        empties_required_artifact = (
+            capability.lower() == "filesystem"
+            and action.lower() == "write"
+            and self._normalized_workspace_path(path) in protected_artifacts
+            and not str(arguments.get("content") or "").strip()
+        )
+        if empties_required_artifact:
+            return (
+                f"Error: Empty overwrite blocked for active required artifact '{path}'. "
+                "Write one complete bounded section instead."
+            )
         if shell_paths:
-            state = self.state_engine.get_execution(execution_id)
             parent_id = state.variables.get("parent_execution_id")
             contract_state = self.state_engine.get_execution(parent_id) if parent_id else state
             contract = contract_state.variables.get("delivery_contract")
@@ -3292,7 +3206,6 @@ class ExecutionEngine:
                     + ". Use the declared owned_paths or request a debugger repair handoff."
                 )
         if is_mutation:
-            state = self.state_engine.get_execution(execution_id)
             parent_id = state.variables.get("parent_execution_id")
             contract_state = (
                 self.state_engine.get_execution(parent_id) if parent_id else state
@@ -3320,10 +3233,16 @@ class ExecutionEngine:
                     f"Error: File ownership denied for '{path}'. This specialist must only "
                     "modify its declared owned_paths; request a debugger repair handoff for shared files."
                 )
+        if lock_paths:
             workspace = self._delivery_workspace(execution_id) or ""
-            lock_key = os.path.normcase(os.path.abspath(os.path.join(workspace, path)))
-            lock = self._path_locks.setdefault(lock_key, asyncio.Lock())
-            async with lock:
+            lock_keys = sorted({
+                os.path.normcase(os.path.abspath(os.path.join(workspace, target)))
+                for target in lock_paths if str(target).strip()
+            })
+            locks = [self._path_locks.setdefault(key, asyncio.Lock()) for key in lock_keys]
+            async with AsyncExitStack() as stack:
+                for lock in locks:
+                    await stack.enter_async_context(lock)
                 return await self._call_tool_impl(
                     execution_id, capability, action, arguments
                 )
@@ -3350,6 +3269,25 @@ class ExecutionEngine:
             
             sig = inspect.signature(bound_method)
             kwargs = dict(arguments)
+            accepts_extra_arguments = any(
+                parameter.kind is inspect.Parameter.VAR_KEYWORD
+                for parameter in sig.parameters.values()
+            )
+            unexpected_arguments = sorted(
+                name for name in kwargs
+                if name not in sig.parameters and not accepts_extra_arguments
+            )
+            if unexpected_arguments:
+                accepted_arguments = [
+                    name for name in sig.parameters
+                    if name != "context"
+                ]
+                accepted = ", ".join(accepted_arguments) or "none"
+                return (
+                    f"Error: Invalid arguments for {capability}.{action}; unexpected "
+                    f"argument(s): {', '.join(unexpected_arguments)}. Accepted arguments: "
+                    f"{accepted}. Correct the tool call and retry."
+                )
             missing_arguments = [
                 name for name, parameter in sig.parameters.items()
                 if name != "context" and parameter.default is inspect.Parameter.empty

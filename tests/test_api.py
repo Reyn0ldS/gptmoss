@@ -185,7 +185,12 @@ def test_api_submit_and_query_flow():
     assert response_list.status_code == 200
     body_list = response_list.json()
     assert len(body_list) >= 1
-    assert any(x["execution_id"] == exec_id for x in body_list)
+    listed = next(item for item in body_list if item["execution_id"] == exec_id)
+    assert listed["task_title"] == "Api test task"
+    assert listed["planning_mode"] == "auto"
+    assert listed["task"] == "Api test task"
+    assert body_get["variables"]["planning_mode"] == "auto"
+    assert body_get["variables"]["task_title"] == "Api test task"
 
 
 def test_api_can_schedule_execution_without_running_it_early():
@@ -209,6 +214,33 @@ def test_api_can_schedule_execution_without_running_it_early():
     execution_id = response.json()["execution_id"]
     assert state_engine.get_execution(execution_id).status == "pending"
     assert engine.scheduler.has(f"execution:{execution_id}")
+
+
+def test_api_accepts_explicit_planning_mode():
+    event_bus = EventBus()
+    state_engine = StateEngine()
+    llm = MockLLMProvider()
+    engine = ExecutionEngine(
+        event_bus, state_engine, ContextEngine(state_engine, RAMMemoryProvider()),
+        llm, SimplePlanner(llm), SimplePolicyProvider(),
+    )
+    kernel = RuntimeKernel(event_bus, state_engine, engine)
+    init_app(kernel, engine, state_engine, event_bus)
+    client = ASGIClient(app)
+
+    response = client.post("/executions", json={
+        "task": "Translate this sentence into French.",
+        "planning_mode": "direct",
+    })
+    assert response.status_code == 201
+    execution_id = response.json()["execution_id"]
+    stored = state_engine.get_execution(execution_id)
+    assert stored.variables["planning_mode"] == "direct"
+    listed = client.get("/executions").json()
+    assert any(
+        item["execution_id"] == execution_id and item["planning_mode"] == "direct"
+        for item in listed
+    )
 
 def test_api_settings_flow(tmp_path):
     # Setup test dependencies
@@ -247,6 +279,7 @@ def test_api_settings_flow(tmp_path):
     body_get = response_get.json()
     assert "api_key" not in body_get
     assert "base_url" in body_get
+    assert body_get["ssl_verify"] is True
 
     # Post new settings
     new_settings = {
@@ -335,6 +368,104 @@ def test_api_delete_cascade_flow():
     # Verify both parent and child are popped and deleted cascaded
     assert parent_id not in state_engine.executions
     assert child_id not in state_engine.executions
+
+
+def _bare_api_client():
+    event_bus = EventBus()
+    state_engine = StateEngine()
+    llm = MockLLMProvider()
+    engine = ExecutionEngine(
+        event_bus, state_engine,
+        ContextEngine(state_engine, RAMMemoryProvider()), llm,
+        SimplePlanner(llm), SimplePolicyProvider(),
+    )
+    kernel = RuntimeKernel(event_bus, state_engine, engine)
+    init_app(kernel, engine, state_engine, event_bus)
+    return ASGIClient(app), state_engine, engine
+
+
+def test_api_delete_and_clear_all_refuse_active_executions():
+    client, state_engine, _engine = _bare_api_client()
+    running = state_engine.get_execution("active-root")
+    running.status = "running"
+    child = state_engine.get_execution("active-child")
+    child.status = "paused"
+    child.variables["parent_execution_id"] = "active-root"
+
+    denied_delete = client.delete("/executions/active-root")
+    assert denied_delete.status_code == 409
+    assert "active-root" in state_engine.executions
+    assert "active-child" in state_engine.executions
+
+    denied_clear = client.post("/executions/clear-all")
+    assert denied_clear.status_code == 409
+    assert "active-root" in state_engine.executions
+
+    cancelled = client.post("/executions/active-root/cancel")
+    assert cancelled.status_code == 200
+    assert client.delete("/executions/active-root").status_code == 200
+    assert "active-root" not in state_engine.executions
+    leftover = state_engine.get_execution("done-item")
+    leftover.status = "completed"
+    assert client.post("/executions/clear-all").status_code == 200
+    assert not state_engine.executions
+
+
+def test_api_get_execution_omits_internal_tool_history():
+    client, state_engine, _engine = _bare_api_client()
+    state = state_engine.get_execution("public-vars")
+    state.status = "completed"
+    state.variables.update({
+        "task": "Inspect",
+        "project_id": "proj-default",
+        "role_name": "Coordinateur",
+        "tool_call_history": [{"capability": "shell", "action": "execute", "result": "secret-output"}],
+        "pending_approval": {
+            "capability": "shell",
+            "action": "execute",
+            "arguments": {"command": "python -m pytest -q", "content": "x" * 9000},
+        },
+    })
+
+    body = client.get("/executions/public-vars").json()
+    assert body["variables"]["task"] == "Inspect"
+    assert body["variables"]["pending_approval"]["capability"] == "shell"
+    assert "tool_call_history" not in body["variables"]
+    assert len(body["variables"]["pending_approval"]["arguments"]["content"]) < 9000
+
+
+def test_api_loopback_cors_allows_any_local_port():
+    client, _state, _engine = _bare_api_client()
+    allowed = client.get("/health", headers={"Origin": "http://127.0.0.1:8123"})
+    denied = client.get("/health", headers={"Origin": "http://evil.example"})
+    assert allowed.status_code == 200
+    assert allowed.headers.get("access-control-allow-origin") == "http://127.0.0.1:8123"
+    assert "access-control-allow-origin" not in {key.lower() for key in denied.headers.keys()} or denied.headers.get("access-control-allow-origin") != "http://evil.example"
+
+
+def test_api_subagent_inherits_parent_project_context():
+    client, state_engine, engine = _bare_api_client()
+    parent = state_engine.get_execution("inherit-parent")
+    parent.status = "running"
+    parent.variables.update({
+        "project_id": "site-demo",
+        "attachment_ids": ["doc-1"],
+        "requested_skills": ["code-review"],
+        "task": "Parent work",
+        "planning_mode": "short_team",
+    })
+    engine.execute_task = AsyncMock()
+    response = client.post("/executions/inherit-parent/subagents", json={
+        "task": "Inspect", "role_name": "Reviewer", "system_prompt": "Review.",
+    })
+    assert response.status_code == 201
+    child_id = response.json()["execution_id"]
+    child = state_engine.get_execution(child_id)
+    assert child.variables["project_id"] == "site-demo"
+    assert child.variables["attachment_ids"] == ["doc-1"]
+    assert child.variables["requested_skills"] == ["code-review"]
+    assert child.variables["planning_mode"] == "short_team"
+
 
 def test_api_unified_feed_flow():
     # Setup test dependencies
@@ -456,12 +587,15 @@ def test_api_settings_preserve_secret_and_context_budget(tmp_path):
         "projects": [{"id": "proj-default", "name": "Default"}],
         "max_step_iterations": 12,
         "max_step_retries": 5,
+        "max_parallel_plan_steps": 6,
         "document_engine_enabled": True,
         "document_checkpoint_enabled": False,
         "document_target_section_words": 900,
         "diagram_rendering": False,
         "docx_embed_diagrams": False,
         "max_context_chars": 24000,
+        "context_window_tokens": 262144,
+        "context_output_reserve_tokens": 16384,
         "max_upload_bytes": 100000,
         "max_attachment_text_chars": 5000,
         "safe_shell_mode": False,
@@ -475,12 +609,15 @@ def test_api_settings_preserve_secret_and_context_budget(tmp_path):
     public_settings = client.get("/api/settings").json()
     assert "api_key" not in public_settings
     assert public_settings["max_context_chars"] == 24000
+    assert public_settings["context_window_tokens"] == 262144
+    assert public_settings["context_output_reserve_tokens"] == 16384
     assert public_settings["safe_shell_mode"] is False
     assert public_settings["shell_timeout_seconds"] == 45
     assert public_settings["default_skills"] == ["code-review"]
     assert public_settings["vision_mode"] == "disabled"
     assert public_settings["denied_capabilities"] == ["documents.read_chunk"]
     assert public_settings["max_step_retries"] == 5
+    assert public_settings["max_parallel_plan_steps"] == 6
     assert public_settings["max_upload_bytes"] == 100000
     assert public_settings["max_attachment_text_chars"] == 5000
     assert public_settings["document_checkpoint_enabled"] is False
@@ -494,6 +631,7 @@ def test_api_settings_preserve_secret_and_context_budget(tmp_path):
     assert exec_engine.allow_nested_delegation is False
     assert exec_engine.max_delegation_depth == 4
     assert exec_engine.max_step_retries == 5
+    assert exec_engine.max_parallel_plan_steps == 6
     assert exec_engine.document_engine_enabled is True
     assert exec_engine.document_checkpoint_enabled is False
     assert exec_engine.document_target_section_words == 900
@@ -572,6 +710,11 @@ def test_gui_uses_sanitized_markdown_renderer():
     assert "function renderSafeMarkdown" in gui
     assert 'contentHtml = renderSafeMarkdown(msg.content || "");' in gui
     assert 'contentHtml = marked.parse(msg.content || "");' not in gui
+    assert "thinkingLabel.textContent = thinkingText;" in gui
+    assert "${thinkingText}</span>" not in gui
+    assert "escapeHTML(String(msg.name ||" in gui
+    assert 'escapeHTML(String(proj.name || ""))' in gui
+    assert '["assistant", "user", "tool", "system"].includes(msg.role)' in gui
     assert "--bg-card:" in gui
     assert "--text-normal:" in gui
 
@@ -598,6 +741,147 @@ def test_runtime_control_only_exposes_a_managed_loopback_supervisor(monkeypatch)
         "supervisor_url": "",
         "token": "",
     }
+
+
+def test_folder_corpus_api_import_finalize_and_execution_scope(tmp_path):
+    from gptmoss.capabilities.filesystem import FilesystemCapability
+
+    event_bus = EventBus()
+    state_engine = StateEngine()
+    llm = MockLLMProvider()
+    engine = ExecutionEngine(
+        event_bus, state_engine,
+        ContextEngine(state_engine, RAMMemoryProvider()), llm,
+        SimplePlanner(llm), SimplePolicyProvider(),
+    )
+    engine.register_capability("filesystem", FilesystemCapability(str(tmp_path)))
+    engine.execute_task = AsyncMock()
+    kernel = RuntimeKernel(event_bus, state_engine, engine)
+    init_app(kernel, engine, state_engine, event_bus)
+    client = ASGIClient(app)
+
+    created = client.post("/corpora", json={
+        "name": "sources", "root_label": "sources", "resume": True,
+    })
+    assert created.status_code == 201
+    corpus_id = created.json()["id"]
+    payload = b"# REQ-001\nThe professional report must be traceable."
+    imported = client.request(
+        "PUT",
+        f"/corpora/{corpus_id}/files?relative_path=sources%2Frequirements%2Fscope.md&last_modified=123",
+        content=payload,
+        headers={"Content-Type": "text/markdown"},
+    )
+    assert imported.status_code == 201
+    artifact_id = imported.json()["id"]
+    assert imported.json()["source_name"] == "sources/requirements/scope.md"
+
+    finalized = client.post(f"/corpora/{corpus_id}/finalize", json={
+        "present_paths": ["sources/requirements/scope.md"],
+        "skipped": [{"relative_path": "sources/program.exe", "reason": "unsupported"}],
+        "errors": [],
+    })
+    assert finalized.status_code == 200
+    assert finalized.json()["state"] == "ready"
+    assert finalized.json()["document_count"] == 1
+    assert finalized.json()["attachment_ids"] == [artifact_id]
+    assert client.get(f"/corpora/{corpus_id}").json()["file_count"] == 1
+    assert any(item["id"] == corpus_id for item in client.get("/corpora").json())
+
+    submitted = client.post("/executions", json={
+        "task": "Produce the requested professional report.",
+        "corpus_ids": [corpus_id],
+        "planning_mode": "auto",
+    })
+    assert submitted.status_code == 201
+    state = state_engine.get_execution(submitted.json()["execution_id"])
+    assert state.variables["corpus_ids"] == [corpus_id]
+    assert state.variables["attachment_ids"] == [artifact_id]
+    assert state.variables["corpus_summaries"][0]["file_count"] == 1
+    assert state.variables["task"] == "Produce the requested professional report."
+    assert state.variables["corpus_auto_workflow"] is True
+    assert state.variables["corpus_policy"]["professional_delivery"] is True
+    assert state.variables["corpus_policy"]["internet_evidence"] == "prohibited"
+    assert "Mandatory local corpus workflow" not in state.variables["task"]
+
+    disabled = client.post("/executions", json={
+        "task": "Fix the attached source bug only.",
+        "corpus_ids": [corpus_id],
+        "planning_mode": "auto",
+        "corpus_auto_workflow": False,
+    })
+    assert disabled.status_code == 201
+    disabled_state = state_engine.get_execution(disabled.json()["execution_id"])
+    assert disabled_state.variables["task"] == "Fix the attached source bug only."
+    assert disabled_state.variables["corpus_auto_workflow"] is False
+    assert disabled_state.variables["corpus_policy"]["enabled"] is False
+    public = client.get(f"/executions/{submitted.json()['execution_id']}").json()
+    assert public["variables"]["corpus_summaries"][0]["root_label"] == "sources"
+    deleted = client.delete(f"/corpora/{corpus_id}")
+    assert deleted.status_code == 200
+    assert deleted.json()["retained_artifacts"] == 1
+    assert client.get(f"/corpora/{corpus_id}").status_code == 404
+    assert engine.artifact_store.get(artifact_id)["id"] == artifact_id
+
+
+def test_folder_corpus_api_rejects_traversal_and_unfinalized_submission(tmp_path):
+    from gptmoss.capabilities.filesystem import FilesystemCapability
+
+    event_bus = EventBus()
+    state_engine = StateEngine()
+    llm = MockLLMProvider()
+    engine = ExecutionEngine(
+        event_bus, state_engine,
+        ContextEngine(state_engine, RAMMemoryProvider()), llm,
+        SimplePlanner(llm), SimplePolicyProvider(),
+    )
+    engine.register_capability("filesystem", FilesystemCapability(str(tmp_path)))
+    kernel = RuntimeKernel(event_bus, state_engine, engine)
+    init_app(kernel, engine, state_engine, event_bus)
+    client = ASGIClient(app)
+    corpus_id = client.post("/corpora", json={
+        "name": "unsafe", "root_label": "sources", "resume": False,
+    }).json()["id"]
+
+    traversal = client.request(
+        "PUT", f"/corpora/{corpus_id}/files?relative_path=..%2Fsecret.md",
+        content=b"secret", headers={"Content-Type": "text/markdown"},
+    )
+    assert traversal.status_code == 400
+    blocked = client.post("/executions", json={"task": "Analyze", "corpus_ids": [corpus_id]})
+    assert blocked.status_code == 409
+
+
+def test_folder_corpus_api_finalizes_more_than_one_thousand_skipped_files(tmp_path):
+    from gptmoss.capabilities.filesystem import FilesystemCapability
+
+    event_bus = EventBus()
+    state_engine = StateEngine()
+    llm = MockLLMProvider()
+    engine = ExecutionEngine(
+        event_bus, state_engine,
+        ContextEngine(state_engine, RAMMemoryProvider()), llm,
+        SimplePlanner(llm), SimplePolicyProvider(),
+    )
+    engine.register_capability("filesystem", FilesystemCapability(str(tmp_path)))
+    init_app(RuntimeKernel(event_bus, state_engine, engine), engine, state_engine, event_bus)
+    client = ASGIClient(app)
+    corpus_id = client.post("/corpora", json={
+        "name": "large", "root_label": "sources", "resume": False,
+    }).json()["id"]
+
+    response = client.post(f"/corpora/{corpus_id}/finalize", json={
+        "present_paths": [],
+        "skipped": [
+            {"relative_path": f"sources/cache/{index}.bin", "reason": "unsupported"}
+            for index in range(1_005)
+        ],
+        "errors": [],
+    })
+
+    assert response.status_code == 200
+    assert response.json()["skipped_count"] == 1_005
+    assert len(response.json()["skipped"]) == 1_000
 
 
 def test_professional_delivery_download_route_is_scoped_to_execution(tmp_path):
@@ -853,8 +1137,31 @@ def test_gui_contains_complete_management_controls():
         'id="library-evolution"', "/agent-profiles", "/evolution",
         "uploadedTaskAttachments", "resetTaskAttachmentUploads",
         "resumableFailure", "Authentification LLM refusée",
+        'id="task-planning-mode"', "appendLlmStream", "clearLlmStream",
+        "planning_mode", "task_title",
+        'id="task-corpus-folder"', "webkitdirectory", "uploadSelectedCorpusFolder",
+        'id="task-corpus-name"', 'id="task-corpus-auto-workflow"', "corpus_auto_workflow",
+        'id="settings-max-parallel-plan-steps"', "max_parallel_plan_steps",
+        '"pdf":"application/pdf"', 'requestApi("/corpora"',
+        'id="library-corpora"', "toggleCorpusAttachment", "selectedLibraryCorpora", "deleteCorpus",
+        "applyConversationScroll", "scheduleFetchExecutionDetails",
+        'id="plan-graph"', "switchPlanView", "planGraphSignature",
+        "lastConversationSignature", "chatFollowLatest",
+        "parsePositiveInt", "highlightActiveCard",
+        "dataset.executionId", 'id="btn-clear-all"',
+        'value="documents"', 'value="memory"',
+        "ACTIVE_EXECUTION_STATUSES",
     ):
         assert marker in gui
+
+    assert "0 = sans plafond applicatif" not in gui
+    assert "0 = budget contextuel adaptatif" not in gui
+    assert "0 = complète" not in gui
+    assert "Failed to submit decision." not in gui
+    assert "Notification.requestPermission" not in gui
+    assert "Google Fonts" not in gui
+    assert "innerHTML.includes(id.substring" not in gui
+    assert 'min="1"' in gui
 
 
 def test_gui_layout_stays_inside_narrow_viewports_and_keeps_scroll_fallbacks():

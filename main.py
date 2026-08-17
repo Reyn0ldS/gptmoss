@@ -28,16 +28,30 @@ from gptmoss.planners import SimplePlanner
 from gptmoss.policies import SimplePolicyProvider
 from gptmoss.api import init_app
 
-# Setup logging (console and file)
+# Console logging first; the workspace file handler is attached after bootstrap.
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler(os.path.join(PROJECT_ROOT, "app.log"), encoding="utf-8")
-    ]
+    handlers=[logging.StreamHandler()],
 )
 logger = logging.getLogger("gptmoss")
+
+
+def _attach_workspace_log(workspace_root: str) -> None:
+    """Keep the rotating application log inside the runtime workspace."""
+    log_path = os.path.join(os.path.abspath(workspace_root), "app.log")
+    root = logging.getLogger()
+    for handler in list(root.handlers):
+        if not isinstance(handler, logging.FileHandler):
+            continue
+        current = os.path.abspath(getattr(handler, "baseFilename", "") or "")
+        if current == os.path.abspath(log_path):
+            return
+        root.removeHandler(handler)
+        handler.close()
+    file_handler = logging.FileHandler(log_path, encoding="utf-8")
+    file_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
+    root.addHandler(file_handler)
 
 def bootstrap_runtime(workspace_root: str):
     """
@@ -45,6 +59,7 @@ def bootstrap_runtime(workspace_root: str):
     """
     # Create workspace dir if it doesn't exist
     os.makedirs(workspace_root, exist_ok=True)
+    _attach_workspace_log(workspace_root)
 
     # 1. Core Engines
     event_bus = EventBus()
@@ -110,6 +125,7 @@ def bootstrap_runtime(workspace_root: str):
     )
     max_step_iterations = settings.max_step_iterations
     max_step_retries = settings.max_step_retries
+    max_parallel_plan_steps = settings.max_parallel_plan_steps
     skill_coverage_threshold = settings.skill_coverage_threshold
     max_autonomous_skills_per_execution = settings.max_autonomous_skills_per_execution
     safe_shell_mode = settings.safe_shell_mode
@@ -135,6 +151,8 @@ def bootstrap_runtime(workspace_root: str):
         default_model=model_name,
         ssl_verify=ssl_verify,
         ssl_cert_path=ssl_cert_path,
+        context_window_tokens=settings.context_window_tokens,
+        context_output_reserve_tokens=settings.context_output_reserve_tokens,
     )
     llm_provider.set_vision_mode(vision_mode)
 
@@ -169,6 +187,7 @@ def bootstrap_runtime(workspace_root: str):
         default_skills=default_skills,
         max_step_iterations=max_step_iterations,
         max_step_retries=max_step_retries,
+        max_parallel_plan_steps=max_parallel_plan_steps,
         continue_while_progress=continue_while_progress,
         agent_profile_registry=agent_profile_registry,
         skill_lifecycle=skill_lifecycle,

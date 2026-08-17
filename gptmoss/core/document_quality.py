@@ -61,6 +61,40 @@ def _positive_int(value: Any, name: str, default: int) -> int:
     return result
 
 
+def _compact_integer_ranges(values: Sequence[int]) -> str:
+    """Render every integer exactly once as concise contiguous ranges."""
+    ordered = sorted({int(value) for value in values})
+    if not ordered:
+        return ""
+    spans: List[str] = []
+    start = previous = ordered[0]
+    for value in ordered[1:]:
+        if value == previous + 1:
+            previous = value
+            continue
+        spans.append(str(start) if start == previous else f"{start}-{previous}")
+        start = previous = value
+    spans.append(str(start) if start == previous else f"{start}-{previous}")
+    return ", ".join(spans)
+
+
+def _without_markdown_code(text: str) -> str:
+    """Exclude fenced and inline code examples from evidence detection."""
+    visible: List[str] = []
+    in_fence = False
+    for line in text.splitlines():
+        stripped = line.lstrip()
+        if stripped.startswith("```") or stripped.startswith("~~~"):
+            in_fence = not in_fence
+            visible.append("")
+            continue
+        if in_fence:
+            visible.append("")
+            continue
+        visible.append(re.sub(r"`+[^`\n]*`+", "", line))
+    return "\n".join(visible)
+
+
 def _words(value: str) -> List[str]:
     return re.findall(r"[^\W_]+(?:[-'][^\W_]+)*", value, flags=re.UNICODE)
 
@@ -216,10 +250,13 @@ def validate_document(path: Path, constraints: Dict[str, Any]) -> ValidationRepo
     lines = text.splitlines()
     headings = _headings(lines)
     paragraphs = _paragraphs(text)
+    evidence_text = _without_markdown_code(text)
+    all_reference_count = len(list(_LOCAL_REFERENCE.finditer(text)))
     references = [
         {"source": match.group(1).strip(), "locator": match.group(2).strip()}
-        for match in _LOCAL_REFERENCE.finditer(text)
+        for match in _LOCAL_REFERENCE.finditer(evidence_text)
     ]
+    code_reference_count = max(0, all_reference_count - len(references))
     external_links = _EXTERNAL_LINK.findall(text)
     required_headings = _strings(constraints.get("required_headings"), "required_headings")
     required_ids = _strings(
@@ -313,10 +350,14 @@ def validate_document(path: Path, constraints: Dict[str, Any]) -> ValidationRepo
     counts = Counter(paragraph for paragraph in normalized_paragraphs if paragraph)
     duplicate_count = sum(count - 1 for count in counts.values() if count > 1)
     if "max_duplicate_paragraphs" in constraints and duplicate_count > max_duplicates:
+        duplicate_samples = [
+            paragraph[:120] for paragraph, count in counts.items() if count > 1
+        ]
         _failure(
             report,
             f"document contains {duplicate_count} duplicate paragraph occurrence(s); "
-            f"maximum is {max_duplicates}",
+            f"maximum is {max_duplicates}; repeated paragraph prefix(es): "
+            + "; ".join(duplicate_samples[:5]),
         )
 
     allowed_sources = {_normalize_source(source) for source in required_sources}
@@ -346,9 +387,21 @@ def validate_document(path: Path, constraints: Dict[str, Any]) -> ValidationRepo
         source for source in required_sources if _normalize_source(source) not in cited_sources
     ]
     if missing_sources:
-        _failure(report, "uncited required source file(s): " + ", ".join(missing_sources))
+        message = "uncited required source file(s): " + ", ".join(missing_sources)
+        if code_reference_count:
+            message += (
+                f"; {code_reference_count} citation-like pattern(s) inside Markdown code do not "
+                "count as evidence; write actual citations without backticks or code fences"
+            )
+        _failure(report, message)
     if constraints.get("require_local_references") and not references:
-        _failure(report, "document contains no local source reference")
+        message = "document contains no local source reference"
+        if code_reference_count:
+            message += (
+                "; citation-like patterns inside Markdown code are examples, not evidence; "
+                "write actual citations without backticks or code fences"
+            )
+        _failure(report, message)
 
     source_units_covered = 0
     source_units_total = 0
@@ -377,11 +430,10 @@ def validate_document(path: Path, constraints: Dict[str, Any]) -> ValidationRepo
             source_units_covered += len(expected & covered)
             source_units_total += len(expected)
             if missing_units:
-                display = ", ".join(str(value) for value in missing_units[:20])
-                if len(missing_units) > 20:
-                    display += f", and {len(missing_units) - 20} more"
+                display = _compact_integer_ranges(missing_units)
                 coverage_failures.append(
-                    f"{source} has uncovered required {unit}: {display}"
+                    f"{source} has uncovered required {unit}: {display}; "
+                    "add bounded local reference(s) covering these exact ranges"
                 )
         if coverage_failures:
             _failure(
@@ -444,6 +496,9 @@ def validate_document(path: Path, constraints: Dict[str, Any]) -> ValidationRepo
         "required_sources_total": len(required_sources),
         "source_units_covered": source_units_covered,
         "source_units_total": source_units_total,
+        "empty_required_sections": len(empty_headings),
+        "invalid_local_references": len(invalid_references),
+        "uncited_required_sources": len(missing_sources),
     }
     report["metrics"] = metrics
     for metric, minimum in (constraints.get("minimums") or {}).items():

@@ -303,6 +303,40 @@ def test_optional_planner_metadata_cannot_abort_an_otherwise_valid_plan():
     assert len(contract["normalization_warnings"]) == 3
 
 
+def test_delegated_delivery_contract_does_not_expand_team_obligations():
+    plan = {
+        "steps": [{
+            "id": 0,
+            "role": "architect",
+            "specialist": "Requirements Architect",
+            "description": "Build the delegated requirements matrix.",
+            "dependencies": [],
+            "expertise": ["requirements"],
+            "required_artifacts": ["requirements-matrix.md"],
+            "owned_paths": ["requirements-matrix.md"],
+            "acceptance_criteria": ["The matrix is complete."],
+            "verification_commands": [],
+            "requirement_ids": [],
+            "satisfies_obligations": [],
+            "required_evidence": [],
+        }],
+    }
+
+    contract = build_delivery_contract(
+        plan,
+        "Build a professional requirements matrix from local evidence.",
+        repair_obligations=False,
+    )
+
+    assert len(plan["steps"]) == 1
+    assert plan["steps"][0]["owned_paths"] == ["requirements-matrix.md"]
+    assert contract["plan_obligations"] == []
+    assert not any(
+        item.get("pattern") == "analysis/independent-validation.md"
+        for item in contract["ownership"]
+    )
+
+
 def test_command_evidence_accepts_windows_wrappers_but_not_a_targeted_subset():
     assert commands_equivalent(
         "python -m pytest -q",

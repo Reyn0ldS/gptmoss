@@ -1,6 +1,9 @@
 import os
+import re
+import unicodedata
 from typing import Dict, Any, Optional
 from gptmoss.interfaces.capability import capability, action
+from gptmoss.core.durable_io import write_text_atomic
 
 @capability(name="filesystem", description="Read and write files on the local filesystem.")
 class FilesystemCapability:
@@ -71,16 +74,31 @@ class FilesystemCapability:
         return full_path
 
     @action(name="read", description="Read the content of a file. Path is relative to the workspace.")
-    def read(self, path: str, context: Optional[Dict[str, Any]] = None) -> str:
-        """Reads contents of a file."""
+    def read(
+        self,
+        path: str,
+        context: Optional[Dict[str, Any]] = None,
+        offset: int = 0,
+        limit: int = 0,
+    ) -> str:
+        """Read text, optionally using bounded character offsets for large files."""
         execution_id = context.get("execution_id") if context else None
         resolved = self._resolve_path(path, execution_id)
-        if not os.path.exists(resolved):
-            return f"Error: File not found at {path}"
         if os.path.isdir(resolved):
             return f"Error: '{path}' is a directory. Use list_dir to view its contents."
-        with open(resolved, "r", encoding="utf-8") as f:
-            return f.read()
+        # Open directly after the sandboxed resolution. A separate exists()
+        # probe creates a TOCTOU window and has produced false negatives on
+        # Windows/network-backed workspaces even when list_dir sees the file.
+        try:
+            with open(resolved, "r", encoding="utf-8") as f:
+                content = f.read()
+        except FileNotFoundError:
+            return f"Error: File not found at {path}"
+        start = max(0, int(offset or 0))
+        if start >= len(content):
+            return ""
+        count = max(0, int(limit or 0))
+        return content[start : start + count] if count else content[start:]
 
     @action(name="write", description="Create or overwrite a file with contents. Path is relative to the workspace.")
     def write(self, path: str, content: str, context: Optional[Dict[str, Any]] = None) -> str:
@@ -91,6 +109,104 @@ class FilesystemCapability:
         with open(resolved, "w", encoding="utf-8") as f:
             f.write(content)
         return f"File written successfully to {path}"
+
+    @action(
+        name="append",
+        description=(
+            "Append text to a file without replacing existing content. Use this to build "
+            "large owned artifacts in bounded sections after the initial write."
+        ),
+    )
+    def append(self, path: str, content: str, context: Optional[Dict[str, Any]] = None) -> str:
+        """Append UTF-8 text to an owned workspace file."""
+        execution_id = context.get("execution_id") if context else None
+        resolved = self._resolve_path(path, execution_id)
+        if os.path.isdir(resolved):
+            return f"Error: '{path}' is a directory. Append requires a file path."
+        os.makedirs(os.path.dirname(resolved), exist_ok=True)
+        with open(resolved, "a", encoding="utf-8") as f:
+            f.write(content)
+        return f"Content appended successfully to {path}"
+
+    @staticmethod
+    def _paragraph_key(value: str) -> str:
+        without_references = re.sub(
+            r"\[[^\[\]\n]+?\s+>\s+[^\[\]\n]+?\]", "", str(value or "")
+        )
+        decomposed = unicodedata.normalize("NFKD", without_references)
+        folded = "".join(
+            character for character in decomposed
+            if not unicodedata.combining(character)
+        ).casefold()
+        return " ".join(re.findall(r"[^\W_]+", folded, flags=re.UNICODE))
+
+    @action(
+        name="replace_paragraph",
+        description=(
+            "Replace one paragraph selected by a unique normalized prefix. Use occurrence=2 "
+            "to remove the second copy of a duplicated paragraph. New content may be empty "
+            "only when removing a duplicate; headings and surrounding paragraphs are preserved."
+        ),
+    )
+    def replace_paragraph(
+        self,
+        path: str,
+        paragraph_prefix: str,
+        content: str,
+        occurrence: int = 1,
+        context: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        """Atomically replace one blank-line-delimited Markdown paragraph."""
+        execution_id = context.get("execution_id") if context else None
+        resolved = self._resolve_path(path, execution_id)
+        prefix = self._paragraph_key(paragraph_prefix)
+        if len(prefix) < 24:
+            return "Error: paragraph_prefix must contain at least 24 normalized characters."
+        try:
+            requested_occurrence = int(occurrence)
+        except (TypeError, ValueError):
+            return "Error: occurrence must be an integer greater than or equal to 1."
+        if requested_occurrence < 1:
+            return "Error: occurrence must be an integer greater than or equal to 1."
+        if not os.path.isfile(resolved):
+            return f"Error: File not found at {path}"
+        with open(resolved, "r", encoding="utf-8") as handle:
+            original = handle.read()
+
+        # Keep every separator verbatim. A segment may start with a Markdown
+        # heading; retain it while replacing only the paragraph body beneath it.
+        segments = re.split(r"(\r?\n[ \t]*\r?\n+)", original)
+        matches = []
+        for index in range(0, len(segments), 2):
+            segment = segments[index]
+            lines = segment.splitlines()
+            body_start = 0
+            while body_start < len(lines) and re.match(
+                r"^\s*#{1,6}\s+\S", lines[body_start]
+            ):
+                body_start += 1
+            body = " ".join(line.strip() for line in lines[body_start:] if line.strip())
+            if self._paragraph_key(body).startswith(prefix):
+                matches.append((index, lines[:body_start]))
+        if len(matches) < requested_occurrence:
+            return (
+                f"Error: paragraph prefix matched {len(matches)} occurrence(s), "
+                f"cannot replace occurrence {requested_occurrence}. Read the current file "
+                "and retry with an exact longer prefix."
+            )
+
+        segment_index, heading_lines = matches[requested_occurrence - 1]
+        replacement_parts = [*heading_lines]
+        if str(content or "").strip():
+            replacement_parts.append(str(content).strip())
+        segments[segment_index] = "\n".join(replacement_parts)
+        updated = "".join(segments)
+        if updated == original:
+            return "Error: replacement would not change the file."
+        write_text_atomic(resolved, updated)
+        return (
+            f"Paragraph occurrence {requested_occurrence} replaced successfully in {path}"
+        )
 
     @action(name="list_dir", description="List files and directories in a path relative to the workspace.")
     def list_dir(self, path: str = ".", context: Optional[Dict[str, Any]] = None) -> str:

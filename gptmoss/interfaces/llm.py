@@ -23,6 +23,8 @@ class LLMProvider(ABC):
             tools: Optional list of tool descriptions in JSON schema format.
             tool_choice: Optional tool choice setting.
             **kwargs: Extra arguments passed to the completion API.
+                Optional ``on_text_delta`` receives incremental assistant text
+                (sync or async callable). Providers that cannot stream ignore it.
             
         Returns:
             Dict containing:

@@ -25,7 +25,10 @@
     "gptmoss/core/constants.py": "runtime",
     "gptmoss/core/context.py": "memory",
     "gptmoss/core/corpus.py": "assurance",
+    "gptmoss/core/corpus_policy.py": "assurance",
     "gptmoss/core/delivery.py": "assurance",
+    "gptmoss/core/delivery_feedback.py": "assurance",
+    "gptmoss/core/evidence_graph.py": "assurance",
     "gptmoss/core/delivery_coordinator.py": "assurance",
     "gptmoss/core/delivery_package.py": "delivery",
     "gptmoss/core/document_quality.py": "assurance",
@@ -40,15 +43,20 @@
     "gptmoss/core/event_bus.py": "runtime",
     "gptmoss/core/evolution.py": "skills",
     "gptmoss/core/execution.py": "runtime",
+    "gptmoss/core/execution_plan.py": "runtime",
+    "gptmoss/core/execution_progress.py": "runtime",
+    "gptmoss/core/execution_rescue.py": "runtime",
     "gptmoss/core/kernel.py": "runtime",
     "gptmoss/core/long_document_engine.py": "documents",
     "gptmoss/core/observability.py": "observability",
+    "gptmoss/core/plan_obligations.py": "planning",
     "gptmoss/core/professional_delivery.py": "delivery",
     "gptmoss/core/provider_recovery.py": "runtime",
     "gptmoss/core/scheduler.py": "planning",
     "gptmoss/core/settings.py": "configuration",
     "gptmoss/core/skills.py": "skills",
     "gptmoss/core/state.py": "persistence",
+    "gptmoss/core/workload.py": "planning",
     "gptmoss/interfaces/capability.py": "contract",
     "gptmoss/interfaces/llm.py": "contract",
     "gptmoss/interfaces/memory.py": "contract",
@@ -56,6 +64,8 @@
     "gptmoss/interfaces/policy.py": "contract",
     "gptmoss/memory/json_store.py": "memory",
     "gptmoss/memory/ram.py": "memory",
+    "gptmoss/planners/complexity.py": "planning",
+    "gptmoss/planners/fallbacks.py": "planning",
     "gptmoss/planners/simple.py": "planning",
     "gptmoss/policies/simple.py": "security",
     "gptmoss/providers/qwen.py": "provider",
@@ -88,11 +98,11 @@
     },
     "documents": {
       "module": "gptmoss/capabilities/documents.py",
-      "actions": ["inventory", "search", "read", "read_chunk"]
+      "actions": ["inventory", "read_image", "read_images", "search", "read", "read_chunk"]
     },
     "filesystem": {
       "module": "gptmoss/capabilities/filesystem.py",
-      "actions": ["read", "write", "list_dir", "delete"]
+      "actions": ["read", "write", "append", "replace_paragraph", "list_dir", "delete"]
     },
     "memory": {
       "module": "gptmoss/capabilities/memory.py",
@@ -116,6 +126,12 @@
     ["GET", "/artifacts/search", "search_artifacts"],
     ["GET", "/artifacts/{artifact_id}/preview", "preview_artifact"],
     ["DELETE", "/artifacts/{artifact_id}", "delete_artifact"],
+    ["POST", "/corpora", "create_corpus"],
+    ["GET", "/corpora", "list_corpora"],
+    ["GET", "/corpora/{corpus_id}", "get_corpus"],
+    ["DELETE", "/corpora/{corpus_id}", "delete_corpus"],
+    ["PUT", "/corpora/{corpus_id}/files", "upload_corpus_file"],
+    ["POST", "/corpora/{corpus_id}/finalize", "finalize_corpus"],
     ["POST", "/skills", "save_skill"],
     ["POST", "/skills/import", "import_skill"],
     ["POST", "/skills/{name}/validate", "validate_skill"],
@@ -130,6 +146,7 @@
     ["GET", "/evolution", "evolution_status"],
     ["GET", "/executions", "list_executions"],
     ["GET", "/executions/{execution_id}", "get_execution"],
+    ["GET", "/executions/{execution_id}/evidence-graph", "get_execution_evidence_graph"],
     ["GET", "/executions/{execution_id}/delivery", "get_execution_delivery"],
     ["GET", "/executions/{execution_id}/document", "get_execution_document_state"],
     ["GET", "/executions/{execution_id}/subagents", "list_subagents"],
@@ -169,6 +186,7 @@
     "ExecutionStarted",
     "ExecutionWaitingProvider",
     "FileOwnershipViolation",
+    "LLMDelta",
     "LLMRequest",
     "LLMResponse",
     "LLMRetryScheduled",
@@ -224,11 +242,14 @@
     "restrict_to_workspace",
     "allow_subfolders",
     "max_context_chars",
+    "context_window_tokens",
+    "context_output_reserve_tokens",
     "max_upload_bytes",
     "max_attachment_text_chars",
     "max_transitions_per_execution",
     "max_step_iterations",
     "max_step_retries",
+    "max_parallel_plan_steps",
     "safe_shell_mode",
     "shell_timeout_seconds",
     "shell_max_output_chars",
@@ -243,7 +264,7 @@
   "gui_surfaces": [
     {
       "id": "task-composer",
-      "evidence": ["submitNewTask", "/executions", "/projects", "/artifacts"]
+      "evidence": ["submitNewTask", "/executions", "/projects", "/artifacts", "task-planning-mode", "runGPTMOSSButtonAudit"]
     },
     {
       "id": "execution-control",
@@ -251,7 +272,7 @@
     },
     {
       "id": "execution-observation",
-      "evidence": ["setupWebSocket", "/ws/events", "/unified-feed", "fetchExecutionDetails", "/document"]
+      "evidence": ["setupWebSocket", "/ws/events", "/unified-feed", "fetchExecutionDetails", "/document", "appendLlmStream", "applyConversationScroll", "switchPlanView", "plan-graph"]
     },
     {
       "id": "library",
@@ -268,7 +289,9 @@
   ],
   "persistence": [
     ["workspace/config.json", "active configuration"],
-    ["workspace/state_store.json", "execution and conversation states"],
+    ["workspace/state_store.json", "state index and non-execution partitions"],
+    ["workspace/state_executions", "per-execution durable snapshots"],
+    ["workspace/state_conversations", "per-conversation durable snapshots"],
     ["workspace/memories.json", "governed long-term memory"],
     ["workspace/telemetry.jsonl", "local execution telemetry"],
     ["workspace/settings_audit.jsonl", "settings and secret access audit"],
@@ -282,15 +305,15 @@
   "features": [
     {
       "id": "runtime-api-gui",
-      "tests": ["tests/test_api.py", "tests/test_browser_layout_audit.py", "tests/test_end_to_end_workflow.py", "tests/test_functional_coverage_contract.py"]
+      "tests": ["tests/test_api.py", "tests/test_browser_layout_audit.py", "tests/test_end_to_end_workflow.py", "tests/test_functional_coverage_contract.py", "tests/test_gui_browser_smoke.py", "tests/test_gui_all_buttons.py"]
     },
     {
       "id": "planning-execution-lifecycle",
-      "tests": ["tests/test_execution.py", "tests/test_lifecycle_chronology.py", "tests/test_planning_modes.py", "tests/test_general_runtime_adaptation.py", "tests/test_adaptive_autonomy.py", "tests/test_execution_services.py", "tests/test_scheduler_and_legacy_state.py", "tests/test_state_durability.py"]
+      "tests": ["tests/test_execution.py", "tests/test_lifecycle_chronology.py", "tests/test_planning_modes.py", "tests/test_plan_obligations.py", "tests/test_plan_graph.py", "tests/test_delivery_feedback.py", "tests/test_evidence_graph.py", "tests/test_generic_planning_and_context.py", "tests/test_general_runtime_adaptation.py", "tests/test_adaptive_autonomy.py", "tests/test_execution_services.py", "tests/test_scheduler_and_legacy_state.py", "tests/test_state_durability.py", "tests/test_runtime_ux.py"]
     },
     {
       "id": "provider-recovery",
-      "tests": ["tests/test_provider_integration.py", "tests/test_runtime_improvements.py", "tests/test_provider_and_shell_services.py"]
+      "tests": ["tests/test_provider_integration.py", "tests/test_runtime_improvements.py", "tests/test_provider_and_shell_services.py", "tests/test_generic_planning_and_context.py"]
     },
     {
       "id": "policy-tools-delegation",
@@ -361,6 +384,7 @@
   },
   "documents": [
     "docs/architecture.md",
+    "docs/delivery-graph.md",
     "docs/functional-map.md",
     "docs/coverage-matrix.md",
     "docs/offline-package-manifest.md",

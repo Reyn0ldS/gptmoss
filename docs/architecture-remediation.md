@@ -6,11 +6,12 @@ façades afin de préserver l'API Python, les fichiers persistés et le paquet o
 
 ## 1. Persistance atomique
 
-`StateEngine` sérialise un snapshot versionné et le publie avec
-`core.durable_io.write_text_atomic`. Une erreur d'écriture ou de remplacement laisse le
-dernier fichier valide intact. Le verrou est créé avec l'instance et protège les
-sauvegardes concurrentes. Les versions anciennes sont migrées, les versions futures ou
-corrompues sont mises en quarantaine, et l'historique est borné. Preuves :
+`StateEngine` publie un index v3 avec `core.durable_io.write_text_atomic`. Les exécutions
+et conversations sont des générations immuables adressées par SHA-256 : seules les
+valeurs modifiées sont réécrites, l'index est committé après les sidecars, puis les
+générations non référencées sont retirées. Une erreur avant le commit conserve le dernier
+ensemble cohérent. L'identité et le digest sont revérifiés au chargement, les versions
+v1/v2 sont migrées, et les versions futures ou corrompues sont mises en quarantaine. Preuves :
 `tests/test_state_durability.py`.
 
 ## 2. Cycle de vie des événements
@@ -33,13 +34,18 @@ durabilité, d'API, d'exécution et de délégation.
 l'assurance à `DeliveryCoordinator` et les décisions humaines à
 `ApprovalCoordinator`. La préparation d'une tâche, la coordination du DAG, l'exécution
 d'une étape et le traitement des appels d'outils sont séparés. Les méthodes de façade
-restent compatibles.
+restent compatibles. `start_execution` est l'unique propriétaire des tâches actives ;
+`cancel_active_execution` et `stop_active_executions` interrompent les appels LLM et
+nettoient les étapes internes avant l'arrêt des transports.
 Preuves : `tests/test_execution_services.py` et les suites d'exécution existantes.
 
 ## 5. Qwen et Shell
 
-Le contexte Qwen et le parsing des tool calls sont des politiques pures. Chaque
-reconfiguration ferme le client HTTP remplacé et l'arrêt ferme le client actif. La
+Le contexte Qwen et le parsing des tool calls sont des politiques pures. Le flux agrège
+le texte, les appels d'outils et les statistiques de tokens dans un contrat commun ; le
+repli textuel consomme le même format et les serveurs refusant `stream_options` sont
+retentés sans l'extension optionnelle. Chaque reconfiguration ferme le client HTTP
+remplacé et l'arrêt ferme le client actif. La
 décision de sécurité shell, le registre des processus et le lanceur sont séparés de la
 capacité ; stdout/stderr sont spoulés sur disque puis lus dans un budget borné.
 Preuves :

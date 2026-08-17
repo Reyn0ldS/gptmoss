@@ -5,6 +5,71 @@ from gptmoss.interfaces.capability import capability, action
 
 logger = logging.getLogger("gptmoss.capabilities.agent")
 
+INHERITED_VARIABLE_KEYS = (
+    "project_id",
+    "project_path",
+    "project_domains",
+    "attachment_ids",
+    "corpus_ids",
+    "corpus_auto_workflow",
+    "corpus_policy",
+    "planning_mode",
+)
+TERMINAL_EXECUTION_STATUSES = frozenset({"completed", "failed", "cancelled"})
+SUBTASK_WAIT_POLLS = 3_600
+
+
+def _status_value(state) -> str:
+    status = getattr(state, "status", state)
+    return str(getattr(status, "value", status))
+
+
+def child_agent_config(
+    state_engine,
+    parent_id: Optional[str],
+    *,
+    system_prompt: Optional[str] = None,
+    role_name: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Build a child agent_config that inherits project context from its ancestry."""
+    config: Dict[str, Any] = {}
+    if system_prompt:
+        config["system_prompt"] = system_prompt
+    if role_name:
+        config["role_name"] = role_name
+    if not parent_id or state_engine is None:
+        return config
+
+    config["parent_execution_id"] = parent_id
+    inherited: Dict[str, Any] = {}
+    skills = None
+    current_id = parent_id
+    seen: set[str] = set()
+    executions = getattr(state_engine, "executions", {})
+    while current_id and current_id not in seen:
+        seen.add(current_id)
+        state = executions.get(current_id)
+        if not state:
+            break
+        variables = state.variables or {}
+        for key in INHERITED_VARIABLE_KEYS:
+            if key in variables and key not in inherited:
+                inherited[key] = variables[key]
+        if skills is None:
+            requested = variables.get("requested_skills")
+            agent_config = variables.get("agent_config") if isinstance(variables.get("agent_config"), dict) else {}
+            candidate = requested or agent_config.get("skills")
+            if candidate:
+                skills = list(candidate)
+        current_id = variables.get("parent_execution_id")
+
+    if inherited:
+        config["variables"] = inherited
+    if skills:
+        config["skills"] = skills
+    return config
+
+
 @capability(name="agent", description="Manage, spawn, and monitor sub-agents to delegate tasks.")
 class AgentCapability:
     """
@@ -18,20 +83,26 @@ class AgentCapability:
     def update_workspace_config(self, workspace_root: str):
         self.workspace_root = workspace_root
 
+    def _state_engine(self):
+        if not self.kernel:
+            return None
+        return getattr(self.kernel, "state_engine", None) or getattr(
+            getattr(self.kernel, "execution_engine", None), "state_engine", None
+        )
+
     @action(name="spawn", description="Spawn a new sub-agent to run a task in the background. Returns the sub-agent's execution_id.")
     async def spawn(self, task: str, system_prompt: Optional[str] = None, role_name: Optional[str] = None, context: Optional[Dict[str, Any]] = None) -> str:
         """Launches a sub-agent task asynchronously."""
         if not self.kernel:
             return "Error: Runtime kernel reference not set on AgentCapability."
-            
-        agent_config = {
-            "system_prompt": system_prompt or "You are a helpful MOSS sub-agent assisting a parent agent."
-        }
-        if role_name:
-            agent_config["role_name"] = role_name
+
         parent_id = context.get("execution_id") if context else None
-        if parent_id:
-            agent_config["parent_execution_id"] = parent_id
+        agent_config = child_agent_config(
+            self._state_engine(),
+            parent_id,
+            system_prompt=system_prompt or "You are a helpful MOSS sub-agent assisting a parent agent.",
+            role_name=role_name,
+        )
         try:
             exec_id = await self.kernel.submit_task(task, agent_config)
             return f"Sub-agent spawned successfully. Execution ID: {exec_id}. Status: running."
@@ -74,39 +145,47 @@ class AgentCapability:
         """Launches a sub-agent and waits synchronously until completion."""
         if not self.kernel:
             return "Error: Runtime kernel reference not set on AgentCapability."
-            
-        agent_config = {
-            "system_prompt": system_prompt or "You are a helpful MOSS sub-agent assisting a parent agent."
-        }
-        if role_name:
-            agent_config["role_name"] = role_name
+
         parent_id = context.get("execution_id") if context else None
-        if parent_id:
-            agent_config["parent_execution_id"] = parent_id
+        agent_config = child_agent_config(
+            self._state_engine(),
+            parent_id,
+            system_prompt=system_prompt or "You are a helpful MOSS sub-agent assisting a parent agent.",
+            role_name=role_name,
+        )
         try:
             exec_id = await self.kernel.submit_task(task, agent_config)
             state_engine = self.kernel.execution_engine.state_engine
-            
-            # Poll until finished
+
+            polls = 0
             while True:
                 await asyncio.sleep(1.0)
-                state = state_engine.get_execution(exec_id)
-                if state.status in ("completed", "failed", "cancelled", "waiting_provider"):
+                state = state_engine.executions.get(exec_id) or state_engine.get_execution(exec_id)
+                if parent_id:
+                    parent = state_engine.executions.get(parent_id)
+                    if parent and _status_value(parent) == "cancelled":
+                        return (
+                            f"Parent execution was cancelled while waiting for subtask. "
+                            f"Execution ID: {exec_id}."
+                        )
+                status = _status_value(state)
+                if status in TERMINAL_EXECUTION_STATUSES:
                     break
-                    
+                polls += 1
+                if polls >= SUBTASK_WAIT_POLLS:
+                    return (
+                        f"Subtask is still {status} after waiting. "
+                        f"Execution ID: {exec_id}."
+                    )
+
             convo = state_engine.get_conversation(exec_id)
-            if state.status == "completed":
-                # Find last assistant message as result
+            if status == "completed":
                 last_response = "Subtask completed."
                 for msg in reversed(convo.messages):
                     if msg.get("role") == "assistant" and msg.get("content"):
                         last_response = msg["content"]
                         break
                 return f"Subtask completed successfully. Result:\n{last_response}"
-            elif state.status == "waiting_provider":
-                return (f"Subtask is durably waiting for the private LLM provider and will resume automatically. "
-                        f"Execution ID: {exec_id}.")
-            else:
-                return f"Subtask failed or was cancelled. Final status: {state.status}."
+            return f"Subtask failed or was cancelled. Final status: {status}."
         except Exception as e:
             return f"Error executing subtask: {e}"

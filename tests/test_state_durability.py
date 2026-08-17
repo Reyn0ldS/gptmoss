@@ -37,7 +37,9 @@ def test_state_snapshot_is_versioned_and_legacy_state_still_loads(tmp_path):
     state = StateEngine(str(path))
     assert state.get_execution("legacy").status == "completed"
     assert state.save_to_disk()
-    assert json.loads(path.read_text(encoding="utf-8"))["schema_version"] == 1
+    assert json.loads(path.read_text(encoding="utf-8"))["schema_version"] == 3
+    restored = StateEngine(str(path))
+    assert restored.get_execution("legacy").status == "completed"
 
 
 def test_corrupt_state_fails_closed_and_can_be_replaced(tmp_path, caplog):
@@ -103,6 +105,91 @@ def test_concurrent_saves_are_serialized(tmp_path, monkeypatch):
     assert all(results)
     assert maximum == 1
     assert StateEngine(str(path)).get_execution("shared").results["stable"] is True
+
+
+def test_partitioned_state_writes_only_changed_generations(tmp_path, monkeypatch):
+    path = tmp_path / "state.json"
+    state = StateEngine(str(path))
+    state.get_execution("first").results["revision"] = 1
+    state.get_execution("second").results["revision"] = 1
+    assert state.save_to_disk()
+    before = json.loads(path.read_text(encoding="utf-8"))["execution_records"]
+
+    writes = []
+    real_writer = __import__("gptmoss.core.state", fromlist=["write_text_atomic"]).write_text_atomic
+
+    def observed_writer(target, content, **kwargs):
+        writes.append(Path(target))
+        return real_writer(target, content, **kwargs)
+
+    monkeypatch.setattr("gptmoss.core.state.write_text_atomic", observed_writer)
+    state.get_execution("first").results["revision"] = 2
+    assert state.save_to_disk()
+    after = json.loads(path.read_text(encoding="utf-8"))["execution_records"]
+
+    generation_writes = [item for item in writes if item.parent.name == "state_executions"]
+    assert len(generation_writes) == 1
+    assert before["second"] == after["second"]
+    assert before["first"] != after["first"]
+
+
+def test_unreferenced_generation_files_are_removed_after_index_commit(tmp_path):
+    path = tmp_path / "state.json"
+    state = StateEngine(str(path))
+    state.get_execution("keep").results["revision"] = 1
+    assert state.save_to_disk()
+    executions_dir = tmp_path / "state_executions"
+    leftover = executions_dir / "orphan-generation.json"
+    leftover.write_text("{}", encoding="utf-8")
+    assert leftover.is_file()
+
+    state.get_execution("keep").results["revision"] = 2
+    assert state.save_to_disk()
+
+    retained = {
+        item["file"]
+        for item in json.loads(path.read_text(encoding="utf-8"))["execution_records"].values()
+    }
+    remaining = {item.name for item in executions_dir.glob("*.json")}
+    assert leftover.name not in remaining
+    assert remaining == retained
+    assert StateEngine(str(path)).get_execution("keep").results["revision"] == 2
+
+
+def test_index_failure_keeps_previous_consistent_generation(tmp_path, monkeypatch):
+    path = tmp_path / "state.json"
+    state = StateEngine(str(path))
+    state.get_execution("stable").results["value"] = "before"
+    assert state.save_to_disk()
+    previous_index = path.read_text(encoding="utf-8")
+    real_writer = __import__("gptmoss.core.state", fromlist=["write_text_atomic"]).write_text_atomic
+
+    def fail_index(target, content, **kwargs):
+        if Path(target).resolve() == path.resolve():
+            raise PermissionError("simulated interruption before index commit")
+        return real_writer(target, content, **kwargs)
+
+    monkeypatch.setattr("gptmoss.core.state.write_text_atomic", fail_index)
+    state.get_execution("stable").results["value"] = "after"
+    assert not state.save_to_disk()
+    assert path.read_text(encoding="utf-8") == previous_index
+    restored = StateEngine(str(path))
+    assert restored.executions["stable"].results["value"] == "before"
+
+
+def test_generation_identity_prevents_sanitized_name_collisions(tmp_path):
+    path = tmp_path / "state.json"
+    state = StateEngine(str(path))
+    state.get_execution("unsafe/id").results["value"] = "slash"
+    state.get_execution("unsafe?id").results["value"] = "question"
+    assert state.save_to_disk()
+
+    index = json.loads(path.read_text(encoding="utf-8"))
+    references = index["execution_records"]
+    assert references["unsafe/id"]["file"] != references["unsafe?id"]["file"]
+    restored = StateEngine(str(path))
+    assert restored.executions["unsafe/id"].results["value"] == "slash"
+    assert restored.executions["unsafe?id"].results["value"] == "question"
 
 
 @pytest.mark.asyncio

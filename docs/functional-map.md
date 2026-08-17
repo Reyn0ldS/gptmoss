@@ -37,9 +37,16 @@ superviseur avec son jeton. Un port occupé est signalé avant de démarrer l'en
    passe à `running` avec `ExecutionStarted`.
 5. Le contexte rassemble conversation, état, mémoire validée du projet, schémas d'outils
    et pièces jointes bornées ; `ContextBuilt` est publié.
-6. Le planner produit exigences, interfaces, dépendances, validations et étapes. Le plan
-   est normalisé, les exigences héritées sont fusionnées et le profil professionnel est
-   appliqué aux travaux documentaires.
+6. Le planner produit exigences, interfaces, dépendances, validations et opérations sans
+   quota d'étapes. `corpus_policy` transporte séparément les garanties locales sans
+   réécrire le texte utilisateur. Chaque porte déclare `operation`,
+   `satisfies_obligations` et `required_evidence`; le runtime ajoute uniquement les portes
+   absentes, contrôle leurs dépendances et refuse les preuves purement déclaratives. Un
+   travail de 24 h peut donc produire des dizaines d'étapes tandis qu'une tâche directe
+   regroupe ses obligations dans une seule unité. Après normalisation, `workload.py`
+   partitionne la charge réelle et rejoint les résultats par consolidation. Le domaine
+   logiciel reste un contexte d'analyse large, mais une porte d'implémentation n'est
+   ajoutée que si une action de modification vise explicitement un élément logiciel.
 7. Une réduction de périmètre requiert `ScopeApprovalRequested` avant toute exécution.
 
 ## Ordonnancement et exécution d'une étape
@@ -58,10 +65,19 @@ dépendances terminées
        -> StepCompleted ou StepFailed
 ```
 
-Le plan est la source de l'ordre : une étape n'est exécutable qu'après ses dépendances.
+Le plan est la source de l'ordre : une étape n'est exécutable qu'après ses
+dépendances. Les arêtes typées (`produces_for`, `validates`, `repairs`,
+`consolidates`) expliquent pourquoi cette dépendance existe ; elles ne
+remplacent pas la spine d'ordonnancement. Un audit ou un quality gate
+rouvre le propriétaire de l'obligation fautive (inventaire, rédaction,
+implémentation) au lieu de toujours relancer le dernier debugger.
 Les prérequis validés sont réutilisés, et les chemins possédés empêchent les spécialistes
 concurrents de modifier le même livrable. Une répétition sans preuve consomme le budget de
 stagnation ; une modification durable ou une nouvelle validation réussie le remet à zéro.
+Le volume total du DAG reste inchangé, mais le scheduler n'active qu'une vague bornée :
+`max_parallel_plan_steps=0` choisit automatiquement une valeur prudente (jusqu'à quatre),
+et une valeur positive ne limite que la concurrence. Les étapes restantes demeurent
+persistées et démarrent dès qu'une place est libre.
 
 Toutes les mutations applicatives de statut passent par la table de transitions du
 `StateEngine`. Chaque changement conserve ancien et nouvel état, motif, acteur,
@@ -82,20 +98,38 @@ temporisations indépendantes. Une
 erreur d'authentification ou de configuration permanente devient `failed` avec un
 diagnostic exploitable : elle ne doit pas boucler comme une panne réseau.
 
+Avant chaque appel, le fournisseur réserve des jetons de sortie, estime messages et
+schémas d'outils, puis compacte sous la fenêtre configurée ou apprise. Une erreur donnant
+une limite exacte (par exemple 262144 jetons) met à jour l'enveloppe et déclenche une
+nouvelle tentative bornée sans perdre l'état durable de l'exécution.
+
 Au redémarrage, les exécutions interrompues, planifiées et celles en attente fournisseur
 sont normalisées puis réinscrites sans dupliquer la tâche initiale. Le verrou par
 exécution empêche deux boucles simultanées.
 
 ## Documents et corpus local
 
-1. `POST /artifacts` décode et stocke le fichier avec un nom sûr.
-2. La signature effective détermine le parseur, pas seulement l'extension annoncée.
-3. TXT/Markdown/CSV/JSON/XML/HTML, DOCX, PPTX et PDF sont normalisés en blocs avec
+1. La GUI accepte des fichiers isolés ou un dossier récursif (`webkitdirectory`). La case
+   d'inventaire automatique envoie `corpus_auto_workflow`; l'API construit le contrat
+   `corpus_policy` (preuves locales, lecture seule, couverture, citations, contradictions,
+   images et erreurs) sans modifier le texte de la tâche. Pour un dossier, `POST /corpora` crée/reprend un manifeste durable ; chaque
+   source passe en binaire par `PUT /corpora/{id}/files`, avec chemin relatif et empreinte
+   SHA-256.
+2. Le navigateur filtre les répertoires techniques et limite l'import à trois fichiers
+   simultanés. Le serveur revalide chemin, type, taille, signature et empreinte, puis
+   déduplique un contenu déjà importé sous le même chemin logique.
+3. `POST /corpora/{id}/finalize` enregistre l'instantané courant, les exclusions et les
+   erreurs. La reprise ne renvoie que les fichiers modifiés ; un manifeste partiel reste
+   explicite et auditable.
+4. `POST /artifacts` décode et stocke un fichier isolé avec un nom sûr.
+5. La signature effective détermine le parseur, pas seulement l'extension annoncée.
+6. TXT/Markdown/CSV/JSON/XML/HTML, DOCX, PPTX et PDF sont normalisés en blocs avec
    provenance ; les archives sont soumises aux limites de taille et de ratio.
-4. L'index documentaire est reconstruit/synchronisé puis devient interrogeable.
-5. L'exécution ne voit que les artefacts explicitement attachés. La capacité `documents`
-   impose l'ordre inventaire, recherche, lecture ciblée et chunks si nécessaire.
-6. Les citations internes se fondent sur les identifiants, fichiers et positions locales ;
+7. L'index documentaire est reconstruit/synchronisé puis devient interrogeable.
+8. L'exécution ne voit que les artefacts explicitement attachés. La capacité `documents`
+   pagine l'inventaire, recherche/lit le texte par chunks et charge les images ciblées par
+   lots bornés via `read_image`/`read_images`.
+9. Les citations internes se fondent sur les identifiants, fichiers et positions locales ;
    aucune preuve Internet n'est fabriquée pour un mode corpus local.
 
 Un upload invalide renvoie une erreur client ; une indisponibilité de stockage renvoie un
@@ -129,13 +163,17 @@ comme livré. Ce pipeline est une fonctionnalité spécialisée, pas le comporte
 
 Après toutes les étapes :
 
-1. le moteur évalue le contrat gelé à partir du workspace et des historiques réels ;
-2. toute défaillance déclenche une réparation ciblée ou échoue explicitement ;
+1. le moteur évalue le contrat gelé à partir du workspace et des historiques réels,
+   y compris `evidence_graph` (lectures, citations, couvertures unifiées par SHA) ;
+2. toute défaillance est classifiée (`delivery_feedback`) puis rouvre le propriétaire
+   de l'obligation, ou échoue explicitement ;
 3. `DeliveryAssuranceCompleted` enregistre contrôles et preuves ;
 4. une tâche documentaire professionnelle génère un DOCX, le rapport d'assurance JSON,
    un manifeste SHA-256 et un ZIP ;
 5. l'état devient `completed` seulement après convergence ;
-6. la GUI affiche le bouton de téléchargement uniquement si le paquet existe.
+6. la GUI affiche le bouton de téléchargement uniquement si le paquet existe ;
+7. `GET /executions/{id}/evidence-graph` expose la vue bornée ; la colonne plan
+   bascule entre Liste et Graphe SVG local.
 
 Les critères documentaires interdisent notamment les placeholders, doublons et volumes
 insuffisants, et exigent couverture des pièces et références locales selon le profil.

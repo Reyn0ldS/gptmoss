@@ -28,6 +28,7 @@ KNOWN_SHA256 = {
     "3.13.14": "90b4e5b9898b72d744650524bff92377c367f44bd5fbd09e3148656c080ad907",
 }
 REQUIRED_IMPORTS = "fastapi, httpx, openai, pydantic, pypdf, pytest, uvicorn, websockets"
+MAX_SAFE_BUILD_ROOT_CHARS = 80
 
 
 @dataclass(frozen=True)
@@ -117,14 +118,84 @@ def extract_verified_archive(archive_path: Path, destination: Path) -> None:
         archive.extractall(destination)
 
 
+def same_volume_build_parent(
+    project_root: Path = PROJECT_ROOT,
+    candidates: list[Path] | None = None,
+) -> Path:
+    """Return the shortest safe writable staging parent on the project volume."""
+    project = project_root.resolve()
+    anchor = Path(project.anchor)
+    if candidates is None:
+        candidates = [anchor / ".gptmoss-build"]
+        candidates.extend(
+            parent / ".gptmoss-build"
+            for parent in reversed(project.parents)
+            if parent != anchor
+        )
+        candidates.append(project / ".gptmoss-build")
+    failures: list[str] = []
+    for candidate in dict.fromkeys(candidates):
+        try:
+            if Path(candidate.anchor).resolve() != anchor:
+                failures.append(f"{candidate} (different volume)")
+                continue
+            candidate.mkdir(parents=True, exist_ok=True)
+            probe = candidate / f".probe-{os.getpid()}"
+            probe.write_bytes(b"")
+            probe.unlink()
+            if len(str(candidate.resolve())) > MAX_SAFE_BUILD_ROOT_CHARS:
+                failures.append(f"{candidate} (path too long)")
+                try:
+                    candidate.rmdir()
+                except OSError:
+                    pass
+                continue
+            return candidate.resolve()
+        except OSError as error:
+            failures.append(f"{candidate} ({error})")
+    raise RuntimeError(
+        "No short writable build directory is available on the project volume. "
+        "Enable Windows long paths or grant write access to a short directory such as "
+        f"{anchor / '.gptmoss-build'}. Attempts: {'; '.join(failures)}"
+    )
+
+
 def install_target_dependencies(spec: RuntimeSpec, site_packages: Path) -> None:
     subprocess.run([sys.executable, "-m", "pip", "--version"], check=True)
+    # pip installs --target distributions into a private temporary directory and
+    # then moves them to the requested target.  If the default Windows TEMP is
+    # on another drive, shutil falls back to a recursive copy.  Deep OpenAI SDK
+    # module names plus generated __pycache__ paths can then exceed legacy path
+    # limits and leave a partially copied runtime.  Keep pip's temporary files
+    # beside the staged runtime so publication is an intra-volume rename.
+    runtime_directory = site_packages.resolve().parent.parent
+    build_root = runtime_directory.parent
+    with tempfile.TemporaryDirectory(prefix="p", dir=build_root) as pip_temporary:
+        environment = os.environ.copy()
+        environment.update(
+            {
+                "TEMP": pip_temporary,
+                "TMP": pip_temporary,
+                "TMPDIR": pip_temporary,
+                "PYTHONDONTWRITEBYTECODE": "1",
+                "PIP_NO_COMPILE": "1",
+            }
+        )
+        _run_pip_target_install(spec, site_packages, environment)
+
+
+def _run_pip_target_install(
+    spec: RuntimeSpec,
+    site_packages: Path,
+    environment: dict[str, str],
+) -> None:
     command = [
         sys.executable,
         "-m",
         "pip",
         "install",
         "--upgrade",
+        "--no-compile",
         "--only-binary=:all:",
         "--platform",
         "win_amd64",
@@ -142,7 +213,7 @@ def install_target_dependencies(spec: RuntimeSpec, site_packages: Path) -> None:
         str(RUNTIME_CONSTRAINTS),
     ]
     print(f"Resolving wheels for CPython {spec.major_minor} on Windows amd64...")
-    subprocess.run(command, check=True)
+    subprocess.run(command, check=True, env=environment)
 
 
 def validate_runtime(runtime_directory: Path, spec: RuntimeSpec) -> None:
@@ -246,7 +317,9 @@ def prepare(spec: RuntimeSpec) -> Path:
         raise RuntimeError("The autonomous package must be prepared on 64-bit Windows.")
 
     destination = PROJECT_ROOT / spec.directory_name
-    with tempfile.TemporaryDirectory(prefix=".gptmoss-offline-build-", dir=PROJECT_ROOT) as temporary:
+    build_parent = same_volume_build_parent(PROJECT_ROOT)
+    print(f"Using short same-volume build directory: {build_parent}", flush=True)
+    with tempfile.TemporaryDirectory(prefix="b", dir=build_parent) as temporary:
         temporary_root = Path(temporary)
         archive_path = temporary_root / "python-embed.zip"
         staged_runtime = temporary_root / spec.directory_name
@@ -259,6 +332,11 @@ def prepare(spec: RuntimeSpec) -> Path:
         validate_runtime(staged_runtime, spec)
         purge_caches(staged_runtime)
         replace_runtime(staged_runtime, destination)
+
+    try:
+        build_parent.rmdir()
+    except OSError:
+        pass
 
     write_manifest(spec, destination)
     return destination

@@ -15,7 +15,8 @@ sécurité shell et cartographie GUI/API sont détaillées dans le
 La cartographie vivante de l'application est répartie entre
 [l'architecture](docs/architecture.md), les
 [parcours fonctionnels](docs/functional-map.md), la
-[matrice de couverture](docs/coverage-matrix.md) et le
+[matrice de couverture](docs/coverage-matrix.md), le
+[graphe de livraison](docs/delivery-graph.md) et le
 [contrat du paquet offline](docs/offline-package-manifest.md). Son inventaire machine
 `docs/application-map.json` et son [graphe relationnel des classes, méthodes et données](docs/symbol-relations.md)
 sont vérifiés par `python scripts/validate_application_map.py`. Avant une évolution,
@@ -95,6 +96,14 @@ Le constructeur télécharge CPython embeddable depuis Python.org, vérifie son 
 
 Un double-clic sur `prepare-offline-source.bat` conserve désormais la fenêtre ouverte et écrit le diagnostic complet dans `offline-preparation.log`. Le script ignore l'alias factice `python.exe` du Microsoft Store et exige un vrai Python 64 bits avec `pip` uniquement lorsqu'une reconstruction est nécessaire. Si le runtime livré dans l'archive est déjà complet, il le vérifie et indique qu'aucun téléchargement n'est requis. Utilisez `prepare-offline-source.bat --verify-only` pour effectuer seulement cette vérification. Ce constructeur ne télécharge pas le code source GPTMOSS : celui-ci provient du clone Git ou de l'archive ZIP GitHub.
 
+Pendant une reconstruction Windows, le constructeur choisit une racine de build courte
+et inscriptible sur le même volume que le projet (par exemple `D:\.gptmoss-build`), y
+place aussi le répertoire temporaire interne de `pip` et désactive la compilation des
+`.pyc`. Cela évite à la fois la copie récursive inter-disques et les chemins trop longs
+rencontrés dans les modules profonds d'`openai` lorsque le dépôt est lui-même dans une
+arborescence longue. Les répertoires temporaires sont supprimés automatiquement, y
+compris après un échec de wheel.
+
 Ne copiez pas un `venv` entre deux machines : les environnements virtuels ne sont pas portables.
 
 Avec une installation Python complète, une autre solution hors-ligne consiste à créer un dossier `wheelhouse` sur la machine connectée :
@@ -157,6 +166,8 @@ La configuration active est `workspace/config.json`. Au démarrage, GPTMOSS la n
   "restrict_to_workspace": true,
   "allow_subfolders": true,
   "max_context_chars": 12000,
+  "context_window_tokens": 0,
+  "context_output_reserve_tokens": 8192,
   "max_upload_bytes": 104857600,
   "max_attachment_text_chars": 5000000,
   "max_transitions_per_execution": 2000,
@@ -200,7 +211,9 @@ La configuration active est `workspace/config.json`. Au démarrage, GPTMOSS la n
 | `workspace_path` | Racine de travail des agents. | Un dossier dédié. |
 | `restrict_to_workspace` | Empêche les accès de fichiers hors de la racine. | `true`. |
 | `allow_subfolders` | Autorise les opérations dans les sous-dossiers. | `true`. |
-| `max_context_chars` | Plancher du contexte. En mode adaptatif, il grandit avec la tâche et le plan puis s'ajuste à la limite réelle du fournisseur. | `12000`, sans plafond applicatif fixe. |
+| `max_context_chars` | Plancher de l'historique conversationnel ; le préflight fournisseur applique toujours son plafond final. | `12000`. |
+| `context_window_tokens` | Fenêtre totale du modèle. `0` utilise une enveloppe initiale prudente puis apprend les limites exactes renvoyées par le backend. | `0`, ou `262144` si ce contrat est garanti par le serveur. |
+| `context_output_reserve_tokens` | Jetons gardés hors du prompt pour que la réponse ne tombe jamais implicitement à zéro. | `8192`. |
 | `max_upload_bytes` | Plafond applicatif strict d’un dépôt, validé par le contrat commun `RuntimeSettings`. | `104857600` (100 Mio). |
 | `max_attachment_text_chars` | Maximum de texte normalisé conservé par pièce jointe avant sélection contextuelle. | `5000000`. |
 | `max_transitions_per_execution` | Historique chronologique conservé par exécution ; les plus anciennes transitions sont élaguées. | `2000`. |
@@ -286,7 +299,9 @@ Invoke-RestMethod http://127.0.0.1:8000/api/settings
 | Modèle par défaut | Modèle utilisé pour les nouvelles étapes. | Utiliser le nom exact fourni par l’API. |
 | Capacité vision | `auto` détecte les modèles vision/omni/VL ; les modes forcés reflètent la capacité réelle du serveur. | `auto`, puis vérifier le diagnostic. |
 | Vérifier le certificat SSL | Active la validation TLS ; le chemin de certificat apparaît si nécessaire. | Laisser activé. |
-| Budget de contexte | Plancher adaptatif ; le runtime le développe avec le plan et apprend les erreurs de limite du fournisseur. | 12 000 est un bon départ. |
+| Budget d'historique | Plancher adaptatif de conversation ; il reste subordonné à la fenêtre totale du modèle. | 12 000 est un bon départ. |
+| Fenêtre totale du modèle | `0` sélectionne automatiquement une enveloppe prudente et apprend une limite exacte après un refus du backend. | `0`, ou la valeur contractuelle du serveur. |
+| Réserve de sortie | Soustraite de la fenêtre avant de construire le prompt ; évite les requêtes à zéro jeton de réponse. | 8 192 jetons. |
 | Gestion adaptative | Ajuste contexte, stagnation, reprises et sorties utiles à partir du contrat effectif. | Activée. |
 | Continuer tant que le travail progresse | Autorise une étape à dépasser tout nombre total de tours lorsque fichiers, livrables ou nouveaux tests réussis évoluent réellement. | Activé pour les projets longs. |
 | Budget sans progrès | Nombre de tours consécutifs sans modification durable ni nouvelle preuve avant reprise ou échec. | 20 à 40 ; ce n'est pas une durée maximale. |
@@ -321,7 +336,7 @@ Vous pouvez ajouter, renommer ou supprimer un projet, puis lui associer un dossi
 
 1. Lancez GPTMOSS et ouvrez <http://127.0.0.1:8000>.
 2. Choisissez le projet puis décrivez la tâche avec un résultat attendu, les contraintes et les fichiers concernés.
-3. Soumettez la tâche. La liste affiche son état et son plan ; le fil unifié rassemble les messages du coordinateur et des sous-agents.
+3. Soumettez la tâche. La liste affiche son état et son plan. Dans la colonne plan, **Liste** détaille chaque étape et **Graphe** dessine localement la topologie (`plan.edges`) ; le fil unifié rassemble les messages du coordinateur et des sous-agents.
 4. Lorsqu'une action protégée est demandée, l'exécution passe à `paused`. Utilisez **Autoriser** ou **Refuser**, avec un motif si utile.
 5. Consultez le résultat, les sous-tâches, les événements et les métriques. Une exécution terminée peut être supprimée de l'historique.
 
@@ -399,6 +414,8 @@ Routes principales :
 | `GET /executions/{id}/unified-feed` | Fil des messages, sous-agents compris. |
 | `GET /executions/{id}/metrics` | Compteurs et durées de télémétrie. |
 | `GET /executions/{id}/delivery` | Métadonnées ou téléchargement ZIP du paquet professionnel assuré. |
+| `GET /executions/{id}/evidence-graph` | Vue bornée des lectures corpus, citations et couvertures, sans historique d'outils brut. |
+| `GET /executions/{id}/document` | État du moteur de document long (sections et checkpoints). |
 | `POST /executions` | Crée une exécution. |
 | `GET /projects` | Liste les projets configurés. |
 | `POST /projects` | Crée atomiquement un projet et son dossier. |
@@ -417,6 +434,11 @@ Routes principales :
 | `GET /artifacts/search` | Recherche localement dans les chunks avec filtres de source, format, titre et type. |
 | `GET /artifacts/{id}/preview` | Renvoie un aperçu texte ou image local. |
 | `DELETE /artifacts/{id}` | Supprime la source, sa normalisation et ses entrées d'index. |
+| `POST /corpora` | Crée ou reprend l'import durable d'un dossier source. |
+| `PUT /corpora/{id}/files` | Dépose un fichier binaire avec son chemin relatif et contrôle SHA-256. |
+| `POST /corpora/{id}/finalize` | Finalise le manifeste, les exclusions et les erreurs du corpus. |
+| `GET /corpora` / `GET /corpora/{id}` | Inventorie les corpus locaux et leur couverture. |
+| `DELETE /corpora/{id}` | Retire le manifeste du corpus sans effacer les preuves déjà utilisées. |
 | `GET` / `POST /memory` | Filtre par projet, portée et type, ou crée une proposition de mémoire. |
 | `PUT /memory/{id}` | Modifie valeur, provenance, validation et expiration. |
 | `GET /api/diagnostics` | Capacités, compatibilité vision, métriques, traces et erreurs. |
@@ -436,7 +458,18 @@ Invoke-RestMethod -Method Post "http://127.0.0.1:8000/executions/$id/reject" -Co
 Invoke-RestMethod -Method Post "http://127.0.0.1:8000/executions/$id/cancel"
 ```
 
-`/resume` ne convient pas à une pause d'approbation : dans ce cas, utilisez impérativement `/approve` ou `/reject`. `cancel` est possible seulement pour les états `pending`, `running` ou `paused`.
+`/resume` ne convient pas à une pause d'approbation : dans ce cas, utilisez impérativement `/approve` ou `/reject`. `cancel` est possible pour les états `pending`, `running`, `paused` ou `waiting_provider`. Le moteur conserve un registre unique des tâches `asyncio` actives : l'annulation interrompt l'appel LLM, les étapes du DAG et les sous-agents connus, arrête les processus shell, puis supprime les reprises planifiées avant de confirmer l'état final.
+
+La persistance v3 utilise un index atomique et des sidecars immuables adressés par leur
+SHA-256. Une sauvegarde ne crée que les générations modifiées ; l'index est remplacé
+après leur écriture, puis les anciennes générations sont nettoyées. Une interruption
+avant le remplacement de l'index recharge donc toujours le dernier ensemble cohérent.
+Les snapshots historiques v1 et v2 restent migrables.
+
+Le streaming Qwen demande les statistiques de tokens lorsqu'un endpoint compatible les
+fournit. Les endpoints qui refusent l'extension `stream_options` sont retentés sans elle ;
+la réponse conserve alors des compteurs nuls plutôt que d'interrompre l'exécution. Ce
+contrat s'applique aussi au repli textuel lorsque les tool calls natifs sont indisponibles.
 
 Pour une exécution principale en `failed`, `/resume` rouvre uniquement l'étape en échec, conserve les étapes déjà validées et incrémente `manual_retry_count`. Le budget d'exécution persistant de cette étape (`iterations`, stagnation et rappels) est supprimé afin que la tentative reparte réellement de zéro ; les compteurs des autres étapes restent intacts. Une exécution déléguée en échec ne se reprend pas directement : reprenez son parent de premier niveau. Ce mécanisme ne contourne jamais `pending_approval` ni `pending_scope_approval`.
 
@@ -451,7 +484,7 @@ Le client doit garder la connexion ouverte et peut envoyer un message périodiqu
 
 Une tâche est d'abord classée selon sa taille, ses domaines et ses résultats attendus. Le socle ne contient que des domaines génériques (logiciel, données/automatisation, traitement intelligent, média/espace, expérience utilisateur, sécurité, opérations offline et documents). Chaque projet peut ajouter ses propres domaines par configuration. Le plan adaptatif fournit ensuite un rôle canonique (`architect`, `security`, `developer`, `qa`, `debugger`, `writer` ou `coordinator`) et un profil métier distinct (`specialist`, `expertise`, artefacts, critères d'acceptation et commandes de vérification). Les règles spécialisées livrées dans certains skills sont optionnelles et ne sont activées que sur demande explicite.
 
-Le moteur valide les identifiants, les références et l'absence de cycle avant de démarrer. Les étapes indépendantes s'exécutent en parallèle. Un spécialiste ne peut annoncer sa réussite qu'après création des artefacts non vides, exécution exacte des vérifications déclarées et remise d'un résultat JSON structuré. Les agents QA importent le code réel : les dépendances locales factices, mocks de remplacement et géométries aléatoires sont refusés.
+Le moteur valide les identifiants, les références et l'absence de cycle avant de démarrer. Les étapes indépendantes s'exécutent en parallèle. Après normalisation, `plan.edges` porte la sémantique (`produces_for`, `validates`, `repairs`, `consolidates`, `blocks`) dérivée des dépendances et des rôles ; `dependencies` reste la seule spine d'ordonnancement. Un quality gate ou un audit classifie le défaut et rouvre le propriétaire de l'obligation (inventaire, rédacteur, debugger) au lieu de toujours relancer le dernier réparateur. `GET /executions/{id}/evidence-graph` expose une projection bornée des lectures et citations, distincte de `tool_call_history`. Un spécialiste ne peut annoncer sa réussite qu'après création des artefacts non vides, exécution exacte des vérifications déclarées et remise d'un résultat JSON structuré. Les agents QA importent le code réel : les dépendances locales factices, mocks de remplacement et géométries aléatoires sont refusés.
 
 Chaque étape spécialiste possède un seul sous-agent persistant. Son identifiant et
 son résultat sont enregistrés avant et après l'exécution, ce qui empêche une reprise
@@ -480,7 +513,7 @@ Les moteurs de jeu, Blender et autres applications propres à un projet restent 
 
 Les sorties déclarées dans `artifact_validations` sont contrôlées dès la fin de l'étape qui les produit, avant leur transmission aux spécialistes suivants, puis de nouveau par l'assurance finale. Les validateurs intégrés inspectent JSON, OBJ et GLB. Le validateur `document` contrôle de façon déclarative les sections, exigences, tables de traçabilité, références locales bornées, sources autorisées, liens externes, placeholders, balises de raisonnement résiduelles, répétitions, terminologie, paragraphes non sourcés et métriques minimales d'un Markdown ou TXT. Même sans politique détaillée, un texte intermédiaire ne peut pas passer avec un placeholder manifeste. Une erreur critique bloque la garantie de livraison. Pour un travail fondé sur des pièces jointes, la récupération d'inactivité ne fabrique jamais le document manquant depuis un contexte privé de son corpus. Les validations structurelles ne prouvent ni le photoréalisme, ni le rendu Blender, ni la justesse métier ; ces points restent soumis aux critères explicites et à la revue appropriée.
 
-Les tâches de rédaction professionnelle activent le profil `professional-local`. Le moteur impose alors son propre plancher de qualité, inventorie les pièces jointes réelles et refuse les textes trop courts, dupliqués, non sourcés ou contenant des placeholders. Après réussite de l'assurance finale, GPTMOSS produit sous `.gptmoss/deliveries/<execution-id>/` un DOCX mis en forme, le rapport d'assurance, un manifeste SHA-256 et une archive ZIP téléchargeable depuis l'interface. Ce paquet n'est jamais créé avant le passage des contrôles.
+Les tâches de rédaction professionnelle activent le profil `professional-local`. Le moteur impose alors son propre plancher de qualité, inventorie les pièces jointes réelles et refuse les textes trop courts, dupliqués, non sourcés ou contenant des placeholders. Lorsqu'un grand document existant échoue uniquement sur sa longueur ou une section vide, le tour de réparation suivant est borné au seul appel `filesystem.append` attendu ; si l'artefact n'existe pas encore, seul `filesystem.write` est exposé. Les doublons et paragraphes insuffisamment sourcés sont corrigés individuellement avec `filesystem.replace_paragraph`, à partir du préfixe exact renvoyé par le validateur, sans reconstruire le document. Les défauts globaux qui exigent encore de retirer du contenu (référence invalide, lien externe, placeholder) imposent un premier `write` borné et propre, puis des `append` successifs. Cette contrainte transitoire empêche les boucles de relecture sans mutation et reste inchangée après le rejet d'un appel textuel malformé. Un rédacteur ne peut pas écraser spontanément un document obligatoire existant, directement ou via le shell : un `write` global n'est accepté que si le gate automatique l'a explicitement imposé. L'artefact ne peut jamais être supprimé ni remplacé par un contenu vide ; il doit être réparé en place. Après réussite de l'assurance finale, GPTMOSS produit sous `.gptmoss/deliveries/<execution-id>/` un DOCX mis en forme, le rapport d'assurance, un manifeste SHA-256 et une archive ZIP téléchargeable depuis l'interface. Ce paquet n'est jamais créé avant le passage des contrôles.
 
 États possibles :
 
@@ -499,11 +532,11 @@ Une règle de politique peut viser une capacité entière (`shell`) ou une actio
 
 | Capacité | Actions | Utilisation et limites |
 |---|---|---|
-| `filesystem` | `read`, `write`, `list_dir`, `delete` | Les chemins sont résolus par rapport au projet de l'exécution. `write` écrase un fichier existant ; `delete` ne supprime un dossier que s'il est vide. |
+| `filesystem` | `read`, `write`, `append`, `replace_paragraph`, `list_dir`, `delete` | Les chemins sont résolus par rapport au projet de l'exécution. `write` écrase un fichier existant ; `append` construit un grand artefact autorisé par ajouts bornés ; `replace_paragraph` corrige atomiquement une occurrence ciblée sans reconstruire le document ; `delete` ne supprime un dossier que s'il est vide. |
 | `shell` | `execute` | Lance une commande dans le projet. Avec un délai à `0`, le runtime choisit un budget par catégorie ; une sortie maximale à `0` est conservée entièrement. `python` utilise l'interpréteur courant, y compris dans les pipelines Windows. |
 | `agent` | `spawn`, `status`, `execute_subtask` | Crée ou suit une sous-tâche. La délégation imbriquée accepte une tâche nouvelle ; la répétition d’une tâche ancêtre est bloquée. |
 | `devteam` | `build_project`, `approve_quality_gate` | Pipeline de développement avec les mêmes règles de délégation et d’approbation. |
-| `documents` | `inventory`, `search`, `read`, `read_chunk` | Inventorie, recherche et lit avec provenance uniquement les documents explicitement joints à l'exécution. Aucun lien distant n'est suivi. |
+| `documents` | `inventory`, `search`, `read`, `read_chunk`, `read_image`, `read_images` | Pagine et lit avec provenance uniquement les documents/images explicitement joints ; les images sont chargées par lots multimodaux bornés. Aucun lien distant n'est suivi. |
 
 Le shell bloque en mode sûr plusieurs motifs destructifs évidents (`rm -rf /`, `format`, `diskpart`, `shutdown`, `reg delete`, etc.). Ce filtrage est intentionnellement limité : une politique stricte et un environnement isolé restent nécessaires.
 
@@ -569,6 +602,27 @@ Types acceptés : TXT/Markdown, JSON, CSV, HTML local, DOCX, PPTX, PDF texte, PN
 
 Les parseurs ne chargent aucune ressource distante d'un HTML ou d'un document Office. La recherche accent-insensible couvre tout le corpus et conserve fichier, titres, blocs et diapositives dans la provenance. Consultez le [guide complet du workflow documentaire local](docs/local-document-workflow.md) pour les quatre formats prioritaires, l'API de recherche, les références, les politiques qualité, le point d'entrée portable et le diagnostic.
 
+La GUI accepte aussi un **dossier source complet**. Le navigateur transmet récursivement
+les formats pris en charge sans modifier les originaux. GPTMOSS ignore les répertoires
+techniques (`.git`, `node_modules`, environnements virtuels et caches), conserve le chemin
+relatif de chaque preuve, calcule son SHA-256 et limite la concurrence à trois dépôts. Un
+nouvel essai sur le même dossier reprend son manifeste et ne retransmet pas les fichiers
+inchangés. Une tâche laissée vide déclenche une mission professionnelle générique :
+inventaire, classification, recherche transversale, matrice de couverture, rédaction,
+diagrammes et contrôle qualité fondés uniquement sur le corpus local. Un corpus partiel
+reste exploitable, mais ses erreurs sont conservées et doivent être signalées dans le
+livrable. La finalisation accepte autant d'entrées ignorées ou en échec que la limite du
+corpus (10 000) ; le manifeste conserve les totaux complets et un échantillon borné de
+diagnostics. Si l'import ou la création de la tâche échoue, la GUI indique désormais
+l'étape exacte, traduit les erreurs structurées de l'API en texte lisible et conserve le
+corpus déjà transmis pour une reprise sans retransfert.
+
+Les capacités de lecture tolèrent aussi les variantes d'appel courantes émises pendant
+une analyse autonome : `documents.inventory` peut recevoir une requête descriptive sans
+réduire l'inventaire exhaustif, et `filesystem.read` accepte des bornes `offset`/`limit`
+en caractères. Ces paramètres sont exposés par le schéma d'outils et restent strictement
+en lecture dans le workspace autorisé.
+
 ### Déposer un fichier puis le joindre à une tâche
 
 ```powershell
@@ -590,7 +644,9 @@ Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8000/executions `
   -ContentType 'application/json' -Body $task
 ```
 
-Les documents ne sont pas concaténés puis tronqués aveuglément. GPTMOSS sélectionne les chunks liés à la tâche, diversifie les sources et peut échantillonner début, milieu et fin ; les agents disposent ensuite de lectures paginées. Une image est envoyée lorsque la capacité vision est détectée ou explicitement activée. Si une pièce jointe exige une capacité absente, le plan déclare une lacune et une routine de configuration au lieu de fabriquer une analyse.
+Les documents ne sont pas concaténés puis tronqués aveuglément. GPTMOSS sélectionne les chunks liés à la tâche, diversifie les sources et peut échantillonner début, milieu et fin ; les agents disposent ensuite d'un inventaire et de lectures paginés. Avec la vision active, ils chargent les images précises via `documents.read_image` ou `documents.read_images`, quatre maximum par tour. Une image n'est comptée comme analysée qu'après une complétion multimodale réussie. La politique structurée `corpus_policy` garde le texte utilisateur intact tout en imposant lecture locale, sources en lecture seule, chemins/citations, contradictions, images, erreurs de lecture et matrice de couverture. Si une pièce exige une capacité absente, le plan déclare une lacune et une routine de configuration au lieu de fabriquer une analyse.
+
+Le nombre total d'étapes n'est pas plafonné par un quota de complexité : le plan peut rester mono-étape ou croître avec les exigences et la charge. `max_parallel_plan_steps=0` choisit toutefois automatiquement une vague prudente (au plus quatre par défaut) afin de ne pas saturer le fournisseur ; une valeur positive règle seulement les étapes simultanées. Toutes les autres étapes restent persistées et sont lancées dès qu'une place se libère. Les obligations `operation`, `satisfies_obligations` et `required_evidence` sont réparées et contrôlées par le runtime : des mots comme « audit » ou « inventaire » ne suffisent pas à valider un livrable.
 
 ## Mémoire, contexte et traces
 
@@ -604,7 +660,7 @@ Les documents ne sont pas concaténés puis tronqués aveuglément. GPTMOSS sél
 
 La mémoire durable est typée (`fact`, `decision`, `preference`, `constraint`, `lesson`) et cloisonnée par projet. Un agent peut rechercher les entrées validées ou proposer une nouvelle entrée ; il ne peut ni valider sa propre proposition ni la rendre globale. La validation humaine conserve la provenance et un remplacement validé masque la version obsolète sans effacer son historique.
 
-`max_context_chars` est un plancher lorsque la gestion adaptative est active : le budget grandit avec la tâche, les exigences et les étapes. Les sorties d’outils utilisent elles aussi un budget croissant, sans modifier la trace complète sauvegardée. Si le fournisseur refuse encore la taille, GPTMOSS apprend une enveloppe plus petite, conserve le système et l’ordre récent des outils, puis retente. Les recherches de mémoire automatique ne réutilisent que les entrées validées et non expirées. Les traces masquent les champs sensibles connus (`api_key`, `authorization`, `token`, `password`, `secret`).
+`max_context_chars` gouverne l'historique, mais la limite finale est calculée en jetons à partir de `context_window_tokens`, de la réserve de sortie, des outils et d'une marge de sécurité. En mode automatique, GPTMOSS démarre prudemment et apprend toute limite exacte renvoyée par le fournisseur. Les pièces sont sélectionnées globalement, les images ont aussi un budget en octets et un corpus massif est traité par recherche et partitions plutôt que concaténé dans un prompt. La trace persistée reste complète. Les recherches de mémoire automatique ne réutilisent que les entrées validées et non expirées. Les traces masquent les champs sensibles connus (`api_key`, `authorization`, `token`, `password`, `secret`).
 
 ## Sécurité
 

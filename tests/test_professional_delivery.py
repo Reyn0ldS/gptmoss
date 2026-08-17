@@ -20,14 +20,26 @@ def test_professional_profile_enforces_quality_and_attachment_inventory(tmp_path
 
     plan = {
         "delivery_profile": "professional-local", "primary_artifact": "report.md",
-        "steps": [{"required_artifacts": ["report.md"]}], "artifact_validations": [],
+        "steps": [{"required_artifacts": ["report.md", "analysis/inventory.md"]}],
+        "artifact_validations": [{
+            "path": "analysis/inventory.md", "validator": "document", "required": True,
+            "constraints": {
+                "source_inventory": {"legacy-basename.txt": {"blocks": 99}},
+                "required_source_files": ["legacy-basename.txt"],
+                "require_local_references": True,
+            },
+        }],
     }
     apply_professional_profile(plan, Store(), ["a1"])
-    constraints = plan["artifact_validations"][0]["constraints"]
+    policies = {item["path"]: item for item in plan["artifact_validations"]}
+    constraints = policies["report.md"]["constraints"]
     assert constraints["minimums"]["words"] == 600
     assert constraints["source_inventory"] == {"source.txt": {"blocks": 2}}
     assert constraints["require_claim_references"] is True
     assert constraints["require_bounded_references"] is True
+    supporting = policies["analysis/inventory.md"]["constraints"]
+    assert supporting["source_inventory"] == {"source.txt": {"blocks": 2}}
+    assert supporting["required_source_files"] == ["source.txt"]
 
 
 def test_delivery_package_contains_docx_manifest_assurance_and_sources(tmp_path):

@@ -59,3 +59,25 @@ async def test_provider_resume_schedule_is_idempotent_and_stoppable():
     assert coordinator.jobs == {}
     assert executed == []
     await scheduler.stop(cancel_pending=True)
+
+
+@pytest.mark.asyncio
+async def test_resume_persisted_requeues_waiting_provider_executions():
+    state = StateEngine()
+    waiting = state.get_execution("waiting")
+    state.transition_execution(waiting, "waiting_provider")
+    running = state.get_execution("running")
+    state.transition_execution(running, "running")
+    scheduler = Scheduler()
+    coordinator = ProviderRecoveryCoordinator(
+        EventBus(), state, MockLLMProvider(), lambda *_args: None, max_attempts=2,
+        scheduler=scheduler,
+    )
+
+    coordinator.resume_persisted()
+
+    assert "waiting" in coordinator.jobs
+    assert "running" not in coordinator.jobs
+    assert scheduler.has(coordinator.jobs["waiting"])
+    await coordinator.stop()
+    await scheduler.stop(cancel_pending=True)

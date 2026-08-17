@@ -39,28 +39,72 @@ pas un ordonnanceur distribué ni une implémentation de cron.
 |---|---|---|
 | Entrée et bootstrap | `main.py` | Charge et normalise la configuration, construit les fournisseurs, registres, moteur et capacités, lance CLI ou Uvicorn. |
 | Contrôle du processus | `scripts/server_supervisor.py` | Conserve un point de contrôle local lorsque l'application est arrêtée ; vérifie port, santé et jeton éphémère. |
-| Interface | `gptmoss/api/gui.html` | Composition des tâches, suivi temps réel, bibliothèque, mémoire, skills, réglages, livraisons et contrôle serveur. |
-| API | `gptmoss/api/server.py` | Contrats HTTP/WebSocket, validation Pydantic, cycle de vie, réglages, diagnostics et téléchargements bornés. |
-| Orchestration | `core/kernel.py`, `core/execution.py`, `core/scheduler.py`, `planners/simple.py` | Création/exécution planifiée, plan adaptatif, dépendances, spécialistes, reprises, approbations et convergence. |
+| Interface | `gptmoss/api/gui.html` | Composition des tâches, suivi temps réel, vues Liste/Graphe du plan DAG, bibliothèque, mémoire, skills, réglages, livraisons et contrôle serveur. |
+| API | `gptmoss/api/server.py` | Contrats HTTP/WebSocket, validation Pydantic, cycle de vie, réglages, diagnostics, graphe de preuves et téléchargements bornés. |
+| Orchestration | `core/kernel.py`, `core/execution.py`, `core/execution_plan.py`, `core/execution_progress.py`, `core/execution_rescue.py`, `core/workload.py`, `core/plan_obligations.py`, `core/scheduler.py`, `planners/simple.py`, `planners/complexity.py`, `planners/fallbacks.py` | Création/exécution planifiée, plan sémantique sans cardinalité fixe, contrats d'opération/preuve, arêtes typées dérivées des dépendances, réparation causale, compilation selon le volume réel, spécialistes, reprises, approbations et convergence. |
 | Domaines projet | `core/domains.py` | Catégories génériques et extensions de marqueurs propres à chaque projet, sans hypothèse métier globale. |
 | Contexte et mémoire | `core/context.py`, `memory/json_store.py`, `capabilities/memory.py` | Contexte borné et mémoire gouvernée par projet, validation, provenance, TTL, déduplication et supersession. |
 | Capacités | `capabilities/*` | Actions outillées exposées au modèle et contrôlées par la politique. |
-| Documents | `core/documents.py`, `core/artifacts.py`, `capabilities/documents.py` | Détection sûre, normalisation, indexation, inventaire, recherche et lecture locale des pièces jointes. |
-| Qualité et livraison | `core/delivery.py`, `document_quality.py`, `professional_delivery.py`, `delivery_package.py` | Contrat gelé, preuves indépendantes, réparations et paquet professionnel DOCX/ZIP signé par empreintes. |
+| Documents | `core/documents.py`, `core/artifacts.py`, `core/corpus_policy.py`, `capabilities/documents.py` | Détection sûre, manifestes de corpus par dossier, politique locale en lecture seule, déduplication SHA-256, normalisation, indexation, inventaire, recherche et lecture locale des pièces jointes. |
+| Qualité et livraison | `core/delivery.py`, `core/delivery_feedback.py`, `core/evidence_graph.py`, `document_quality.py`, `professional_delivery.py`, `delivery_package.py` | Contrat gelé, classification des défauts, réouverture du propriétaire d'obligation, graphe de preuves borné, réparations et paquet professionnel DOCX/ZIP signé par empreintes. |
 | Évolution | `core/skills.py`, `core/evolution.py` | Découverte de procédures, profils de spécialistes et évolution locale traçable. |
 | Configuration | `core/settings.py` | Contrat Pydantic unique partagé par bootstrap, API, GUI et tests ; valeurs sûres et limites strictes. |
-| Persistance | `core/state.py`, `core/durable_io.py`, `core/observability.py` | Écritures durables, migration/quarantaine des snapshots, historique borné et télémétrie locale. |
-| Fournisseur | `providers/qwen.py` | Adaptateur OpenAI-compatible, TLS sûr, vision, classification/reprise d'erreurs et fermeture des clients remplacés. |
+| Persistance | `core/state.py`, `core/durable_io.py`, `core/observability.py` | Index `state_store.json` plus sidecars par exécution/conversation, migration/quarantaine, historique borné et télémétrie locale. |
+| Fournisseur | `providers/qwen.py`, `providers/qwen_support.py` | Adaptateur OpenAI-compatible, TLS sûr, vision, préflight jetons/outils, réserve de sortie, apprentissage de la fenêtre réelle, compactage et reprise. |
 
 Les interfaces abstraites de `gptmoss/interfaces/` séparent capacités, LLM, mémoire,
 planification et politique de leurs implémentations actuelles.
+
+## Graphe de livraison
+
+Le contrat est détaillé dans [delivery-graph.md](delivery-graph.md). Trois couches
+coexistent sans se substituer :
+
+1. `dependencies` reste la spine d'ordonnancement : une liste d'identifiants
+   `int` ou `str`. Le scheduler n'accepte que cette forme.
+2. `plan.edges` porte la sémantique (`produces_for`, `validates`, `repairs`,
+   `consolidates`, `blocks`). `synthesize_plan_edges` les dérive des dépendances
+   et des rôles lorsque le planner n'en fournit pas.
+3. `evidence_graph` est une vue bornée des lectures corpus, citations et
+   couvertures. Il est exposé par `GET /executions/{id}/evidence-graph` et n'inclut
+   jamais `tool_call_history` brut.
+
+Un quality gate ou un audit classifie le défaut (`delivery_feedback`) puis rouvre
+le propriétaire de l'obligation : inventaire, rédacteur, debugger. Aucune étape
+n'est insérée pendant l'exécution. La GUI rend le plan en Liste ou en Graphe SVG
+local dans la colonne plan, sans script distant.
 
 ## Capacités agentiques
 
 | Capacité | Actions | Frontière principale |
 |---|---|---|
-| `filesystem` | `read`, `write`, `list_dir`, `delete` | Résolution dans le workspace de l'exécution ; sous-dossiers et suppression configurables. |
-| `documents` | `inventory`, `search`, `read`, `read_chunk` | Pièces explicitement jointes uniquement ; formats locaux normalisés. |
+| `filesystem` | `read`, `write`, `append`, `replace_paragraph`, `list_dir`, `delete` | Résolution dans le workspace de l'exécution ; écriture incrémentale et remplacement atomique d'un paragraphe ciblé sur son chemin déclaré ; sous-dossiers et suppression configurables. |
+| `documents` | `inventory`, `search`, `read`, `read_chunk`, `read_image`, `read_images` | Pièces explicitement jointes uniquement ; texte normalisé et images sélectionnées par lots multimodaux bornés. |
+
+Les quality gates pilotent aussi le protocole d'outils. Si un rédacteur doit
+réparer un document long déjà créé, l'itération suivante ne reçoit que le schéma
+`filesystem__append` et impose un appel ; pour un artefact absent, le même mécanisme
+emploie `filesystem__write`. Le filtrage est temporaire et levé après la mutation,
+ce qui garantit un progrès durable sans figer le nombre d'itérations du plan.
+Quand le serveur compatible OpenAI utilise le protocole textuel de secours, le
+nom de l'unique outil obligatoire est répété dans le dernier message transmis ;
+il ne peut ainsi être masqué par un long historique de réparations.
+Un défaut global qui exige de retirer du contenu (référence invalide, lien externe
+ou placeholder) bascule explicitement vers une reconstruction incrémentale : un
+premier `filesystem__write` borné initialise la version propre, puis les tours
+suivants emploient `filesystem__append`.
+Les doublons et les affirmations non sourcées utilisent plutôt
+`filesystem__replace_paragraph` : le validateur fournit un préfixe normalisé,
+l'outil remplace une seule occurrence et publie atomiquement le fichier. Chaque
+correction produit ainsi un progrès mesurable sans réécriture globale.
+La contrainte d'outil survit au rejet d'un appel textuel malformé. En complément,
+la couche de mutation refuse qu'un rédacteur écrase spontanément un document
+obligatoire existant, y compris par le shell ; `filesystem__write` n'est autorisé
+sur ce document que lorsqu'un gate global l'exige explicitement.
+La politique de mutation interdit également la suppression, directe ou via le
+shell, d'un artefact obligatoire de l'étape active, ainsi que son écrasement par
+un contenu vide. Une correction destructive doit employer une écriture contrôlée,
+afin qu'un livrable ne disparaisse jamais entre deux passages des quality gates.
 | `memory` | `search`, `propose` | Lecture validée du projet ; une proposition agent reste non validée et non globale. |
 | `shell` | `execute` | Répertoire du projet, blocage destructif, timeout, sortie bornée et approbation selon politique. |
 | `agent` | `spawn`, `status`, `execute_subtask` | Lignée et profondeur de délégation, refus des cycles exacts. |
@@ -127,10 +171,18 @@ humaines, `ContextWindowPolicy` et `ToolCallParser` pour Qwen, puis `ShellSafety
 compatible ; la coordination du plan, l'exécution d'une étape et le traitement d'un lot
 d'outils sont désormais des méthodes séparées et testées.
 
+`ExecutionEngine.start_execution` possède un registre indexé par identifiant d'exécution.
+Les reprises API, approbations, sous-agents et jobs du `Scheduler` convergent vers ce
+point unique. `cancel_active_execution` retire aussi les jobs de reprise fournisseur et
+annule la coroutine possédée ; son `finally` annule les tâches d'étapes encore actives.
+L'arrêt du runtime vide ce registre avant de fermer le transport du fournisseur.
+
 `ExecutionState.status` est validé par `ExecutionStatus`. Les mutations du runtime passent
 par `StateEngine.transition_execution`, qui contrôle la transition et conserve son motif,
-son acteur, sa corrélation et son horodatage. La persistance publie atomiquement les
-snapshots ; l'arrêt FastAPI effectue un flush final puis retire son abonnement au bus.
+son acteur, sa corrélation et son horodatage. La persistance v3 référence des sidecars
+immuables par identité et SHA-256 : seules les générations modifiées sont produites et un
+index atomique constitue le point de commit. L'arrêt FastAPI effectue un flush final puis
+retire son abonnement au bus.
 
 ## Dette et limites explicites
 

@@ -63,6 +63,29 @@ def test_unconfigured_markdown_validation_remains_format_only(tmp_path):
     assert report["metrics"]["duplicate_paragraphs"] == 1
 
 
+def test_duplicate_failure_exposes_machine_actionable_paragraph_prefix(tmp_path):
+    document = tmp_path / "duplicate.md"
+    paragraph = (
+        "This repeated architectural decision paragraph is long enough for the "
+        "quality validator to identify and repair deterministically."
+    )
+    document.write_text(
+        f"# Review\n\n{paragraph}\n\n{paragraph}\n",
+        encoding="utf-8",
+    )
+
+    report = validate_artifact(
+        document,
+        validator="document",
+        constraints={"max_duplicate_paragraphs": 0, "duplicate_min_words": 8},
+    )
+
+    assert not report["valid"]
+    failure = next(item for item in report["failures"] if "duplicate paragraph" in item)
+    assert "repeated paragraph prefix(es):" in failure
+    assert "this repeated architectural decision paragraph" in failure
+
+
 def test_document_validator_accepts_complete_local_traceable_content(tmp_path):
     document = tmp_path / "architecture.md"
     document.write_text(VALID_DOCUMENT, encoding="utf-8")
@@ -167,6 +190,53 @@ def test_document_validator_accepts_french_bounded_locator_terms(tmp_path):
     assert report["valid"], json.dumps(report, indent=2)
 
 
+def test_document_validator_ignores_reference_syntax_inside_markdown_code(tmp_path):
+    document = tmp_path / "examples.md"
+    document.write_text(
+        "# Sources\n\n"
+        "Preuve rÃ©elle. [requirements.docx > Exigences > blocs 1-12]\n\n"
+        "Syntaxe inline : `[filename > heading > blocks 1-2]`.\n\n"
+        "```text\n[another-name > section > blocks 1-99]\n```\n",
+        encoding="utf-8",
+    )
+
+    report = validate_artifact(
+        document,
+        validator="document",
+        constraints={
+            "source_inventory": {"requirements.docx": {"blocks": 12}},
+            "required_source_files": ["requirements.docx"],
+            "require_local_references": True,
+            "require_bounded_references": True,
+            "require_source_coverage": True,
+        },
+    )
+
+    assert report["valid"], json.dumps(report, indent=2)
+    assert report["metrics"]["local_references"] == 1
+
+
+def test_document_validator_explains_that_code_only_citations_are_not_evidence(tmp_path):
+    document = tmp_path / "code-only.md"
+    document.write_text(
+        "# Sources\n\n`[requirements.docx > Exigences > blocks 1-12]`\n",
+        encoding="utf-8",
+    )
+
+    report = validate_artifact(
+        document,
+        validator="document",
+        constraints={
+            "required_source_files": ["requirements.docx"],
+            "require_local_references": True,
+        },
+    )
+
+    assert not report["valid"]
+    assert any("write actual citations without backticks" in item for item in report["failures"])
+    assert report["metrics"]["local_references"] == 0
+
+
 def test_document_validator_requires_union_of_full_source_inventory(tmp_path):
     document = tmp_path / "inventory.md"
     document.write_text(
@@ -197,6 +267,12 @@ def test_document_validator_requires_union_of_full_source_inventory(tmp_path):
 
     assert not rejected["valid"]
     assert any("incomplete source coverage" in item for item in rejected["failures"])
+    coverage_failure = next(
+        item for item in rejected["failures"] if "incomplete source coverage" in item
+    )
+    assert "requirements.docx has uncovered required blocks: 9-12" in coverage_failure
+    assert "and 4 more" not in coverage_failure
+    assert "add bounded local reference(s) covering these exact ranges" in coverage_failure
     assert rejected["metrics"]["source_units_covered"] == 12
     assert rejected["metrics"]["source_units_total"] == 16
     assert accepted["valid"], json.dumps(accepted, indent=2)

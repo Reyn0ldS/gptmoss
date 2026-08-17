@@ -12,6 +12,13 @@ import shlex
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 from gptmoss.core.artifact_validation import validate_artifact
+from gptmoss.core.corpus_policy import normalize_corpus_policy
+from gptmoss.core.evidence_graph import build_evidence_graph
+from gptmoss.core.execution_plan import synthesize_plan_edges
+from gptmoss.core.plan_obligations import (
+    attach_plan_obligations,
+    unsatisfied_obligations,
+)
 
 
 SCHEMA_VERSION = 1
@@ -508,8 +515,37 @@ def normalize_execution_routines(
     return normalized
 
 
-def build_delivery_contract(plan: Dict[str, Any], task: str) -> Dict[str, Any]:
+def build_delivery_contract(
+    plan: Dict[str, Any], task: str, *, repair_obligations: bool = True
+) -> Dict[str, Any]:
     """Enrich a normalized plan and freeze the user-owned delivery contract."""
+    corpus_policy = normalize_corpus_policy(plan.get("corpus_policy"))
+    if repair_obligations:
+        obligations = attach_plan_obligations(
+            plan,
+            task=task,
+            planning_mode=str(plan.get("planning_mode") or "auto"),
+            analysis=(
+                plan.get("analysis") if isinstance(plan.get("analysis"), dict) else None
+            ),
+            workload_profile=(
+                plan.get("workload_profile")
+                if isinstance(plan.get("workload_profile"), dict) else None
+            ),
+            corpus_auto_workflow=bool(corpus_policy.get("enabled")),
+            corpus_policy=corpus_policy,
+            repair=True,
+            validate=True,
+        )
+    else:
+        # A delegated execution is already one owned node of its parent's
+        # validated DAG. Re-expanding it into QA/audit obligations creates
+        # orphan artifacts that its single direct step cannot own or execute.
+        obligations = [
+            dict(item) for item in (plan.get("plan_obligations") or [])
+            if isinstance(item, dict)
+        ]
+        plan["plan_obligations"] = obligations
     requirements = normalize_requirements(plan, task)
     traceability = map_requirements(plan, requirements)
     scope_changes = normalize_scope_changes(plan)
@@ -533,6 +569,8 @@ def build_delivery_contract(plan: Dict[str, Any], task: str) -> Dict[str, Any]:
     }
     software_delivery = any(
         str(step.get("role") or "") == "developer"
+        or str(step.get("operation") or "") == "implement"
+        or "implementation" in _strings(step.get("satisfies_obligations"))
         or any(Path(path).suffix.lower() in software_suffixes
                for path in _strings(step.get("required_artifacts")))
         or any(re.search(
@@ -542,6 +580,8 @@ def build_delivery_contract(plan: Dict[str, Any], task: str) -> Dict[str, Any]:
         ) for command in _strings(step.get("verification_commands")))
         for step in plan.get("steps", [])
     )
+    if not isinstance(plan.get("edges"), list) or not plan.get("edges"):
+        synthesize_plan_edges(plan)
     contract = {
         "schema_version": SCHEMA_VERSION,
         "task_sha256": hashlib.sha256(str(task).encode("utf-8")).hexdigest(),
@@ -558,6 +598,12 @@ def build_delivery_contract(plan: Dict[str, Any], task: str) -> Dict[str, Any]:
         "execution_routines": execution_routines,
         "normalization_warnings": _strings(plan.get("normalization_warnings")),
         "software_delivery": software_delivery,
+        "plan_obligations": obligations,
+        "edges": [
+            dict(item) for item in plan.get("edges") or []
+            if isinstance(item, dict) and item.get("from") and item.get("to")
+        ],
+        "corpus_policy": corpus_policy,
     }
     frozen = json.dumps(contract, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
     contract["contract_sha256"] = hashlib.sha256(frozen.encode("utf-8")).hexdigest()
@@ -794,6 +840,19 @@ def evaluate_delivery(
             failures.append(f"{row.get('requirement_id')} has no independent validation")
     checks.append({"name": "requirements_traceability", "passed": not failures})
 
+    missing_obligations = unsatisfied_obligations(
+        steps, contract.get("plan_obligations") or [],
+    )
+    if missing_obligations:
+        failures.append(
+            "missing delivery obligations: " + ", ".join(missing_obligations)
+        )
+    checks.append({
+        "name": "plan_obligations",
+        "passed": not missing_obligations,
+        "missing": missing_obligations,
+    })
+
     missing_artifacts = []
     for step in steps:
         for artifact in _strings(step.get("required_artifacts")):
@@ -870,6 +929,59 @@ def evaluate_delivery(
     })
 
     histories = list(tool_histories)
+    corpus_policy = contract.get("corpus_policy") or {}
+    corpus_evidence_failures = []
+    if corpus_policy.get("enabled"):
+        document_actions = {
+            str(entry.get("action") or "")
+            for entry in histories
+            if str(entry.get("capability") or "") == "documents"
+        }
+        if int(corpus_policy.get("document_count") or 0) > 0 and "read" not in document_actions:
+            corpus_evidence_failures.append(
+                "no documents.read evidence proves normalized source coverage"
+            )
+        if int(corpus_policy.get("image_count") or 0) > 0 and not (
+            {"read_image", "read_images"} & document_actions
+        ):
+            corpus_evidence_failures.append(
+                "no documents.read_image/read_images evidence proves image review"
+            )
+    if corpus_evidence_failures:
+        failures.append(
+            "corpus policy lacks machine evidence: "
+            + "; ".join(corpus_evidence_failures)
+        )
+    checks.append({
+        "name": "corpus_policy_evidence",
+        "passed": not corpus_evidence_failures,
+        "failures": corpus_evidence_failures,
+    })
+    evidence_graph = build_evidence_graph(
+        None, histories, corpus_policy=corpus_policy,
+    )
+    graph_failures = []
+    parseable_sources = [
+        node for node in evidence_graph.get("nodes", [])
+        if node.get("kind") in {"source", "image"}
+    ]
+    if (
+        corpus_policy.get("enabled")
+        and int(corpus_policy.get("document_count") or 0) > 0
+        and parseable_sources
+        and int((evidence_graph.get("stats") or {}).get("covered_sources") or 0) == 0
+    ):
+        graph_failures.append("evidence graph has sources without any covers edges")
+    if graph_failures:
+        failures.append(
+            "corpus evidence graph incomplete: " + "; ".join(graph_failures)
+        )
+    checks.append({
+        "name": "corpus_evidence_graph",
+        "passed": not graph_failures,
+        "failures": graph_failures,
+        "stats": evidence_graph.get("stats") or {},
+    })
     interface_issues = declared_interface_issues(workspace, contract.get("interfaces", []))
     if interface_issues:
         failures.append(f"{len(interface_issues)} declared interface issue(s): "

@@ -37,6 +37,14 @@ async def test_execution_control_api_preserves_transition_chronology(tmp_path):
     execution = state_engine.get_execution("lifecycle")
     execution.status = "running"
     execution.variables["task"] = "Chronological task"
+    execution.current_plan = {"steps": [{
+        "id": 0,
+        "status": "pending",
+        "assigned_execution_id": "cancelled-child",
+    }]}
+    cancelled_child = state_engine.get_execution("cancelled-child")
+    cancelled_child.status = "cancelled"
+    cancelled_child.variables["parent_execution_id"] = "lifecycle"
 
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
@@ -52,6 +60,7 @@ async def test_execution_control_api_preserves_transition_chronology(tmp_path):
     assert [response.status_code for response in (paused, resumed, cancelled, deleted, cleared)] == [200] * 5
     assert paused.json()["status"] == "paused"
     assert resumed.json()["status"] == "running"
+    assert "assigned_execution_id" not in execution.current_plan["steps"][0]
     assert cancelled.json() == {"status": "cancelled", "execution_ids": ["lifecycle"]}
     assert not state_engine.executions and not state_engine.conversations
     engine.execute_task.assert_awaited_once_with("lifecycle", "Chronological task")
@@ -64,6 +73,195 @@ async def test_execution_control_api_preserves_transition_chronology(tmp_path):
     ]
     assert [event.timestamp for event in events] == sorted(event.timestamp for event in events)
     assert [event.payload.get("execution_id") for event in events[:-1]] == ["lifecycle"] * 4
+    paused_event = next(event for event in events if event.type == "ExecutionPaused")
+    assert paused_event.payload.get("reason") == "manual"
+
+
+@pytest.mark.asyncio
+async def test_cancel_interrupts_inflight_execution_and_clears_owned_task(tmp_path):
+    event_bus = EventBus()
+    state = StateEngine(persist_path=str(tmp_path / "state.json"))
+
+    class BlockingLLM(MockLLMProvider):
+        def __init__(self):
+            super().__init__()
+            self.started = asyncio.Event()
+            self.cancelled = asyncio.Event()
+
+        async def completion(self, *args, **kwargs):
+            self.started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                self.cancelled.set()
+                raise
+
+    llm = BlockingLLM()
+    engine = ExecutionEngine(
+        event_bus, state, ContextEngine(state, RAMMemoryProvider()), llm,
+        SimplePlanner(llm), SimplePolicyProvider(),
+    )
+    engine.register_capability("filesystem", FilesystemCapability(str(tmp_path), state))
+    kernel = RuntimeKernel(event_bus, state, engine)
+    init_app(kernel, engine, state, event_bus)
+    execution = state.get_execution("blocked")
+    execution.status = "running"
+    execution.variables["task"] = "Wait for cancellation"
+    execution.current_plan = {
+        "steps": [{
+            "id": 0,
+            "role": "coordinator",
+            "specialist": "Blocking specialist",
+            "description": "Wait for the provider",
+            "dependencies": [],
+            "status": "pending",
+            "acceptance_criteria": ["Provider returned."],
+        }],
+    }
+    engine.start_execution("blocked", "Wait for cancellation")
+    await asyncio.wait_for(llm.started.wait(), timeout=2)
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.post("/executions/blocked/cancel")
+
+    assert response.status_code == 200
+    await asyncio.wait_for(llm.cancelled.wait(), timeout=2)
+    assert state.get_execution("blocked").status == "cancelled"
+    assert "blocked" not in engine._active_execution_tasks
+
+
+@pytest.mark.asyncio
+async def test_pause_interrupts_inflight_execution_without_cancelling_state(tmp_path):
+    event_bus = EventBus()
+    state = StateEngine(persist_path=str(tmp_path / "state.json"))
+
+    class BlockingLLM(MockLLMProvider):
+        def __init__(self):
+            super().__init__()
+            self.started = asyncio.Event()
+            self.cancelled = asyncio.Event()
+
+        async def completion(self, *args, **kwargs):
+            self.started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                self.cancelled.set()
+                raise
+
+    llm = BlockingLLM()
+    engine = ExecutionEngine(
+        event_bus, state, ContextEngine(state, RAMMemoryProvider()), llm,
+        SimplePlanner(llm), SimplePolicyProvider(),
+    )
+    engine.register_capability("filesystem", FilesystemCapability(str(tmp_path), state))
+    init_app(RuntimeKernel(event_bus, state, engine), engine, state, event_bus)
+    execution = state.get_execution("paused-blocked")
+    execution.status = "running"
+    execution.variables["task"] = "Pause me"
+    execution.current_plan = {
+        "steps": [{
+            "id": 0, "role": "coordinator", "specialist": "Blocking specialist",
+            "description": "Wait", "dependencies": [], "status": "pending",
+            "acceptance_criteria": ["Wait completed."],
+        }],
+    }
+    engine.start_execution("paused-blocked", "Pause me")
+    await asyncio.wait_for(llm.started.wait(), timeout=2)
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.post("/executions/paused-blocked/pause")
+
+    assert response.status_code == 200
+    await asyncio.wait_for(llm.cancelled.wait(), timeout=2)
+    assert state.get_execution("paused-blocked").status == "paused"
+    assert execution.current_plan["steps"][0]["status"] == "pending"
+    assert "paused-blocked" not in engine._active_execution_tasks
+
+
+@pytest.mark.asyncio
+async def test_scheduler_remains_available_while_execution_task_runs(tmp_path):
+    _, _, _, engine = _runtime(tmp_path)
+    started = asyncio.Event()
+    release = asyncio.Event()
+    timer_fired = asyncio.Event()
+
+    async def blocked_execute(execution_id, task):
+        started.set()
+        await release.wait()
+
+    engine.execute_task = blocked_execute
+    engine.schedule_execution("scheduled-running", "Long task")
+    await asyncio.wait_for(started.wait(), timeout=2)
+    engine.scheduler.schedule(timer_fired.set, delay=0, job_id="independent-timer")
+
+    await asyncio.wait_for(timer_fired.wait(), timeout=2)
+    release.set()
+    await engine.stop_runtime_services()
+
+
+@pytest.mark.asyncio
+async def test_stop_runtime_services_interrupts_all_owned_executions(tmp_path):
+    _, _, state, engine = _runtime(tmp_path)
+    started = asyncio.Event()
+
+    async def blocked_execute(execution_id, task):
+        started.set()
+        await asyncio.Event().wait()
+
+    engine.execute_task = blocked_execute
+    task = engine.start_execution("shutdown", "Stop me")
+    await asyncio.wait_for(started.wait(), timeout=2)
+
+    await engine.stop_runtime_services()
+
+    assert task.cancelled()
+    assert not engine._active_execution_tasks
+
+
+@pytest.mark.asyncio
+async def test_large_dag_keeps_all_steps_but_bounds_the_active_wave():
+    event_bus = EventBus()
+    state_engine = StateEngine()
+    llm = MockLLMProvider()
+    engine = ExecutionEngine(
+        event_bus,
+        state_engine,
+        ContextEngine(state_engine, RAMMemoryProvider()),
+        llm,
+        SimplePlanner(llm),
+        SimplePolicyProvider(),
+        max_parallel_plan_steps=3,
+    )
+    state = state_engine.get_execution("large-dag")
+    state.status = "running"
+    state.variables["parent_execution_id"] = "test-parent"
+    steps = [
+        {"id": index, "status": "pending", "dependencies": [], "role": "architect"}
+        for index in range(80)
+    ]
+    active = 0
+    maximum = 0
+
+    async def run_step(step):
+        nonlocal active, maximum
+        active += 1
+        maximum = max(maximum, active)
+        await asyncio.sleep(0.001)
+        step["status"] = "completed"
+        active -= 1
+
+    await engine._coordinate_plan_execution(
+        "large-dag", state, steps, "Long bounded task", run_step, {}
+    )
+
+    assert len(steps) == 80
+    assert all(step["status"] == "completed" for step in steps)
+    assert maximum == 3
+    assert state.variables["plan_parallelism_limit"] == 3
+    assert state.status == "completed"
 
 
 @pytest.mark.asyncio

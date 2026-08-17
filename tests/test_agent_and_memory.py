@@ -104,9 +104,19 @@ async def test_agent_capability_delegation():
 async def test_agent_status_and_execute_subtask_cover_terminal_modes(monkeypatch):
     state_engine = StateEngine()
     submissions = []
+    parent = state_engine.get_execution("parent-1")
+    parent.status = "running"
+    parent.variables.update({
+        "project_id": "site-demo",
+        "attachment_ids": ["att-1"],
+        "requested_skills": ["documentation"],
+        "project_path": "D:/trusted/site-demo",
+    })
 
     class ImmediateKernel:
-        execution_engine = SimpleNamespace(state_engine=state_engine)
+        def __init__(self):
+            self.state_engine = state_engine
+            self.execution_engine = SimpleNamespace(state_engine=state_engine)
 
         async def submit_task(self, task, agent_config):
             execution_id = f"sub-{len(submissions)}"
@@ -124,7 +134,15 @@ async def test_agent_status_and_execute_subtask_cover_terminal_modes(monkeypatch
                 })
             return execution_id
 
-    sleep = AsyncMock()
+    async def advance_then_sleep(_delay):
+        for state in state_engine.executions.values():
+            if state.status == "waiting_provider":
+                state.status = "completed"
+                state_engine.get_conversation(state.execution_id).messages.append({
+                    "role": "assistant", "content": "result after provider recovery",
+                })
+
+    sleep = AsyncMock(side_effect=advance_then_sleep)
     monkeypatch.setattr("gptmoss.capabilities.agent.asyncio.sleep", sleep)
     capability = AgentCapability(kernel=ImmediateKernel(), workspace_root=TEMP_DIR)
 
@@ -132,20 +150,22 @@ async def test_agent_status_and_execute_subtask_cover_terminal_modes(monkeypatch
         "complete work", system_prompt="specialist prompt", role_name="Reviewer",
         context={"execution_id": "parent-1"},
     )
-    waiting = await capability.execute_subtask("provider unavailable")
+    recovered = await capability.execute_subtask("provider unavailable")
     cancelled = await capability.execute_subtask("cancel work")
 
     assert completed.endswith("result for complete work")
-    assert "durably waiting" in waiting and "sub-1" in waiting
+    assert recovered.endswith("result after provider recovery")
     assert cancelled.endswith("Final status: cancelled.")
     assert "Status: completed" in capability.status("sub-0")
     assert "Current Step: 2" in capability.status("sub-0")
     assert "result for complete work" in capability.status("sub-0")
     assert capability.status("missing") == "Error: Sub-agent execution_id missing not found."
-    assert submissions[0][2] == {
-        "system_prompt": "specialist prompt", "role_name": "Reviewer",
-        "parent_execution_id": "parent-1",
-    }
+    assert submissions[0][2]["system_prompt"] == "specialist prompt"
+    assert submissions[0][2]["role_name"] == "Reviewer"
+    assert submissions[0][2]["parent_execution_id"] == "parent-1"
+    assert submissions[0][2]["variables"]["project_id"] == "site-demo"
+    assert submissions[0][2]["variables"]["attachment_ids"] == ["att-1"]
+    assert submissions[0][2]["skills"] == ["documentation"]
     assert sleep.await_count == 3
 
 @pytest.mark.asyncio

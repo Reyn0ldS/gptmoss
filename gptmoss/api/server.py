@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import inspect
 import json
 import logging
 import os
@@ -23,6 +24,7 @@ GUI_FILE_PATH = os.path.join(CURRENT_DIR, "gui.html")
 from gptmoss.core import EventBus, Event, StateEngine, RuntimeKernel, ExecutionEngine, DEFAULT_SYSTEM_PROMPT, RuntimeSettings, ProjectDomainRegistry
 from gptmoss.core.artifacts import ArtifactStore
 from gptmoss.core.document_model import DocumentModelStore
+from gptmoss.core.corpus_policy import build_corpus_policy
 from gptmoss.capabilities.documents import DocumentCapability
 from gptmoss.core.evolution import AgentProfileRegistry, AutonomousSkillLifecycle
 from gptmoss.core.skills import SkillRegistry
@@ -31,6 +33,8 @@ from gptmoss.core.settings import (
     DEFAULT_MAX_TRANSITIONS_PER_EXECUTION,
     DEFAULT_MAX_UPLOAD_BYTES,
 )
+from gptmoss.capabilities.agent import child_agent_config
+from gptmoss.planners.complexity import normalize_planning_mode, task_title_from_text
 
 logger = logging.getLogger("gptmoss.api")
 
@@ -39,7 +43,10 @@ class SubmitTaskRequest(BaseModel):
     task: str = Field(min_length=1)
     agent_config: Optional[Dict[str, Any]] = None
     project_id: Optional[str] = None
+    planning_mode: str = "auto"
     attachment_ids: List[str] = Field(default_factory=list)
+    corpus_ids: List[str] = Field(default_factory=list)
+    corpus_auto_workflow: bool = True
     delay_seconds: float = Field(default=0, ge=0, le=31_536_000)
     run_at: Optional[float] = Field(default=None, ge=0)
 
@@ -53,6 +60,23 @@ class UploadArtifactRequest(BaseModel):
     filename: str
     content_base64: str
     content_type: str
+
+class CreateCorpusRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    root_label: str = Field(min_length=1, max_length=1_000)
+    resume: bool = True
+
+class CorpusIssue(BaseModel):
+    relative_path: str = Field(min_length=1, max_length=1_000)
+    reason: Optional[str] = Field(default=None, max_length=1_000)
+    error: Optional[str] = Field(default=None, max_length=2_000)
+
+class FinalizeCorpusRequest(BaseModel):
+    present_paths: List[str] = Field(default_factory=list, max_length=10_000)
+    # Keep the finalization limits aligned with the documented folder limit.
+    # Otherwise a successful import can fail only when its manifest is closed.
+    skipped: List[CorpusIssue] = Field(default_factory=list, max_length=10_000)
+    errors: List[CorpusIssue] = Field(default_factory=list, max_length=10_000)
 
 class DecisionRequest(BaseModel):
     reason: Optional[str] = None
@@ -135,13 +159,39 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(title="MOSS Agent Runtime Platform API", version="0.1.0", lifespan=lifespan)
 
-# CORS middleware for potential frontend clients
+# Local GUI may be rebound to any loopback port by the supervisor.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://127.0.0.1:8000", "http://localhost:8000"],
+    allow_origins=[],
+    allow_origin_regex=r"https?://(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$",
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
+)
+
+ACTIVE_EXECUTION_STATUSES = frozenset({"pending", "running", "paused", "waiting_provider"})
+PUBLIC_EXECUTION_VARIABLE_KEYS = (
+    "task",
+    "task_title",
+    "planning_mode",
+    "project_id",
+    "project_path",
+    "project_domains",
+    "attachment_ids",
+    "corpus_ids",
+    "corpus_auto_workflow",
+    "corpus_policy",
+    "corpus_summaries",
+    "role_name",
+    "parent_execution_id",
+    "pending_approval",
+    "pending_scope_approval",
+    "scheduled_for",
+    "document_model_checkpoint",
+    "active_skills",
+    "delivery_contract",
+    "plan_parallelism_limit",
+    "requested_skills",
 )
 
 # Store active websocket connections
@@ -192,6 +242,56 @@ class ConnectionManager:
 manager = ConnectionManager()
 
 DEFAULT_PROJECT = {"id": "proj-default", "name": "Projet Par Défaut"}
+
+
+def _status_value(state) -> str:
+    status = getattr(state, "status", state)
+    return str(getattr(status, "value", status))
+
+
+def _descendant_ids(state_engine, execution_id: str) -> List[str]:
+    to_visit = [execution_id]
+    collected: List[str] = []
+    while to_visit:
+        current = to_visit.pop(0)
+        collected.append(current)
+        for child_id, child_state in state_engine.executions.items():
+            parent_id = child_state.variables.get("parent_execution_id")
+            if parent_id == current and child_id not in collected and child_id not in to_visit:
+                to_visit.append(child_id)
+    return collected
+
+
+def _has_active_execution(state_engine, execution_ids: Optional[List[str]] = None) -> bool:
+    if execution_ids is None:
+        states = state_engine.executions.values()
+    else:
+        states = (
+            state_engine.executions[item]
+            for item in execution_ids
+            if item in state_engine.executions
+        )
+    return any(_status_value(state) in ACTIVE_EXECUTION_STATUSES for state in states)
+
+
+def _public_execution_variables(variables: Dict[str, Any]) -> Dict[str, Any]:
+    public = {
+        key: variables[key]
+        for key in PUBLIC_EXECUTION_VARIABLE_KEYS
+        if key in variables
+    }
+    pending = public.get("pending_approval")
+    if isinstance(pending, dict):
+        pending = dict(pending)
+        arguments = pending.get("arguments")
+        if isinstance(arguments, dict):
+            trimmed = dict(arguments)
+            content = trimmed.get("content")
+            if isinstance(content, str) and len(content) > 8_000:
+                trimmed["content"] = content[:8_000] + "\n… [truncated]"
+            pending["arguments"] = trimmed
+        public["pending_approval"] = pending
+    return public
 
 def _filesystem_capability():
     if not app_state.execution_engine:
@@ -322,9 +422,26 @@ async def submit_task(req: SubmitTaskRequest):
         raise HTTPException(status_code=404, detail=f"Project '{project_id}' does not exist.")
 
     filesystem = _filesystem_capability()
-    if req.attachment_ids and (not filesystem or not app_state.execution_engine.artifact_store):
+    requested_attachments = list(dict.fromkeys(req.attachment_ids))
+    requested_corpora = list(dict.fromkeys(req.corpus_ids))
+    if (requested_attachments or requested_corpora) and (
+        not filesystem or not app_state.execution_engine.artifact_store
+    ):
         raise HTTPException(status_code=500, detail="Artifact storage not initialized.")
-    for attachment_id in dict.fromkeys(req.attachment_ids):
+    for corpus_id in requested_corpora:
+        try:
+            corpus = app_state.execution_engine.artifact_store.get_corpus(corpus_id)
+        except (ValueError, FileNotFoundError, OSError, KeyError, json.JSONDecodeError) as exc:
+            raise HTTPException(status_code=404, detail=f"Corpus '{corpus_id}' does not exist.") from exc
+        if corpus.get("state") not in {"ready", "partial"}:
+            raise HTTPException(status_code=409, detail=f"Corpus '{corpus_id}' is not finalized.")
+        requested_attachments.extend(
+            str(entry["artifact_id"])
+            for entry in dict(corpus.get("entries") or {}).values()
+            if isinstance(entry, dict) and entry.get("artifact_id")
+        )
+    requested_attachments = list(dict.fromkeys(requested_attachments))
+    for attachment_id in requested_attachments:
         try:
             app_state.execution_engine.artifact_store.get(attachment_id)
         except (ValueError, FileNotFoundError, OSError, KeyError) as exc:
@@ -333,17 +450,42 @@ async def submit_task(req: SubmitTaskRequest):
     agent_config = dict(req.agent_config or {})
     agent_config.setdefault("system_prompt", DEFAULT_SYSTEM_PROMPT)
     variables = dict(agent_config.get("variables") or {})
+    planning_mode = normalize_planning_mode(
+        req.planning_mode or variables.get("planning_mode") or agent_config.get("planning_mode")
+    )
+    corpus_summaries = []
+    for corpus_id in requested_corpora:
+        corpus = app_state.execution_engine.artifact_store.get_corpus(corpus_id)
+        corpus_summaries.append(_public_corpus(corpus))
+    effective_task = req.task.strip()
+    corpus_auto_workflow = bool(req.corpus_auto_workflow) and bool(
+        requested_corpora or requested_attachments
+    )
+    corpus_policy = build_corpus_policy(
+        enabled=corpus_auto_workflow,
+        source_kind="corpus" if requested_corpora else "attachments",
+        # A selected folder explicitly requests the professional corpus path.
+        # Loose attachments remain useful evidence without forcing a report.
+        professional_delivery=bool(requested_corpora),
+    )
     variables.update({
         "project_id": project_id,
-        "attachment_ids": list(dict.fromkeys(req.attachment_ids)),
+        "attachment_ids": requested_attachments,
+        "corpus_ids": requested_corpora,
+        "corpus_summaries": corpus_summaries,
+        "corpus_auto_workflow": corpus_auto_workflow,
+        "corpus_policy": corpus_policy,
+        "planning_mode": planning_mode,
+        "task_title": task_title_from_text(req.task.strip()),
     })
+    agent_config["planning_mode"] = planning_mode
     if project.get("path"):
         variables["project_path"] = str(Path(str(project["path"])).resolve())
     if project.get("domains"):
         variables["project_domains"] = project["domains"]
     agent_config["variables"] = variables
     exec_id = await app_state.kernel.submit_task(
-        req.task.strip(), agent_config,
+        effective_task, agent_config,
         delay_seconds=req.delay_seconds, run_at=req.run_at,
     )
     state = app_state.state_engine.get_execution(exec_id)
@@ -375,10 +517,13 @@ async def create_project(req: ProjectRequest):
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         project["domains"] = req.domains
     if req.path and req.path.strip():
-        path = Path(req.path.strip()).expanduser()
-        if not path.is_absolute():
+        raw_path = Path(req.path.strip()).expanduser()
+        if ".." in raw_path.parts:
+            raise HTTPException(status_code=400, detail="A custom project path cannot contain parent-directory segments.")
+        if not raw_path.is_absolute():
             raise HTTPException(status_code=400, detail="A custom project path must be absolute.")
-        project["path"] = str(path.resolve())
+        path = raw_path.resolve()
+        project["path"] = str(path)
         path.mkdir(parents=True, exist_ok=True)
     else:
         filesystem = _filesystem_capability()
@@ -418,11 +563,151 @@ async def upload_artifact(req: UploadArtifactRequest):
             ),
         ) from exc
     public_fields = (
-        "id", "filename", "content_type", "size_bytes", "sha256", "created_at",
+        "id", "filename", "source_name", "content_type", "size_bytes", "sha256", "created_at",
         "document_title", "document_blocks", "document_parser",
         "document_parser_version", "document_chunks",
     )
     return {key: metadata[key] for key in public_fields if key in metadata}
+
+
+def _public_corpus(corpus: Dict[str, Any], *, include_entries: bool = False) -> Dict[str, Any]:
+    entries = dict(corpus.get("entries") or {})
+    result = {
+        key: corpus.get(key)
+        for key in (
+            "id", "name", "root_label", "source_kind", "state",
+            "created_at", "updated_at", "skipped", "errors",
+            "skipped_count", "error_count",
+        )
+    }
+    result["skipped_count"] = int(
+        corpus.get("skipped_count", len(corpus.get("skipped") or [])) or 0
+    )
+    result["error_count"] = int(
+        corpus.get("error_count", len(corpus.get("errors") or [])) or 0
+    )
+    result["file_count"] = len(entries)
+    result["document_count"] = sum(
+        1 for entry in entries.values()
+        if str(entry.get("content_type") or "") in ArtifactStore.DOCUMENT_TYPES
+    )
+    result["image_count"] = sum(
+        1 for entry in entries.values()
+        if str(entry.get("content_type") or "") in ArtifactStore.IMAGE_TYPES
+    )
+    result["size_bytes"] = sum(int(entry.get("size_bytes") or 0) for entry in entries.values())
+    result["attachment_ids"] = list(dict.fromkeys(
+        str(entry["artifact_id"]) for entry in entries.values() if entry.get("artifact_id")
+    ))
+    if include_entries:
+        result["entries"] = entries
+    return result
+
+
+@app.post("/corpora", status_code=201)
+async def create_corpus(req: CreateCorpusRequest):
+    store = _artifact_store()
+    if not store:
+        raise HTTPException(status_code=500, detail="Artifact storage not initialized.")
+    try:
+        corpus, resumed = store.create_corpus(
+            req.name, root_label=req.root_label, resume=req.resume
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    result = _public_corpus(corpus, include_entries=True)
+    result["resumed"] = resumed
+    return result
+
+
+@app.get("/corpora")
+async def list_corpora():
+    store = _artifact_store()
+    if not store:
+        raise HTTPException(status_code=500, detail="Artifact storage not initialized.")
+    return [_public_corpus(corpus) for corpus in store.list_corpora()]
+
+
+@app.get("/corpora/{corpus_id}")
+async def get_corpus(corpus_id: str):
+    store = _artifact_store()
+    if not store:
+        raise HTTPException(status_code=500, detail="Artifact storage not initialized.")
+    try:
+        return _public_corpus(store.get_corpus(corpus_id), include_entries=True)
+    except (ValueError, FileNotFoundError, OSError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=404, detail="Corpus not found.") from exc
+
+
+@app.delete("/corpora/{corpus_id}")
+async def delete_corpus(corpus_id: str):
+    store = _artifact_store()
+    if not store:
+        raise HTTPException(status_code=500, detail="Artifact storage not initialized.")
+    try:
+        corpus = store.delete_corpus(corpus_id)
+    except (ValueError, FileNotFoundError, OSError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=404, detail="Corpus not found.") from exc
+    return {"status": "deleted", "id": corpus["id"], "retained_artifacts": len(corpus.get("entries") or {})}
+
+
+@app.put("/corpora/{corpus_id}/files", status_code=201)
+async def upload_corpus_file(
+    corpus_id: str,
+    request: Request,
+    relative_path: str,
+    last_modified: int = 0,
+):
+    store = _artifact_store()
+    if not store:
+        raise HTTPException(status_code=500, detail="Artifact storage not initialized.")
+    try:
+        store.get_corpus(corpus_id)
+        payload = await request.body()
+        metadata = await asyncio.to_thread(
+            store.save_bytes,
+            Path(relative_path.replace("\\", "/")).name,
+            payload,
+            request.headers.get("content-type", "application/octet-stream"),
+            corpus_id=corpus_id,
+            relative_path=relative_path,
+            last_modified=last_modified,
+            expected_sha256=request.headers.get("x-content-sha256", ""),
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Corpus not found.") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except OSError as exc:
+        raise HTTPException(status_code=503, detail="Corpus storage is temporarily unavailable.") from exc
+    return {
+        key: metadata[key]
+        for key in (
+            "id", "filename", "source_name", "content_type", "size_bytes", "sha256",
+            "document_title", "document_blocks", "document_parser", "document_chunks",
+            "deduplicated",
+        )
+        if key in metadata
+    }
+
+
+@app.post("/corpora/{corpus_id}/finalize")
+async def finalize_corpus(corpus_id: str, req: FinalizeCorpusRequest):
+    store = _artifact_store()
+    if not store:
+        raise HTTPException(status_code=500, detail="Artifact storage not initialized.")
+    try:
+        corpus = store.finalize_corpus(
+            corpus_id,
+            present_paths=req.present_paths,
+            skipped=[item.model_dump(exclude_none=True) for item in req.skipped],
+            errors=[item.model_dump(exclude_none=True) for item in req.errors],
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Corpus not found.") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return _public_corpus(corpus, include_entries=True)
 
 
 @app.get("/artifacts")
@@ -442,7 +727,7 @@ async def list_artifacts():
             if not required_fields.issubset(metadata):
                 continue
             public_fields = (
-                "id", "filename", "content_type", "size_bytes", "sha256",
+                "id", "filename", "source_name", "content_type", "size_bytes", "sha256",
                 "created_at", "document_title", "document_blocks",
                 "document_parser", "document_parser_version",
                 "document_chunks",
@@ -688,6 +973,7 @@ async def list_executions():
     
     results = []
     for exec_id, state in app_state.state_engine.executions.items():
+        task_text = str(state.variables.get("task") or "").strip()
         results.append({
             "execution_id": exec_id,
             "status": state.status,
@@ -695,7 +981,10 @@ async def list_executions():
             "steps_count": len(state.current_plan.get("steps", [])) if state.current_plan else 0,
             "parent_execution_id": state.variables.get("parent_execution_id"),
             "role_name": state.variables.get("role_name"),
-            "project_id": state.variables.get("project_id", "proj-default")
+            "project_id": state.variables.get("project_id", "proj-default"),
+            "planning_mode": normalize_planning_mode(state.variables.get("planning_mode")),
+            "task_title": state.variables.get("task_title") or task_title_from_text(task_text),
+            "task": task_text[:160],
         })
     return results
 
@@ -715,10 +1004,27 @@ async def get_execution(execution_id: str):
         "status": state.status,
         "current_step": state.current_step,
         "plan": state.current_plan,
-        "variables": state.variables,
+        "variables": _public_execution_variables(state.variables),
         "results": state.results,
         "messages": convo.messages
     }
+
+@app.get("/executions/{execution_id}/evidence-graph")
+async def get_execution_evidence_graph(execution_id: str):
+    if not app_state.state_engine:
+        raise HTTPException(status_code=500, detail="State engine not initialized.")
+    if execution_id not in app_state.state_engine.executions:
+        raise HTTPException(status_code=404, detail="Execution not found.")
+    from gptmoss.core.evidence_graph import build_evidence_graph
+    state = app_state.state_engine.get_execution(execution_id)
+    histories = []
+    if app_state.execution_engine:
+        histories = app_state.execution_engine.delivery_coordinator.histories(execution_id)
+    return build_evidence_graph(
+        state.current_plan or {},
+        histories,
+        corpus_policy=state.variables.get("corpus_policy"),
+    )
 
 @app.get("/executions/{execution_id}/delivery")
 async def get_execution_delivery(execution_id: str, download: bool = False):
@@ -821,10 +1127,15 @@ async def create_subagent(execution_id: str, req: SubAgentRequest):
         raise HTTPException(status_code=500, detail="Runtime kernel not initialized.")
     if execution_id not in app_state.state_engine.executions:
         raise HTTPException(status_code=404, detail="Parent execution not found.")
-    child_id = await app_state.kernel.submit_task(req.task.strip(), {
-        "system_prompt": req.system_prompt.strip(), "role_name": req.role_name.strip(),
-        "parent_execution_id": execution_id,
-    })
+    child_id = await app_state.kernel.submit_task(
+        req.task.strip(),
+        child_agent_config(
+            app_state.state_engine,
+            execution_id,
+            system_prompt=req.system_prompt.strip(),
+            role_name=req.role_name.strip(),
+        ),
+    )
     return {"execution_id": child_id, "parent_execution_id": execution_id, "status": "running"}
 
 @app.get("/api/diagnostics")
@@ -850,6 +1161,11 @@ async def get_diagnostics():
         "vision_mode": getattr(engine.llm_provider, "vision_mode", "auto"),
         "native_tool_calling": getattr(engine.llm_provider, "_native_tools_supported", None),
         "learned_context_chars": getattr(engine.llm_provider, "_learned_context_chars", None),
+        "configured_context_window_tokens": getattr(engine.llm_provider, "context_window_tokens", 0),
+        "learned_context_window_tokens": getattr(engine.llm_provider, "_learned_context_tokens", None),
+        "effective_context_window_tokens": getattr(engine.llm_provider, "effective_context_window_tokens", None),
+        "context_input_budget_tokens": getattr(engine.llm_provider, "context_input_budget_tokens", None),
+        "context_output_reserve_tokens": getattr(engine.llm_provider, "context_output_reserve_tokens", None),
         "capabilities": capabilities,
         "execution_statuses": statuses,
         "metrics": engine.telemetry.metrics(),
@@ -960,9 +1276,11 @@ async def pause_execution(execution_id: str):
     app_state.state_engine.transition_execution(
         state, "paused", reason="manual pause", actor="api"
     )
+    if app_state.execution_engine:
+        await app_state.execution_engine.cancel_active_execution(execution_id)
     await app_state.event_bus.publish(Event(
         type="ExecutionPaused",
-        payload={"execution_id": execution_id}
+        payload={"execution_id": execution_id, "reason": "manual"}
     ))
     return {"status": "paused"}
 
@@ -993,6 +1311,18 @@ async def resume_execution(execution_id: str):
             status_code=400,
             detail="Execution is paused waiting for scope approval. Use /approve or /reject endpoint."
         )
+
+    # Pausing an active delegated step cancels its in-flight child task while
+    # preserving the parent step as pending.  Never reuse that terminal child
+    # on resume: a fresh specialist must inherit the durable workspace edits
+    # and the current runtime/tool schemas.
+    for step in (state.current_plan or {}).get("steps", []):
+        if step.get("status") != "pending":
+            continue
+        assigned_id = step.get("assigned_execution_id")
+        assigned = app_state.state_engine.executions.get(assigned_id) if assigned_id else None
+        if assigned is not None and assigned.status == "cancelled":
+            step.pop("assigned_execution_id", None)
         
     if state.status == "failed":
         steps = (state.current_plan or {}).get("steps", [])
@@ -1033,7 +1363,7 @@ async def resume_execution(execution_id: str):
         task = task[6:]
         
     # Rerun loop
-    asyncio.create_task(app_state.execution_engine.execute_task(execution_id, task))
+    app_state.execution_engine.start_execution(execution_id, task)
     return {"status": "running"}
 
 @app.post("/executions/{execution_id}/cancel")
@@ -1071,6 +1401,10 @@ async def cancel_execution(execution_id: str):
                 and child_id not in to_cancel
             ):
                 to_cancel.append(child_id)
+    await asyncio.gather(*(
+        app_state.execution_engine.cancel_active_execution(exec_id)
+        for exec_id in cancelled
+    ))
     app_state.state_engine.save_to_disk()
     return {"status": "cancelled", "execution_ids": cancelled}
 
@@ -1081,21 +1415,19 @@ async def delete_execution(execution_id: str):
         
     if execution_id not in app_state.state_engine.executions:
         raise HTTPException(status_code=404, detail="Execution not found.")
-        
-    # Cascade delete all descendants
-    to_delete = [execution_id]
+
+    subtree = _descendant_ids(app_state.state_engine, execution_id)
+    if _has_active_execution(app_state.state_engine, subtree):
+        raise HTTPException(
+            status_code=409,
+            detail="Cannot delete an active execution. Cancel it first.",
+        )
+
     deleted = []
-    while to_delete:
-        curr = to_delete.pop(0)
-        deleted.append(curr)
-        for child_id, child_state in list(app_state.state_engine.executions.items()):
-            parent_id = child_state.variables.get("parent_execution_id")
-            if parent_id == curr and child_id not in deleted and child_id not in to_delete:
-                to_delete.append(child_id)
-                
-    for exec_id in deleted:
+    for exec_id in subtree:
         app_state.state_engine.executions.pop(exec_id, None)
         app_state.state_engine.conversations.pop(exec_id, None)
+        deleted.append(exec_id)
         
     app_state.state_engine.save_to_disk()
     
@@ -1109,7 +1441,13 @@ async def delete_execution(execution_id: str):
 async def clear_all_executions():
     if not app_state.state_engine or not app_state.event_bus:
         raise HTTPException(status_code=500, detail="Engine not initialized.")
-        
+
+    if _has_active_execution(app_state.state_engine):
+        raise HTTPException(
+            status_code=409,
+            detail="Cannot clear history while an execution is still active. Cancel running tasks first.",
+        )
+
     app_state.state_engine.executions.clear()
     app_state.state_engine.conversations.clear()
     app_state.state_engine.save_to_disk()
@@ -1206,7 +1544,10 @@ async def get_settings():
         config.setdefault("max_step_iterations", 30)
         config.setdefault("vision_mode", "auto")
         config.setdefault("max_step_retries", 2)
+        config.setdefault("max_parallel_plan_steps", 0)
         config.setdefault("max_context_chars", 12_000)
+        config.setdefault("context_window_tokens", 0)
+        config.setdefault("context_output_reserve_tokens", 8_192)
         config.setdefault("max_upload_bytes", DEFAULT_MAX_UPLOAD_BYTES)
         config.setdefault("max_attachment_text_chars", DEFAULT_MAX_ATTACHMENT_TEXT_CHARS)
         config.setdefault("max_transitions_per_execution", DEFAULT_MAX_TRANSITIONS_PER_EXECUTION)
@@ -1240,8 +1581,8 @@ async def get_settings():
         "base_url": getattr(llm, "base_url", ""),
         "model_name": getattr(llm, "default_model", ""),
         "vision_mode": getattr(llm, "vision_mode", "auto"),
-        "ssl_verify": False,
-        "ssl_cert_path": "",
+        "ssl_verify": bool(getattr(llm, "ssl_verify", True)),
+        "ssl_cert_path": getattr(llm, "ssl_cert_path", "") or "",
         "denied_capabilities": getattr(policy, "denied", []),
         "approval_required_capabilities": getattr(policy, "approval_required", []),
         "workspace_full_autonomy": getattr(policy, "workspace_full_autonomy", False),
@@ -1266,7 +1607,12 @@ async def get_settings():
         "projects": [{"id": "proj-default", "name": "Projet Par Défaut"}],
         "max_step_iterations": getattr(app_state.execution_engine, "max_step_iterations", 30),
         "max_step_retries": getattr(app_state.execution_engine, "max_step_retries", 2),
+        "max_parallel_plan_steps": getattr(
+            app_state.execution_engine, "max_parallel_plan_steps", 0
+        ),
         "max_context_chars": getattr(app_state.execution_engine.context_engine, "max_history_chars", 12_000),
+        "context_window_tokens": getattr(llm, "context_window_tokens", 0),
+        "context_output_reserve_tokens": getattr(llm, "context_output_reserve_tokens", 8_192),
         "max_upload_bytes": getattr(_artifact_store(), "max_bytes", 0),
         "max_attachment_text_chars": getattr(_artifact_store(), "max_text_chars", 0),
         "max_transitions_per_execution": getattr(
@@ -1397,7 +1743,10 @@ async def update_settings(req: SettingsRequest):
         "projects": req.projects,
         "max_step_iterations": req.max_step_iterations,
         "max_step_retries": req.max_step_retries,
+        "max_parallel_plan_steps": req.max_parallel_plan_steps,
         "max_context_chars": req.max_context_chars,
+        "context_window_tokens": req.context_window_tokens,
+        "context_output_reserve_tokens": req.context_output_reserve_tokens,
         "max_upload_bytes": req.max_upload_bytes,
         "max_attachment_text_chars": req.max_attachment_text_chars,
         "max_transitions_per_execution": req.max_transitions_per_execution,
@@ -1410,13 +1759,20 @@ async def update_settings(req: SettingsRequest):
     _write_runtime_config(config_data)
         
     if hasattr(llm, "update_config"):
-        llm.update_config(
-            api_key=api_key,
-            base_url=req.base_url,
-            ssl_verify=req.ssl_verify,
-            ssl_cert_path=req.ssl_cert_path,
-            model_name=req.model_name
-        )
+        provider_values = {
+            "api_key": api_key,
+            "base_url": req.base_url,
+            "ssl_verify": req.ssl_verify,
+            "ssl_cert_path": req.ssl_cert_path,
+            "model_name": req.model_name,
+            "context_window_tokens": req.context_window_tokens,
+            "context_output_reserve_tokens": req.context_output_reserve_tokens,
+        }
+        parameters = inspect.signature(llm.update_config).parameters
+        llm.update_config(**{
+            key: value for key, value in provider_values.items()
+            if key in parameters
+        })
     if hasattr(llm, "set_vision_mode"):
         llm.set_vision_mode(req.vision_mode)
     if hasattr(policy, "update_policy"):
@@ -1435,6 +1791,7 @@ async def update_settings(req: SettingsRequest):
     app_state.execution_engine.default_skills = [skill.lower() for skill in req.default_skills]
     app_state.execution_engine.max_step_iterations = req.max_step_iterations
     app_state.execution_engine.max_step_retries = req.max_step_retries
+    app_state.execution_engine.max_parallel_plan_steps = req.max_parallel_plan_steps
     app_state.execution_engine.document_engine_enabled = req.document_engine_enabled
     app_state.execution_engine.document_checkpoint_enabled = req.document_checkpoint_enabled
     app_state.execution_engine.document_target_section_words = req.document_target_section_words

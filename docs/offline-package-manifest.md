@@ -101,12 +101,20 @@ mais exige que l'archive Git contienne bien tous les fichiers versionnés.
 
 ## Diagnostic des échecs
 
+Le préparateur sélectionne d'abord une racine de build courte et inscriptible sur le
+volume du projet, en privilégiant `<lecteur>:\.gptmoss-build`. Il force ensuite `TEMP`,
+`TMP` et `TMPDIR` dans cette racine. L'installation `pip --target` reste ainsi sur un
+seul volume et sous la limite de chemin Windows même lorsque le dépôt est profondément
+imbriqué ; `--no-compile` et `PYTHONDONTWRITEBYTECODE=1` empêchent aussi le Python hôte
+de créer des bytecodes inutiles pour la cible embarquée.
+
 | Symptôme | Cause probable | Preuve à relever |
 |---|---|---|
 | Fenêtre BAT qui se ferme | ancien lanceur ou sortie non conservée | `offline-preparation.log`, code retour |
 | Aucun téléchargement | runtime déjà valide ou mode `--verify-only` | première phase du journal |
 | Alias Microsoft Store | faux `python.exe` sans runtime/pip | chemin et test `sys.version_info` |
 | Import absent offline | wheel non embarquée ou `._pth` incorrect | manifeste, `Lib/site-packages`, import direct |
+| `WinError 17` ou fichiers OpenAI introuvables pendant `pip --target` | ancienne préparation utilisant `%TEMP%` sur un autre lecteur et générant des `.pyc` | vérifier le répertoire `p*` dans `.gptmoss-offline-build-*` et la présence de `--no-compile` |
 | Fichiers applicatifs absents | archive/branche Git incomplète | `git ls-files`, carte des fichiers obligatoires |
 | Runtime entier vu comme supprimé par Git | permissions/ACL locales illisibles | existence du dossier et droits, sans restaurer par checkout aveugle |
 | Échec depuis un partage UNC | chemin courant ou écriture non compatible | journal avec chemin absolu, workspace et erreur OS |

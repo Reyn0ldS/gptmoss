@@ -25,8 +25,8 @@ Prioritize accurate, complete content. Use simple Markdown structure until the u
 7. Remove repetition. Replace unsupported certainty with a labeled assumption, inference, recommendation, or information gap.
 8. Assemble the Markdown deliverable, traceability matrix, and quality report.
 9. Declare a `document` artifact validation policy with required headings, requirement and traceability IDs, allowed local source filenames, inventory bounds, minimum content metrics, and applicable repetition, terminology, placeholder, external-link, and claim-reference gates.
-10. From the GPTMOSS source tree, run `python scripts/validate_document.py <deliverable.md> --constraints <policy.json> --json <report.json> --markdown <report.md>` when standalone report files are required. The script explicitly supports the isolated portable Python runtime.
-11. Verify the saved files by reading them back and revise until the validator passes.
+10. Let the execution engine apply the declared artifact validation policy automatically after the structured delivery response. Do not invoke repository-only validator scripts or invent a constraints file from an isolated project workspace. When standalone policy or report files are required, create only their declared owned paths from the actual policy and evidence.
+11. Verify the saved files by reading them back, return the structured delivery response to trigger validation, and revise the owned artifact when the engine reports a concrete violation.
 
 ## Content Contract
 

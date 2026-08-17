@@ -76,13 +76,23 @@ def apply_professional_profile(
             minimums = {}
             constraints["minimums"] = minimums
         minimums["words"] = max(int(minimums.get("words") or 0), 600 if path == primary else 120)
-        if inventory and path == primary:
+        source_grounded = bool(
+            path == primary
+            or constraints.get("source_inventory")
+            or constraints.get("required_source_files")
+            or constraints.get("require_local_references")
+        )
+        if inventory and source_grounded:
+            # The artifact store owns source identity. Planner policies may
+            # contain basenames while a folder corpus preserves relative
+            # paths; mixing both makes correct citations fail validation.
             constraints["source_inventory"] = inventory
             constraints["required_source_files"] = source_files
             constraints["require_local_references"] = True
             constraints["require_bounded_references"] = True
-            constraints["require_claim_references"] = True
-            constraints.setdefault("claim_min_words", 24)
+            if path == primary:
+                constraints["require_claim_references"] = True
+                constraints.setdefault("claim_min_words", 24)
             minimums["cited_sources"] = max(int(minimums.get("cited_sources") or 0), len(source_files))
             minimums["local_references"] = max(int(minimums.get("local_references") or 0), len(source_files))
     plan["professional_profile"] = {

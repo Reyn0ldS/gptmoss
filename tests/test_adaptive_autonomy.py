@@ -314,6 +314,55 @@ async def test_failed_final_assurance_reopens_only_repair_and_auditor(tmp_path):
     assert children[0].variables["plan_step_id"] == 1
 
 
+@pytest.mark.asyncio
+async def test_failed_document_assurance_reopens_writer_not_debugger(tmp_path):
+    llm = MockLLMProvider()
+    delivery = json.dumps({
+        "summary": "repaired", "artifacts": ["dossier.md"], "evidence": [],
+        "risks": [], "next_action": "audit",
+    })
+    llm.add_response(content=delivery)
+    llm.add_response(content="final audit")
+    engine, state = _engine(tmp_path, llm)
+    parent = state.get_execution("doc-assurance")
+    parent.current_plan = normalize_plan({"steps": [
+        {
+            "id": 0, "role": "writer", "specialist": "Writer",
+            "description": "Write the dossier", "dependencies": [],
+            "required_artifacts": ["dossier.md"], "acceptance_criteria": ["done"],
+            "verification_commands": [], "status": "completed",
+        },
+        {
+            "id": 1, "role": "debugger", "specialist": "Repair",
+            "description": "Repair defects", "dependencies": [0],
+            "required_artifacts": [], "acceptance_criteria": [],
+            "verification_commands": [], "status": "completed",
+        },
+        {
+            "id": 2, "role": "coordinator", "specialist": "Auditor",
+            "description": "Audit the final delivery", "dependencies": [1],
+            "required_artifacts": [], "acceptance_criteria": [],
+            "verification_commands": [], "status": "completed",
+        },
+    ]})
+    failed_report = {
+        "passed": False,
+        "checks": [{"name": "artifact_structure_and_constraints", "passed": False}],
+        "failures": ["duplicate paragraph occurrence(s)"],
+    }
+    passed_report = {"passed": True, "checks": [], "failures": []}
+    engine._independent_delivery_report = Mock(side_effect=[failed_report, passed_report])
+
+    await engine.execute_task("doc-assurance", "Rédige un dossier professionnel")
+
+    children = [item for item in state.executions.values()
+                if item.variables.get("parent_execution_id") == "doc-assurance"]
+    assert children
+    assert children[0].variables["plan_step_id"] == 0
+    runtime = parent.variables.get("step_runtime") or {}
+    assert runtime.get("0", {}).get("required_next_tool") == "filesystem__replace_paragraph"
+
+
 def test_cross_domain_request_has_rich_engine_agnostic_fallback():
     analysis = analyze_task_complexity(COMPLEX_PROJECT_PROMPT)
     plan = SimplePlanner._fallback_plan(COMPLEX_PROJECT_PROMPT, analysis)
@@ -567,6 +616,34 @@ def test_progress_failure_count_ignores_unrelated_shell_probes(tmp_path):
     assert improved[3] == 2
     assert engine._quality_improved("failure-progress", failed, improved) == (
         True, "fewer_machine_failures",
+    )
+
+
+def test_progress_rewards_new_document_coverage_but_not_repeated_reads(tmp_path):
+    engine, state = _engine(tmp_path, MockLLMProvider())
+    execution = state.get_execution("source-progress")
+    step = {"required_artifacts": []}
+    before = engine._progress_signature("source-progress", step)
+    read = json.dumps({
+        "artifact_id": "doc-1", "blocks": [{"order": 0}, {"order": 1}],
+    })
+    engine._record_tool_result(
+        "source-progress", "documents", "read", {}, read
+    )
+    after = engine._progress_signature("source-progress", step)
+    assert engine._quality_improved("source-progress", before, after) == (
+        True, "new_source_coverage",
+    )
+
+    engine._record_tool_result(
+        "source-progress", "documents", "read", {}, read
+    )
+    repeated = engine._progress_signature("source-progress", step)
+    assert repeated == after
+    execution.variables["visualized_artifact_ids"] = ["image-1"]
+    visual = engine._progress_signature("source-progress", step)
+    assert engine._quality_improved("source-progress", repeated, visual) == (
+        True, "new_source_coverage",
     )
 
 
@@ -1039,6 +1116,36 @@ def test_exhaustive_inventory_gate_requires_every_normalized_block_read(tmp_path
     assert engine._document_coverage_issues("coverage-gate", step) == []
 
 
+def test_exhaustive_inventory_gate_requires_each_attached_image_presented(tmp_path):
+    engine, state = _engine(tmp_path, MockLLMProvider())
+    store = ArtifactStore(str(tmp_path / "image-artifacts"))
+    image = store.save_bytes(
+        "evidence.png", b"\x89PNG\r\n\x1a\nevidence", "image/png"
+    )
+    engine.artifact_store = store
+    execution = state.get_execution("image-coverage-gate")
+    execution.variables["attachment_ids"] = [image["id"]]
+    step = {
+        "description": "Inventory every explicit attachment and record complete coverage.",
+        "acceptance_criteria": ["All images were analyzed."],
+    }
+
+    result = json.dumps({
+        "artifact_id": image["id"],
+        "status": "scheduled_for_multimodal_context",
+    })
+    engine._record_tool_result(
+        "image-coverage-gate", "documents", "read_image", {}, result
+    )
+
+    assert execution.variables["pending_visual_artifact_ids"] == [image["id"]]
+    assert "evidence.png" in engine._document_coverage_issues(
+        "image-coverage-gate", step
+    )[0]
+    execution.variables["visualized_artifact_ids"] = [image["id"]]
+    assert engine._document_coverage_issues("image-coverage-gate", step) == []
+
+
 def test_rescue_strips_prefixed_fence_and_rejects_mock_random_tests():
     raw = "tests/test_real.py\n```python\nfrom avatar3d.body import Body\n\ndef test_body():\n    assert Body\n```"
     cleaned = ExecutionEngine._strip_code_fence(raw, "tests/test_real.py")
@@ -1206,6 +1313,86 @@ async def test_truncated_text_tool_call_gets_recovery_feedback_instead_of_comple
 
 
 @pytest.mark.asyncio
+async def test_truncated_tool_code_marker_gets_protocol_recovery_feedback(tmp_path):
+    llm = MockLLMProvider()
+    llm.add_response(content="I will write the file now.\n<tool_code>")
+    llm.add_response(content=json.dumps({
+        "summary": "recovered", "artifacts": [], "evidence": [],
+        "risks": [], "next_action": "",
+    }))
+    engine, state = _engine(tmp_path, llm, max_iterations=4)
+    execution = state.get_execution("tool-code-marker")
+    execution.variables.update({
+        "parent_execution_id": "parent", "role_key": "writer",
+        "role_name": "Writer", "specialist": "Writer",
+    })
+    execution.current_plan = {"steps": [{
+        "id": 0, "role": "writer", "specialist": "Writer",
+        "description": "Return a compact delivery", "dependencies": [],
+        "expertise": [], "required_artifacts": [],
+        "acceptance_criteria": [], "verification_commands": [],
+    }]}
+
+    await engine.execute_task("tool-code-marker", "Return a compact delivery")
+
+    assert execution.status == "completed"
+    feedback = [message.get("content", "") for message in state.get_conversation("tool-code-marker").messages]
+    assert any("malformed or truncated" in message for message in feedback)
+
+
+@pytest.mark.asyncio
+async def test_specialist_prompt_delegates_artifact_validation_to_runtime(tmp_path):
+    class CapturingProvider(MockLLMProvider):
+        def __init__(self):
+            super().__init__()
+            self.requests = []
+
+        async def completion(self, messages, **kwargs):
+            self.requests.append(messages)
+            return await super().completion(messages, **kwargs)
+
+    llm = CapturingProvider()
+    llm.add_response(tool_calls=[{
+        "id": "write", "type": "function",
+        "function": {
+            "name": "filesystem__write",
+            "arguments": {"path": "report.md", "content": "# Verified report\n\nConcrete evidence.\n"},
+        },
+    }])
+    llm.add_response(content=json.dumps({
+        "summary": "written", "artifacts": ["report.md"],
+        "evidence": ["read-back contract"], "risks": [], "next_action": "",
+    }))
+    engine, state = _engine(tmp_path, llm)
+    execution = state.get_execution("runtime-validation-prompt")
+    execution.variables.update({
+        "parent_execution_id": "parent", "role_key": "writer",
+        "role_name": "Writer", "specialist": "Writer",
+    })
+    execution.current_plan = {
+        "steps": [{
+            "id": 0, "role": "writer", "specialist": "Writer",
+            "description": "Write a verified report", "dependencies": [],
+            "expertise": ["documentation"], "required_artifacts": ["report.md"],
+            "acceptance_criteria": ["Report exists"], "verification_commands": [],
+        }],
+        "artifact_validations": [{
+            "path": "report.md", "validator": "document", "required": True,
+            "constraints": {"minimums": {"words": 2}},
+        }],
+    }
+
+    await engine.execute_task("runtime-validation-prompt", "Write a verified report")
+
+    system_prompt = next(
+        message["content"] for message in llm.requests[0] if message.get("role") == "system"
+    )
+    assert "enforced automatically by the execution engine" in system_prompt
+    assert "Do not invoke repository-only validator scripts" in system_prompt
+    assert execution.status == "completed"
+
+
+@pytest.mark.asyncio
 async def test_repeated_malformed_text_tool_calls_trip_safe_retry_circuit(tmp_path):
     llm = MockLLMProvider()
     malformed = (
@@ -1233,3 +1420,92 @@ async def test_repeated_malformed_text_tool_calls_trip_safe_retry_circuit(tmp_pa
     assert execution.status == "failed"
     assert "repeatedly emitted malformed or truncated" in execution.results["error"]
     assert execution.variables.get("tool_call_history", []) == []
+
+
+@pytest.mark.asyncio
+async def test_malformed_writer_call_preserves_targeted_repair_constraint(tmp_path):
+    class CapturingProvider(MockLLMProvider):
+        def __init__(self):
+            super().__init__()
+            self.requests = []
+
+        async def completion(self, messages, **kwargs):
+            self.requests.append({
+                "messages": [dict(message) for message in messages],
+                "tools": kwargs.get("tools"),
+                "tool_choice": kwargs.get("tool_choice"),
+            })
+            return await super().completion(messages, **kwargs)
+
+    repeated = (
+        "This duplicated professional decision paragraph contains enough words "
+        "for a deterministic targeted repair without rebuilding the document."
+    )
+    llm = CapturingProvider()
+    delivery = json.dumps({
+        "summary": "repaired", "artifacts": ["report.md"],
+        "evidence": ["deterministic gate"], "risks": [], "next_action": "",
+    })
+    llm.add_response(content=delivery)
+    llm.add_response(content=(
+        '```json\n{"tool_call":{"name":"filesystem__replace_paragraph",'
+        '"arguments":{"path":"report.md","paragraph_prefix":"truncated\n```'
+    ))
+    llm.add_response(tool_calls=[{
+        "id": "repair", "type": "function",
+        "function": {
+            "name": "filesystem__replace_paragraph",
+            "arguments": {
+                "path": "report.md",
+                "paragraph_prefix": repeated,
+                "content": "",
+                "occurrence": 2,
+            },
+        },
+    }])
+    llm.add_response(content=delivery)
+    engine, state = _engine(tmp_path, llm, max_iterations=10)
+    execution = state.get_execution("malformed-writer-repair")
+    execution.variables.update({
+        "role_key": "writer", "role_name": "Writer", "specialist": "Writer",
+    })
+    execution.current_plan = {
+        "steps": [{
+            "id": 0, "role": "writer", "specialist": "Writer",
+            "description": "Repair a professional report", "dependencies": [],
+            "expertise": [], "required_artifacts": ["report.md"],
+            "acceptance_criteria": ["No duplicate paragraphs"],
+            "verification_commands": [], "owned_paths": ["report.md"],
+        }],
+        "artifact_validations": [{
+            "path": "report.md", "validator": "document", "required": True,
+            "constraints": {
+                "max_duplicate_paragraphs": 0,
+                "duplicate_min_words": 8,
+            },
+        }],
+    }
+    project = tmp_path / "projects" / "proj-default"
+    project.mkdir(parents=True)
+    target = project / "report.md"
+    target.write_text(
+        f"# Review\n\n{repeated}\n\n{repeated}\n", encoding="utf-8",
+    )
+
+    await engine.execute_task("malformed-writer-repair", "Repair the report")
+
+    assert execution.status == "completed"
+    assert target.read_text(encoding="utf-8").count(repeated) == 1
+    constrained = llm.requests[2]
+    tool_names = [
+        tool["function"]["name"] for tool in (constrained["tools"] or [])
+    ]
+    assert tool_names == ["filesystem__replace_paragraph"]
+    assert constrained["tool_choice"] == "required"
+    system_text = "\n".join(
+        str(message.get("content") or "")
+        for message in constrained["messages"]
+        if message.get("role") == "system"
+    )
+    assert "Never overwrite an existing long document" in system_text
+    assert "exactly one valid filesystem__replace_paragraph" in system_text
