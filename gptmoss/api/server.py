@@ -1280,7 +1280,7 @@ async def pause_execution(execution_id: str):
         await app_state.execution_engine.cancel_active_execution(execution_id)
     await app_state.event_bus.publish(Event(
         type="ExecutionPaused",
-        payload={"execution_id": execution_id}
+        payload={"execution_id": execution_id, "reason": "manual"}
     ))
     return {"status": "paused"}
 

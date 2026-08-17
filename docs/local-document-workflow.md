@@ -181,7 +181,7 @@ Quand le corpus dépasse la fenêtre du modèle, GPTMOSS n'injecte pas simplemen
 
 Si le fournisseur renvoie un plan invalide ou trop petit, le fallback déterministe reconnaît une mission documentaire à partir des formats, pièces jointes, actions `documents` et objectifs de rédaction. Il conserve les noms de livrables explicitement listés, reconstruit la politique `document`, sépare analyse du corpus, exigences, décisions, architecture, sécurité, SRE, migration, rédaction, QA, réparation et audit final. Un nom comme `vision.pptx` ou le verbe « porter » dans « porter une référence » n'est pas interprété comme un projet de computer vision ou de vêtement numérique.
 
-Avec `adaptive_resource_management=true`, `max_context_chars` est un plancher d'historique. `context_window_tokens=0` active la découverte prudente de la fenêtre du backend et `context_output_reserve_tokens` préserve la place de réponse. Les limites `max_upload_bytes=0` et `max_attachment_text_chars=0` retirent les anciens plafonds de stockage, pas la limite du modèle : le préflight estime toujours messages, outils, images et marge avant l'appel.
+Avec `adaptive_resource_management=true`, `max_context_chars` est un plancher d'historique. `context_window_tokens=0` active la découverte prudente de la fenêtre du backend et `context_output_reserve_tokens` préserve la place de réponse. `max_upload_bytes` et `max_attachment_text_chars` sont des plafonds applicatifs stricts (`≥ 1`) ; la valeur `0` est refusée. Le préflight du modèle reste le plafond final en plus de ces limites, pas à leur place.
 
 ## Provenance attendue
 

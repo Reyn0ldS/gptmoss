@@ -73,6 +73,8 @@ async def test_execution_control_api_preserves_transition_chronology(tmp_path):
     ]
     assert [event.timestamp for event in events] == sorted(event.timestamp for event in events)
     assert [event.payload.get("execution_id") for event in events[:-1]] == ["lifecycle"] * 4
+    paused_event = next(event for event in events if event.type == "ExecutionPaused")
+    assert paused_event.payload.get("reason") == "manual"
 
 
 @pytest.mark.asyncio

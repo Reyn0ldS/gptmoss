@@ -1147,8 +1147,21 @@ def test_gui_contains_complete_management_controls():
         "applyConversationScroll", "scheduleFetchExecutionDetails",
         'id="plan-graph"', "switchPlanView", "planGraphSignature",
         "lastConversationSignature", "chatFollowLatest",
+        "parsePositiveInt", "highlightActiveCard",
+        "dataset.executionId", 'id="btn-clear-all"',
+        'value="documents"', 'value="memory"',
+        "ACTIVE_EXECUTION_STATUSES",
     ):
         assert marker in gui
+
+    assert "0 = sans plafond applicatif" not in gui
+    assert "0 = budget contextuel adaptatif" not in gui
+    assert "0 = complète" not in gui
+    assert "Failed to submit decision." not in gui
+    assert "Notification.requestPermission" not in gui
+    assert "Google Fonts" not in gui
+    assert "innerHTML.includes(id.substring" not in gui
+    assert 'min="1"' in gui
 
 
 def test_gui_layout_stays_inside_narrow_viewports_and_keeps_scroll_fallbacks():

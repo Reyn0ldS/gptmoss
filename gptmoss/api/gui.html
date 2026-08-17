@@ -4,7 +4,6 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>MOSS - Agent Runtime Console</title>
-    <!-- Outfit Font from Google Fonts -->
     <!-- Marked.js for markdown rendering -->
     <style>
         :root {
@@ -259,6 +258,7 @@
         .badge.failed { background-color: rgba(248, 113, 113, 0.15); color: var(--status-failed); }
         .badge.paused { background-color: rgba(251, 191, 36, 0.15); color: var(--status-paused); }
         .badge.waiting_provider { background-color: rgba(251, 191, 36, 0.15); color: var(--status-paused); }
+        .badge.pending { background-color: rgba(148, 163, 184, 0.15); color: #94a3b8; }
         .badge.cancelled { background-color: rgba(156, 163, 175, 0.15); color: var(--text-muted); }
 
         .card-title {
@@ -1329,7 +1329,7 @@
             <!-- Execution cards injected here -->
         </div>
         <div class="sidebar-footer" style="padding: 12px 20px; border-top: 1px solid var(--border-color); display: flex; gap: 10px; justify-content: center;">
-            <button class="btn-control delete" onclick="clearAllExecutions()" style="flex: 1; border-color: rgba(248, 113, 113, 0.3); color: #f87171; background-color: rgba(248, 113, 113, 0.01);">Effacer</button>
+            <button id="btn-clear-all" class="btn-control delete" onclick="clearAllExecutions()" style="flex: 1; border-color: rgba(248, 113, 113, 0.3); color: #f87171; background-color: rgba(248, 113, 113, 0.01);">Effacer</button>
             <button class="btn-control pause" onclick="openLibraryModal()" style="flex: 1;">Bibliothèque</button><button id="server-control-open" class="btn-control pause" onclick="openServerModal()" style="flex: 1;">Serveur</button><button class="btn-control pause" onclick="openSettingsModal()" style="flex: 1; border-color: var(--accent-primary); color: var(--accent-primary); background-color: rgba(129, 140, 248, 0.01); display: block;">Paramètres</button>
         </div>
     </div>
@@ -1688,12 +1688,8 @@
             return documentFragment.body.innerHTML;
         }
 
-        // Request desktop notifications permission if supported
-        if (window.Notification && Notification.permission === "default") {
-            Notification.requestPermission();
-        }
-
-        // Show a custom toast notification in the UI and a desktop notification
+        // Show a custom toast notification in the UI. Desktop notifications are
+        // used only when the browser has already granted permission.
         function showToast(message, type = "info") {
             let container = document.getElementById("toast-container");
             if (!container) {
@@ -1773,6 +1769,31 @@
             throw new Error(`${status}${detail ? ` — ${detail}` : ""}`);
         }
 
+        const ACTIVE_EXECUTION_STATUSES = ["pending", "running", "paused", "waiting_provider"];
+
+        function parsePositiveInt(id, label) {
+            const raw = document.getElementById(id)?.value;
+            const value = parseInt(raw, 10);
+            if (!Number.isFinite(value) || value < 1) {
+                throw new Error(`${label} doit être un entier ≥ 1 (reçu : ${raw || "vide"}).`);
+            }
+            return value;
+        }
+
+        function highlightActiveCard(id) {
+            document.querySelectorAll(".execution-card").forEach(card => {
+                card.classList.toggle("active", Boolean(id) && card.dataset.executionId === id);
+            });
+        }
+
+        function updateClearHistoryButton() {
+            const button = document.getElementById("btn-clear-all");
+            if (!button) return;
+            const blocked = (globalExecutions || []).some(exec => ACTIVE_EXECUTION_STATUSES.includes(exec.status));
+            button.disabled = blocked;
+            button.title = blocked ? "Annulez d'abord les tâches en cours." : "";
+        }
+
         let globalProjects = [];
         const collapsedProjects = {};
         const collapsedExecutions = {};
@@ -1841,6 +1862,7 @@
                 
                 if (data.length === 0) {
                     list.innerHTML = `<div style="text-align: center; color: var(--text-muted); font-size: 13px; padding-top: 20px;">Aucune tâche</div>`;
+                    updateClearHistoryButton();
                     return;
                 }
                 
@@ -1880,6 +1902,7 @@
                 function renderNode(exec, container, depth = 0) {
                     const card = document.createElement("div");
                     card.className = `execution-card ${exec.execution_id === activeExecutionId ? 'active' : ''} ${depth > 0 ? 'sub-card' : ''}`;
+                    card.dataset.executionId = exec.execution_id;
                     card.onclick = (e) => {
                         e.stopPropagation();
                         selectExecution(exec.execution_id);
@@ -1984,6 +2007,8 @@
                         }
                     }
                 });
+                highlightActiveCard(activeExecutionId);
+                updateClearHistoryButton();
             } catch (err) {
                 console.error("Error fetching executions:", err);
             }
@@ -2122,7 +2147,12 @@
                             } else if (data.type === "StepCompleted") {
                                 showToast(`Étape ${data.payload.step_index + 1} terminée avec succès.`, "success");
                             } else if (data.type === "ExecutionPaused") {
-                                showToast("L'exécution est suspendue (validation requise).", "warning");
+                                const pauseReason = data.payload?.reason;
+                                if (pauseReason === "scope_change" || pauseReason === "child_approval") {
+                                    showToast("L'exécution est suspendue (validation requise).", "warning");
+                                } else {
+                                    showToast("Exécution mise en pause.", "warning");
+                                }
                             } else if (data.type === "ExecutionCompleted") {
                                 showToast("Félicitations, la tâche est terminée !", "success");
                             } else if (data.type === "ExecutionFailed") {
@@ -2146,10 +2176,7 @@
             activeExecutionId = null;
             document.getElementById("landing-view").style.display = "flex";
             document.getElementById("detail-view").style.display = "none";
-            document.getElementById("task-input").value = "";
-            
-            // Remove active classes
-            document.querySelectorAll(".execution-card").forEach(c => c.classList.remove("active"));
+            highlightActiveCard(null);
         }
 
         // Select a task execution
@@ -2159,15 +2186,7 @@
             chatFollowLatest = true;
             document.getElementById("landing-view").style.display = "none";
             document.getElementById("detail-view").style.display = "flex";
-            
-            // Highlight active card
-            document.querySelectorAll(".execution-card").forEach(c => {
-                c.classList.remove("active");
-                if (c.innerHTML.includes(id.substring(0, 8))) {
-                    c.classList.add("active");
-                }
-            });
-
+            highlightActiveCard(id);
             fetchExecutionDetails(id);
         }
 
@@ -2288,7 +2307,12 @@
             };
             try {
                 const res = await fetch(`/executions/${id}`);
-                if (!res.ok) throw new Error("Could not find execution details.");
+                if (!res.ok) {
+                    if (res.status === 404 && activeExecutionId === id) {
+                        showToast("Cette tâche n'existe plus.", "error");
+                    }
+                    throw new Error("Could not find execution details.");
+                }
                 if (generation !== detailsGeneration || activeExecutionId !== id) return;
                 
                 const exec = await res.json();
@@ -2328,8 +2352,8 @@
                 btnPause.style.display = exec.status === "running" ? "block" : "none";
                 const resumableFailure = exec.status === "failed" && !exec.variables?.parent_execution_id;
                 btnResume.style.display = ((exec.status === "paused" && !exec.variables?.pending_approval && !exec.variables?.pending_scope_approval) || exec.status === "waiting_provider" || resumableFailure) ? "block" : "none";
-                btnCancel.style.display = (["running", "paused", "pending", "waiting_provider"].includes(exec.status)) ? "block" : "none";
-                btnDelete.style.display = "block";
+                btnCancel.style.display = (ACTIVE_EXECUTION_STATUSES.includes(exec.status)) ? "block" : "none";
+                btnDelete.style.display = ACTIVE_EXECUTION_STATUSES.includes(exec.status) ? "none" : "block";
                 btnDelivery.style.display = exec.results?.delivery_package ? "block" : "none";
 
                 // 2. Approval Request details
@@ -2464,6 +2488,7 @@
                 if (documentProgress) {
                     try {
                         const documentRes = await fetch(`/executions/${id}/document`);
+                        if (generation !== detailsGeneration || activeExecutionId !== id) return;
                         if (documentRes.ok) {
                             const documentState = await documentRes.json();
                             const percent = Math.round((documentState.progress || 0) * 100);
@@ -2475,6 +2500,7 @@
                             documentProgress.textContent = "Aucun document long initialisé.";
                         }
                     } catch (documentError) {
+                        if (generation !== detailsGeneration || activeExecutionId !== id) return;
                         documentProgress.textContent = "État documentaire indisponible.";
                     }
                 }
@@ -2562,7 +2588,7 @@
                 await requestApi(`/executions/${activeExecutionId}/pause`, { method: "POST" });
                 fetchExecutionDetails(activeExecutionId);
             } catch (err) {
-                console.error("Error pausing:", err);
+                showToast(err.message || "Impossible de mettre en pause.", "error");
             }
         }
 
@@ -2573,7 +2599,7 @@
                 await requestApi(`/executions/${activeExecutionId}/resume`, { method: "POST" });
                 fetchExecutionDetails(activeExecutionId);
             } catch (err) {
-                console.error("Error resuming:", err);
+                showToast(err.message || "Impossible de reprendre.", "error");
             }
         }
 
@@ -2586,7 +2612,7 @@
                 fetchExecutionDetails(activeExecutionId);
                 fetchExecutions();
             } catch (err) {
-                console.error("Error cancelling task:", err);
+                showToast(err.message || "Impossible d'arrêter cette tâche.", "error");
             }
         }
 
@@ -2630,18 +2656,14 @@
             const reason = reasonInput.value.trim();
             
             try {
-                const res = await fetch(`/executions/${activeExecutionId}/${endpoint}`, {
+                await requestApi(`/executions/${activeExecutionId}/${endpoint}`, {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify({ reason: reason || undefined })
                 });
-                
-                if (!res.ok) throw new Error("Failed to submit decision.");
-                
-                // Refresh details
                 fetchExecutionDetails(activeExecutionId);
             } catch (err) {
-                alert(`Erreur : ${err.message}`);
+                showToast(err.message || "Impossible d'enregistrer la décision.", "error");
             }
         }
 
@@ -2864,8 +2886,8 @@
                 document.getElementById("settings-max-context-chars").value = data.max_context_chars || 12000;
                 document.getElementById("settings-context-window-tokens").value = data.context_window_tokens ?? 0;
                 document.getElementById("settings-context-output-reserve").value = data.context_output_reserve_tokens ?? 8192;
-                document.getElementById("settings-max-upload-bytes").value = data.max_upload_bytes ?? 0;
-                document.getElementById("settings-max-attachment-text-chars").value = data.max_attachment_text_chars ?? 0;
+                document.getElementById("settings-max-upload-bytes").value = data.max_upload_bytes ?? 104857600;
+                document.getElementById("settings-max-attachment-text-chars").value = data.max_attachment_text_chars ?? 5000000;
                 document.getElementById("settings-safe-shell-mode").checked = data.safe_shell_mode !== false;
                 document.getElementById("settings-shell-timeout").value = data.shell_timeout_seconds ?? 0;
                 document.getElementById("settings-shell-output").value = data.shell_max_output_chars ?? 12000;
@@ -2921,11 +2943,11 @@
                 max_context_chars: parseInt(document.getElementById("settings-max-context-chars").value, 10) || 12000,
                 context_window_tokens: Math.max(0, parseInt(document.getElementById("settings-context-window-tokens").value, 10) || 0),
                 context_output_reserve_tokens: Math.max(256, parseInt(document.getElementById("settings-context-output-reserve").value, 10) || 8192),
-                max_upload_bytes: Math.max(0, parseInt(document.getElementById("settings-max-upload-bytes").value, 10) || 0),
-                max_attachment_text_chars: Math.max(0, parseInt(document.getElementById("settings-max-attachment-text-chars").value, 10) || 0),
+                max_upload_bytes: parsePositiveInt("settings-max-upload-bytes", "Taille de dépôt"),
+                max_attachment_text_chars: parsePositiveInt("settings-max-attachment-text-chars", "Texte joint max."),
                 safe_shell_mode: document.getElementById("settings-safe-shell-mode").checked,
                 shell_timeout_seconds: Math.max(0, parseInt(document.getElementById("settings-shell-timeout").value, 10) || 0),
-                shell_max_output_chars: Math.max(0, parseInt(document.getElementById("settings-shell-output").value, 10) || 0),
+                shell_max_output_chars: parsePositiveInt("settings-shell-output", "Sortie shell max."),
                 document_engine_enabled: document.getElementById("settings-document-engine").checked,
                 document_checkpoint_enabled: document.getElementById("settings-document-checkpoint").checked,
                 document_target_section_words: Math.max(80, parseInt(document.getElementById("settings-document-target-words").value, 10) || 450),
@@ -2956,7 +2978,7 @@
                 const response = await requestApi("/api/settings/test-connection", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(collectSettingsPayload())});
                 const result = await response.json();
                 showToast(`Connexion et inférence réussies (${result.models_count} modèles, modèle ${result.model_available ? "disponible" : "non listé"}).`, result.model_available ? "success" : "warning");
-            } catch (err) { showToast("Test LLM échoué : " + err.message, "error"); }
+            } catch (err) { showToast("Test LLM échoué : " + err.message, String(err.message || "").includes("≥ 1") ? "warning" : "error"); }
             finally { button.disabled = false; button.textContent = "Tester la connexion"; }
         }
 
@@ -2979,7 +3001,7 @@
                 const result = await response.json();
                 showToast(`Paramètres appliqués (${result.changed_fields.length} champs, secret ${result.secret_changed ? "modifié" : "inchangé"}).`, "success");
                 closeSettingsModal(); loadProjectOptions(); fetchExecutions();
-            } catch (err) { showToast("Erreur lors de l'enregistrement : " + err.message, "error"); }
+            } catch (err) { showToast("Erreur lors de l'enregistrement : " + err.message, String(err.message || "").includes("≥ 1") ? "warning" : "error"); }
         }
         function resetTaskAttachmentUploads() {
             uploadedTaskAttachments.clear();
@@ -3201,19 +3223,23 @@
         async function deleteMemory(id) { if (!confirm("Supprimer définitivement cette mémoire ?")) return; await requestApi(`/memory/${id}`, {method:"DELETE"}); refreshLibrary(); }
         function editMemory(id) { const m=libraryMemories.find(item=>item.id===id); if(!m)return; editingMemoryId=id; document.getElementById("library-memory-value").value=String(m.value); document.getElementById("library-memory-source").value=String((m.provenance||{}).source||"gui"); document.getElementById("library-memory-kind").value=m.kind||"fact"; document.getElementById("library-memory-scope").value=m.scope||"project"; document.getElementById("library-memory-validated").checked=!!m.validated; document.getElementById("library-memory-save").textContent="Mettre à jour"; }
         function resetMemoryForm() { editingMemoryId=null; document.getElementById("library-memory-value").value=""; document.getElementById("library-memory-source").value="gui"; document.getElementById("library-memory-kind").value="fact"; document.getElementById("library-memory-scope").value="project"; document.getElementById("library-memory-ttl").value=""; document.getElementById("library-memory-validated").checked=false; document.getElementById("library-memory-save").textContent="Créer"; }
-        async function saveMemory() { const value=document.getElementById("library-memory-value").value.trim(); if(!value)return showToast("Contenu mémoire requis.","warning"); const ttl=parseFloat(document.getElementById("library-memory-ttl").value); const scope=document.getElementById("library-memory-scope").value; const projectId=document.getElementById("task-project-select")?.value||"proj-default"; const body={value,kind:document.getElementById("library-memory-kind").value,scope,project_id:scope==="project"?projectId:null,metadata:{created_from:"gui"},provenance:{source:document.getElementById("library-memory-source").value.trim()||"gui"},validated:document.getElementById("library-memory-validated").checked,ttl_seconds:Number.isFinite(ttl)?ttl*86400:null}; await requestApi(editingMemoryId?`/memory/${editingMemoryId}`:"/memory",{method:editingMemoryId?"PUT":"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)}); resetMemoryForm(); refreshLibrary(); }
+        async function saveMemory() { const value=document.getElementById("library-memory-value").value.trim(); if(!value)return showToast("Contenu mémoire requis.","warning"); const ttl=parseFloat(document.getElementById("library-memory-ttl").value); const scope=document.getElementById("library-memory-scope").value; const projectId=document.getElementById("task-project-select")?.value||"proj-default"; const body={value,kind:document.getElementById("library-memory-kind").value,scope,project_id:scope==="project"?projectId:null,metadata:{created_from:"gui"},provenance:{source:document.getElementById("library-memory-source").value.trim()||"gui"},validated:document.getElementById("library-memory-validated").checked,ttl_seconds:Number.isFinite(ttl)?ttl*86400:null}; try { await requestApi(editingMemoryId?`/memory/${editingMemoryId}`:"/memory",{method:editingMemoryId?"PUT":"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)}); resetMemoryForm(); refreshLibrary(); } catch (err) { showToast(err.message || "Impossible d'enregistrer la mémoire.", "error"); } }
         async function createLibrarySkill() {
             const name=document.getElementById("library-skill-name").value.trim(); const instructions=document.getElementById("library-skill-instructions").value.trim();
             if(!name || !instructions) return showToast("Nom et instructions requis.", "warning");
-            await requestApi("/skills", {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name, description:document.getElementById("library-skill-description").value, instructions, allowed_capabilities:Array.from(document.querySelectorAll("input[name='library-cap']:checked"), e=>e.value)})});
-            showToast("Skill enregistré.", "success"); resetSkillForm(); refreshLibrary();
+            try {
+                await requestApi("/skills", {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name, description:document.getElementById("library-skill-description").value, instructions, allowed_capabilities:Array.from(document.querySelectorAll("input[name='library-cap']:checked"), e=>e.value)})});
+                showToast("Skill enregistré.", "success"); resetSkillForm(); refreshLibrary();
+            } catch (err) {
+                showToast(err.message || "Impossible d'enregistrer le skill.", "error");
+            }
         }
         function resetSkillForm(){document.getElementById("library-skill-name").value="";document.getElementById("library-skill-name").disabled=false;document.getElementById("library-skill-description").value="";document.getElementById("library-skill-instructions").value="";document.querySelectorAll("input[name='library-cap']").forEach(e=>e.checked=false);}
         function editLibrarySkill(name){const s=librarySkills.find(item=>item.name===name);if(!s)return;document.getElementById("library-skill-name").value=s.name;document.getElementById("library-skill-name").disabled=true;document.getElementById("library-skill-description").value=s.description||"";document.getElementById("library-skill-instructions").value=s.instructions||"";document.querySelectorAll("input[name='library-cap']").forEach(e=>e.checked=s.allowed_capabilities.includes(e.value));}
         async function importLibrarySkill(input){const file=input.files[0];if(!file)return;try{await requestApi("/skills/import",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({content:await file.text()})});showToast("Skill importé et validé.","success");refreshLibrary();}catch(err){showToast("Import refusé : "+err.message,"error");}finally{input.value="";}}
         async function validateLibrarySkill(name){try{const r=await requestApi(`/skills/${name}/validate`,{method:"POST"}).then(x=>x.json());showToast(r.valid?`Skill valide (${r.digest.slice(0,8)}).`:`Skill incompatible : ${r.unsupported.join(", ")}`,r.valid?"success":"warning");}catch(err){showToast(err.message,"error");}}
-        async function deleteLibrarySkill(name){if(!confirm(`Supprimer définitivement le skill ${name} ?`))return;await requestApi(`/skills/${name}`,{method:"DELETE"});resetSkillForm();refreshLibrary();}
-        async function toggleSkillActivation(name){const settings=await requestApi("/api/settings").then(r=>r.json());const active=new Set(settings.default_skills||[]);active.has(name)?active.delete(name):active.add(name);settings.default_skills=Array.from(active);settings.api_key="";settings.confirm_sensitive=true;await requestApi("/api/settings",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(settings)});showToast(active.has(name)?"Skill activé par défaut.":"Skill désactivé.","success");}
+        async function deleteLibrarySkill(name){if(!confirm(`Supprimer définitivement le skill ${name} ?`))return;try{await requestApi(`/skills/${name}`,{method:"DELETE"});resetSkillForm();refreshLibrary();}catch(err){showToast(err.message || "Impossible de supprimer le skill.", "error");}}
+        async function toggleSkillActivation(name){try{const settings=await requestApi("/api/settings").then(r=>r.json());const active=new Set(settings.default_skills||[]);active.has(name)?active.delete(name):active.add(name);settings.default_skills=Array.from(active);settings.api_key="";settings.confirm_sensitive=true;await requestApi("/api/settings",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(settings)});showToast(active.has(name)?"Skill activé par défaut.":"Skill désactivé.","success");refreshLibrary();}catch(err){showToast(err.message || "Impossible de modifier le skill.", "error");}}
         async function createSubagent(){if(!activeExecutionId)return showToast("Sélectionnez une exécution parente.","warning");const task=document.getElementById("subagent-task").value.trim();if(!task)return;await requestApi(`/executions/${activeExecutionId}/subagents`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({task,role_name:document.getElementById("subagent-role").value.trim()||"Sous-agent",system_prompt:document.getElementById("subagent-prompt").value.trim()||"You are a helpful MOSS sub-agent assisting a parent agent."})});document.getElementById("subagent-task").value="";showToast("Sous-agent lancé.","success");refreshLibrary();fetchExecutions();}
         async function controlSubagent(id,action){try{await requestApi(`/executions/${id}/${action}`,{method:"POST"});refreshLibrary();fetchExecutions();}catch(err){showToast(err.message,"warning");}}
 
@@ -3446,14 +3472,14 @@
                     <input type="number" id="settings-context-output-reserve" class="approval-reason-input" style="margin:0" value="8192" min="256">
                 </div>
                 <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:6px">
-                    <label style="font-size:11px;flex:1 1 180px">Taille de dépôt max. en octets (0 = sans plafond applicatif)<input type="number" id="settings-max-upload-bytes" class="approval-reason-input" min="0" style="margin:4px 0 0;width:100%"></label>
-                    <label style="font-size:11px;flex:1 1 180px">Texte joint max. (0 = budget contextuel adaptatif)<input type="number" id="settings-max-attachment-text-chars" class="approval-reason-input" min="0" style="margin:4px 0 0;width:100%"></label>
+                    <label style="font-size:11px;flex:1 1 180px">Dépôt max. en octets (minimum 1, défaut 104857600 = 100 Mio)<input type="number" id="settings-max-upload-bytes" class="approval-reason-input" min="1" style="margin:4px 0 0;width:100%"></label>
+                    <label style="font-size:11px;flex:1 1 180px">Texte joint max. en caractères (minimum 1, défaut 5000000)<input type="number" id="settings-max-attachment-text-chars" class="approval-reason-input" min="1" style="margin:4px 0 0;width:100%"></label>
                 </div>
 
                 <div style="display: flex; gap: 12px; flex-wrap: wrap; margin-top: 8px;">
                     <label style="font-size: 11px; display: inline-flex; align-items: center; gap: 4px; cursor: pointer;"><input type="checkbox" id="settings-safe-shell-mode"> Mode shell sécurisé</label>
                     <label style="font-size: 11px; flex: 1 1 120px;">Délai shell (s, 0 = auto)<input type="number" id="settings-shell-timeout" class="approval-reason-input" min="0" style="margin: 4px 0 0; width: 100%;"></label>
-                    <label style="font-size: 11px; flex: 1 1 150px;">Sortie shell max. (0 = complète)<input type="number" id="settings-shell-output" class="approval-reason-input" min="0" style="margin: 4px 0 0; width: 100%;"></label>
+                    <label style="font-size: 11px; flex: 1 1 150px;">Sortie shell max. en caractères (minimum 1, défaut 12000)<input type="number" id="settings-shell-output" class="approval-reason-input" min="1" style="margin: 4px 0 0; width: 100%;"></label>
                 </div>
                 <div style="padding: 9px; border: 1px solid var(--border-color); border-radius: 4px; display: grid; gap: 7px; margin-top: 8px;">
                     <strong style="font-size: 12px; color: var(--text-normal);">Rédaction documentaire professionnelle</strong>
@@ -3517,7 +3543,7 @@
       <div class="settings-container" style="background:var(--bg-card);width:min(1100px,96vw);max-height:94vh;overflow:auto;padding:22px;">
         <div class="library-header" style="display:flex;justify-content:space-between;position:sticky;top:0;background:var(--bg-card);z-index:2"><h3>Centre de contrôle GPTMOSS</h3><button class="btn-control" onclick="closeLibraryModal()">Fermer</button></div>
         <section class="library-panel"><h4>Corpus, documents et images</h4><p style="font-size:11px;color:var(--text-muted)">Cochez un corpus complet ou des fichiers isolés pour les rattacher à la prochaine tâche. Les aperçus et la recherche restent locaux.</p><h5>Corpus persistants</h5><div id="library-corpora" style="margin-bottom:14px"></div><input id="library-document-search" placeholder="Rechercher dans le contenu des documents" oninput="clearTimeout(this._timer);this._timer=setTimeout(refreshLibrary,250)"><div id="library-document-results" style="margin:8px 0 14px"></div><h5>Fichiers</h5><div id="library-artifacts"></div><div id="library-preview" style="margin-top:10px;max-height:480px;overflow:auto"></div></section>
-        <section class="library-panel"><h4>Skills</h4><div id="library-skills"></div><div class="library-grid"><div><input type="file" accept=".md,text/markdown" onchange="importLibrarySkill(this)"><small>Importer un fichier SKILL.md (262 Ko maximum).</small></div><div><input id="library-skill-name" placeholder="nom-du-skill"><input id="library-skill-description" placeholder="Description"><textarea id="library-skill-instructions" placeholder="Instructions du skill"></textarea><div><label><input type="checkbox" name="library-cap" value="filesystem"> Fichiers</label> <label><input type="checkbox" name="library-cap" value="shell"> Shell</label> <label><input type="checkbox" name="library-cap" value="agent"> Agents</label> <label><input type="checkbox" name="library-cap" value="devteam"> Équipe</label></div><button class="btn-control resume" onclick="createLibrarySkill()">Créer / mettre à jour</button> <button class="btn-control" onclick="resetSkillForm()">Réinitialiser</button></div></div></section>
+        <section class="library-panel"><h4>Skills</h4><div id="library-skills"></div><div class="library-grid"><div><input type="file" accept=".md,text/markdown" onchange="importLibrarySkill(this)"><small>Importer un fichier SKILL.md (262 Ko maximum).</small></div><div><input id="library-skill-name" placeholder="nom-du-skill"><input id="library-skill-description" placeholder="Description"><textarea id="library-skill-instructions" placeholder="Instructions du skill"></textarea><div><label><input type="checkbox" name="library-cap" value="filesystem"> Fichiers</label> <label><input type="checkbox" name="library-cap" value="shell"> Shell</label> <label><input type="checkbox" name="library-cap" value="documents"> Documents</label> <label><input type="checkbox" name="library-cap" value="memory"> Mémoire</label> <label><input type="checkbox" name="library-cap" value="agent"> Agents</label> <label><input type="checkbox" name="library-cap" value="devteam"> Équipe</label></div><button class="btn-control resume" onclick="createLibrarySkill()">Créer / mettre à jour</button> <button class="btn-control" onclick="resetSkillForm()">Réinitialiser</button></div></div></section>
         <section class="library-panel"><h4>Mémoire persistante</h4><input id="library-memory-search" placeholder="Filtrer les mémoires" oninput="clearTimeout(this._timer);this._timer=setTimeout(refreshLibrary,250)"><div id="library-memory"></div><div class="library-grid"><textarea id="library-memory-value" placeholder="Information à mémoriser"></textarea><div><select id="library-memory-kind"><option value="fact">Fait</option><option value="decision">Décision</option><option value="preference">Préférence</option><option value="constraint">Contrainte</option><option value="lesson">Leçon</option></select><select id="library-memory-scope"><option value="project">Projet courant</option><option value="global">Global (explicite)</option></select><input id="library-memory-source" value="gui" placeholder="Provenance"><input id="library-memory-ttl" type="number" min="1" max="365" placeholder="Expiration en jours (facultatif)"><label><input id="library-memory-validated" type="checkbox"> Valider immédiatement</label><br><button id="library-memory-save" class="btn-control resume" onclick="saveMemory()">Créer</button> <button class="btn-control" onclick="resetMemoryForm()">Réinitialiser</button></div></div></section>
         <section class="library-panel"><h4>Sous-agents</h4><p style="font-size:11px;color:var(--text-muted)">Le parent est l'exécution actuellement sélectionnée.</p><div id="library-subagents"></div><div class="library-grid"><input id="subagent-role" placeholder="Rôle (ex. Relecteur sécurité)"><textarea id="subagent-task" placeholder="Tâche du sous-agent"></textarea><textarea id="subagent-prompt" placeholder="Instruction système facultative"></textarea></div><button class="btn-control resume" onclick="createSubagent()">Créer le sous-agent</button></section>
         <section class="library-panel"><h4>Profils spécialisés et évolution autonome</h4><p style="font-size:11px;color:var(--text-muted)">Profils persistants appris par les exécutions et état du cycle de création/amélioration des skills.</p><div id="library-agent-profiles"></div><pre id="library-evolution" class="diagnostic-output"></pre></section>
