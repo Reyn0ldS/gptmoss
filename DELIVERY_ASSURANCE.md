@@ -67,7 +67,9 @@ Une modification de contenu ne renouvelle plus indéfiniment le budget d'une
 - au maximum deux modifications préparatoires par fichier sans autre progrès.
 
 Après stagnation, un nouveau spécialiste reçoit les erreurs machines et reprend
-le workspace existant.
+le workspace existant. Un audit indépendant classifie le défaut : couverture
+source, paragraphe documentaire ou intégration logicielle. Il rouvre ensuite
+l'étape propriétaire de l'obligation, plus seulement le dernier debugger.
 
 Une reprise manuelle d'une exécution principale en échec remet à zéro uniquement
 le runtime de l'étape défaillante. Elle conserve le plan, les artefacts, les preuves

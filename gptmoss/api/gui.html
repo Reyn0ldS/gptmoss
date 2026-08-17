@@ -883,6 +883,33 @@
             gap: 12px;
         }
 
+        .plan-view-tabs {
+            display: flex;
+            gap: 8px;
+            margin: -8px 0 12px;
+        }
+
+        .plan-view-tabs .tab-btn {
+            font-size: 11px;
+            padding: 4px 8px;
+        }
+
+        #plan-graph {
+            overflow: auto;
+            min-width: 0;
+            max-width: 100%;
+            margin-bottom: 12px;
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            background: rgba(255,255,255,0.01);
+        }
+
+        #plan-graph svg {
+            display: block;
+            max-width: 100%;
+            height: auto;
+        }
+
         .step-item {
             display: flex;
             gap: 12px;
@@ -1411,6 +1438,11 @@
                 <!-- Plan steps column -->
                 <div class="plan-column">
                     <div class="plan-title">Plan de l'agent</div>
+                    <div class="plan-view-tabs">
+                        <button class="tab-btn active" id="plan-view-list" onclick="switchPlanView('list')">Liste</button>
+                        <button class="tab-btn" id="plan-view-graph" onclick="switchPlanView('graph')">Graphe</button>
+                    </div>
+                    <div id="plan-graph" hidden></div>
                     <div class="plan-steps" id="plan-steps">
                         <!-- Steps checklist injected here -->
                     </div>
@@ -1426,6 +1458,8 @@
         const API_HOST = window.location.host;
         let activeExecutionId = null;
         let activeFeedTab = "active"; // "active" or "unified"
+        let activePlanView = "list";
+        let lastPlanGraphSignature = "";
         let globalExecutions = [];
         let llmStreamText = "";
         let llmStreamExecId = null;
@@ -1444,6 +1478,112 @@
         let runtimeControl = null;
         let runtimeStatusTimer = null;
         let pendingServerRedirectPort = null;
+
+        function switchPlanView(view) {
+            activePlanView = view === "graph" ? "graph" : "list";
+            const listBtn = document.getElementById("plan-view-list");
+            const graphBtn = document.getElementById("plan-view-graph");
+            const graph = document.getElementById("plan-graph");
+            const steps = document.getElementById("plan-steps");
+            if (listBtn) listBtn.classList.toggle("active", activePlanView === "list");
+            if (graphBtn) graphBtn.classList.toggle("active", activePlanView === "graph");
+            if (graph) graph.hidden = activePlanView !== "graph";
+            if (steps) steps.style.display = activePlanView === "list" ? "" : "none";
+            lastPlanGraphSignature = "";
+            if (activePlanView === "graph" && activeExecutionId) {
+                scheduleFetchExecutionDetails(activeExecutionId);
+            }
+        }
+
+        function planGraphSignature(plan) {
+            if (!plan || !Array.isArray(plan.steps)) return "";
+            return JSON.stringify({
+                steps: plan.steps.map((step) => [step.id, step.status, step.role, step.operation]),
+                edges: plan.edges || [],
+            });
+        }
+
+        function renderPlanGraph(exec) {
+            const host = document.getElementById("plan-graph");
+            if (!host || activePlanView !== "graph") return;
+            const plan = exec.plan || {};
+            const signature = planGraphSignature(plan);
+            if (signature === lastPlanGraphSignature) return;
+            lastPlanGraphSignature = signature;
+            const steps = Array.isArray(plan.steps) ? plan.steps : [];
+            if (!steps.length) {
+                host.textContent = "Aucun graphe disponible.";
+                return;
+            }
+            if (steps.length > 50) {
+                host.textContent = "Graphe trop large (" + steps.length + " nœuds). Utilisez la liste.";
+                return;
+            }
+            const remaining = new Set(steps.map((step) => String(step.id)));
+            const layers = [];
+            while (remaining.size) {
+                const ready = steps
+                    .map((step) => String(step.id))
+                    .filter((id) => remaining.has(id) && (steps.find((step) => String(step.id) === id).dependencies || [])
+                        .every((dep) => !remaining.has(String(dep))));
+                const layer = ready.length ? ready : [...remaining];
+                layers.push(layer);
+                layer.forEach((id) => remaining.delete(id));
+            }
+            const width = 160;
+            const height = 40;
+            const gapX = 48;
+            const gapY = 16;
+            const positions = {};
+            layers.forEach((layer, column) => {
+                layer.forEach((id, row) => {
+                    positions[id] = {
+                        x: 16 + column * (width + gapX),
+                        y: 16 + row * (height + gapY),
+                    };
+                });
+            });
+            const svgW = Math.max(240, layers.length * (width + gapX) + 16);
+            const svgH = Math.max(80, Math.max(...layers.map((layer) => layer.length), 1) * (height + gapY) + 16);
+            const statusColor = {
+                completed: "#34d399",
+                running: "#60a5fa",
+                failed: "#f87171",
+                pending: "#94a3b8",
+            };
+            const edgeType = {};
+            (plan.edges || []).forEach((edge) => {
+                edgeType[String(edge.from) + "->" + String(edge.to)] = edge.type || "produces_for";
+            });
+            const nodeById = {};
+            steps.forEach((step) => { nodeById[String(step.id)] = step; });
+            let lines = "";
+            steps.forEach((step) => {
+                const dest = String(step.id);
+                (step.dependencies || []).forEach((dep) => {
+                    const src = String(dep);
+                    if (!positions[src] || !positions[dest]) return;
+                    const kind = edgeType[src + "->" + dest] || "produces_for";
+                    const dashed = kind === "validates" || kind === "repairs" ? " stroke-dasharray=\"4 3\"" : "";
+                    const x1 = positions[src].x + width;
+                    const y1 = positions[src].y + height / 2;
+                    const x2 = positions[dest].x;
+                    const y2 = positions[dest].y + height / 2;
+                    lines += `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="#64748b"${dashed} />`;
+                });
+            });
+            let boxes = "";
+            steps.forEach((step) => {
+                const id = String(step.id);
+                const pos = positions[id];
+                if (!pos) return;
+                const color = statusColor[step.status] || statusColor.pending;
+                const label = escapeHTML((step.role || step.operation || id) + " #" + id);
+                boxes += `<rect x="${pos.x}" y="${pos.y}" width="${width}" height="${height}" rx="6" fill="rgba(15,23,42,0.7)" stroke="${color}"/>`;
+                boxes += `<text x="${pos.x + 8}" y="${pos.y + 24}" fill="#e2e8f0" font-size="11">${label}</text>`;
+            });
+            host.innerHTML = `<svg viewBox="0 0 ${svgW} ${svgH}" width="${svgW}" height="${svgH}" role="img" aria-label="Graphe du plan">${lines}${boxes}</svg>`;
+        }
 
         function switchFeedTab(tab) {
             activeFeedTab = tab;
@@ -2312,6 +2452,7 @@
                         `;
                         planSteps.appendChild(stepDiv);
                     });
+                    renderPlanGraph(exec);
                 } else {
                     planSteps.innerHTML = `<div style="color: var(--text-muted); font-size: 13px;">Planification en cours...</div>`;
                 }

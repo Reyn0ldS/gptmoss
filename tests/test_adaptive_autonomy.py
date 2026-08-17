@@ -314,6 +314,55 @@ async def test_failed_final_assurance_reopens_only_repair_and_auditor(tmp_path):
     assert children[0].variables["plan_step_id"] == 1
 
 
+@pytest.mark.asyncio
+async def test_failed_document_assurance_reopens_writer_not_debugger(tmp_path):
+    llm = MockLLMProvider()
+    delivery = json.dumps({
+        "summary": "repaired", "artifacts": ["dossier.md"], "evidence": [],
+        "risks": [], "next_action": "audit",
+    })
+    llm.add_response(content=delivery)
+    llm.add_response(content="final audit")
+    engine, state = _engine(tmp_path, llm)
+    parent = state.get_execution("doc-assurance")
+    parent.current_plan = normalize_plan({"steps": [
+        {
+            "id": 0, "role": "writer", "specialist": "Writer",
+            "description": "Write the dossier", "dependencies": [],
+            "required_artifacts": ["dossier.md"], "acceptance_criteria": ["done"],
+            "verification_commands": [], "status": "completed",
+        },
+        {
+            "id": 1, "role": "debugger", "specialist": "Repair",
+            "description": "Repair defects", "dependencies": [0],
+            "required_artifacts": [], "acceptance_criteria": [],
+            "verification_commands": [], "status": "completed",
+        },
+        {
+            "id": 2, "role": "coordinator", "specialist": "Auditor",
+            "description": "Audit the final delivery", "dependencies": [1],
+            "required_artifacts": [], "acceptance_criteria": [],
+            "verification_commands": [], "status": "completed",
+        },
+    ]})
+    failed_report = {
+        "passed": False,
+        "checks": [{"name": "artifact_structure_and_constraints", "passed": False}],
+        "failures": ["duplicate paragraph occurrence(s)"],
+    }
+    passed_report = {"passed": True, "checks": [], "failures": []}
+    engine._independent_delivery_report = Mock(side_effect=[failed_report, passed_report])
+
+    await engine.execute_task("doc-assurance", "Rédige un dossier professionnel")
+
+    children = [item for item in state.executions.values()
+                if item.variables.get("parent_execution_id") == "doc-assurance"]
+    assert children
+    assert children[0].variables["plan_step_id"] == 0
+    runtime = parent.variables.get("step_runtime") or {}
+    assert runtime.get("0", {}).get("required_next_tool") == "filesystem__replace_paragraph"
+
+
 def test_cross_domain_request_has_rich_engine_agnostic_fallback():
     analysis = analyze_task_complexity(COMPLEX_PROJECT_PROMPT)
     plan = SimplePlanner._fallback_plan(COMPLEX_PROJECT_PROMPT, analysis)

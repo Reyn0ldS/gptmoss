@@ -1009,6 +1009,23 @@ async def get_execution(execution_id: str):
         "messages": convo.messages
     }
 
+@app.get("/executions/{execution_id}/evidence-graph")
+async def get_execution_evidence_graph(execution_id: str):
+    if not app_state.state_engine:
+        raise HTTPException(status_code=500, detail="State engine not initialized.")
+    if execution_id not in app_state.state_engine.executions:
+        raise HTTPException(status_code=404, detail="Execution not found.")
+    from gptmoss.core.evidence_graph import build_evidence_graph
+    state = app_state.state_engine.get_execution(execution_id)
+    histories = []
+    if app_state.execution_engine:
+        histories = app_state.execution_engine.delivery_coordinator.histories(execution_id)
+    return build_evidence_graph(
+        state.current_plan or {},
+        histories,
+        corpus_policy=state.variables.get("corpus_policy"),
+    )
+
 @app.get("/executions/{execution_id}/delivery")
 async def get_execution_delivery(execution_id: str, download: bool = False):
     if not app_state.state_engine or execution_id not in app_state.state_engine.executions:

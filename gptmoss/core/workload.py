@@ -11,6 +11,8 @@ import math
 from collections import Counter
 from typing import Any, Iterable
 
+from gptmoss.core.execution_plan import synthesize_plan_edges
+
 
 SOURCE_MARKERS = (
     "corpus", "source", "attachment", "document", "evidence", "inventory",
@@ -164,6 +166,7 @@ def compile_work_graph(
     partitions = int(safe_profile.get("suggested_partitions") or 1)
     if planning_mode == "direct" or partitions <= 1 or not steps:
         result["steps"] = _renumber(steps)
+        synthesize_plan_edges(result)
         return result
 
     source_step = next((
@@ -173,6 +176,7 @@ def compile_work_graph(
     ), None)
     if source_step is None:
         result["steps"] = _renumber(steps)
+        synthesize_plan_edges(result)
         return result
 
     original_id = str(source_step["id"])
@@ -232,6 +236,7 @@ def compile_work_graph(
     if not isinstance(result.get("analysis"), dict):
         result["analysis"] = {}
     result["analysis"]["compiled_source_partitions"] = partitions
+    synthesize_plan_edges(result)
     return result
 
 

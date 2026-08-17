@@ -51,6 +51,8 @@ REQUIRED_HANDLERS = (
     "deleteActiveExecution()",
     "switchFeedTab('active')",
     "switchFeedTab('unified')",
+    "switchPlanView('list')",
+    "switchPlanView('graph')",
     "closeSettingsModal()",
     "scrollSettingsSection('settings-model-section')",
     "scrollSettingsSection('settings-security-section')",

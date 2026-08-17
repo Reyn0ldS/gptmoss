@@ -27,6 +27,8 @@
     "gptmoss/core/corpus.py": "assurance",
     "gptmoss/core/corpus_policy.py": "assurance",
     "gptmoss/core/delivery.py": "assurance",
+    "gptmoss/core/delivery_feedback.py": "assurance",
+    "gptmoss/core/evidence_graph.py": "assurance",
     "gptmoss/core/delivery_coordinator.py": "assurance",
     "gptmoss/core/delivery_package.py": "delivery",
     "gptmoss/core/document_quality.py": "assurance",
@@ -144,6 +146,7 @@
     ["GET", "/evolution", "evolution_status"],
     ["GET", "/executions", "list_executions"],
     ["GET", "/executions/{execution_id}", "get_execution"],
+    ["GET", "/executions/{execution_id}/evidence-graph", "get_execution_evidence_graph"],
     ["GET", "/executions/{execution_id}/delivery", "get_execution_delivery"],
     ["GET", "/executions/{execution_id}/document", "get_execution_document_state"],
     ["GET", "/executions/{execution_id}/subagents", "list_subagents"],
@@ -269,7 +272,7 @@
     },
     {
       "id": "execution-observation",
-      "evidence": ["setupWebSocket", "/ws/events", "/unified-feed", "fetchExecutionDetails", "/document", "appendLlmStream", "applyConversationScroll"]
+      "evidence": ["setupWebSocket", "/ws/events", "/unified-feed", "fetchExecutionDetails", "/document", "appendLlmStream", "applyConversationScroll", "switchPlanView", "plan-graph"]
     },
     {
       "id": "library",
@@ -306,7 +309,7 @@
     },
     {
       "id": "planning-execution-lifecycle",
-      "tests": ["tests/test_execution.py", "tests/test_lifecycle_chronology.py", "tests/test_planning_modes.py", "tests/test_plan_obligations.py", "tests/test_generic_planning_and_context.py", "tests/test_general_runtime_adaptation.py", "tests/test_adaptive_autonomy.py", "tests/test_execution_services.py", "tests/test_scheduler_and_legacy_state.py", "tests/test_state_durability.py", "tests/test_runtime_ux.py"]
+      "tests": ["tests/test_execution.py", "tests/test_lifecycle_chronology.py", "tests/test_planning_modes.py", "tests/test_plan_obligations.py", "tests/test_plan_graph.py", "tests/test_delivery_feedback.py", "tests/test_evidence_graph.py", "tests/test_generic_planning_and_context.py", "tests/test_general_runtime_adaptation.py", "tests/test_adaptive_autonomy.py", "tests/test_execution_services.py", "tests/test_scheduler_and_legacy_state.py", "tests/test_state_durability.py", "tests/test_runtime_ux.py"]
     },
     {
       "id": "provider-recovery",
@@ -381,6 +384,7 @@
   },
   "documents": [
     "docs/architecture.md",
+    "docs/delivery-graph.md",
     "docs/functional-map.md",
     "docs/coverage-matrix.md",
     "docs/offline-package-manifest.md",

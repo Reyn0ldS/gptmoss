@@ -26,6 +26,7 @@ FEATURE_CONTRACTS = {
     "execution_lifecycle": {
         "routes": {("POST", "/executions"), ("GET", "/executions"),
                    ("GET", "/executions/{execution_id}"),
+                   ("GET", "/executions/{execution_id}/evidence-graph"),
                    ("GET", "/executions/{execution_id}/delivery"),
                    ("GET", "/executions/{execution_id}/document"),
                    ("GET", "/executions/{execution_id}/metrics"),
@@ -38,6 +39,7 @@ FEATURE_CONTRACTS = {
                    ("DELETE", "/executions/{execution_id}"),
                    ("POST", "/executions/clear-all")},
         "tests": {"test_execution_control_api_preserves_transition_chronology",
+                  "test_evidence_graph_route_is_scoped_to_execution",
                   "test_api_delete_and_clear_all_refuse_active_executions",
                   "test_approval_endpoints_record_ordered_scope_decisions",
                   "test_delivery_package_contains_docx_manifest_assurance_and_sources",

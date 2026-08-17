@@ -13,6 +13,8 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 from gptmoss.core.artifact_validation import validate_artifact
 from gptmoss.core.corpus_policy import normalize_corpus_policy
+from gptmoss.core.evidence_graph import build_evidence_graph
+from gptmoss.core.execution_plan import synthesize_plan_edges
 from gptmoss.core.plan_obligations import (
     attach_plan_obligations,
     unsatisfied_obligations,
@@ -578,6 +580,8 @@ def build_delivery_contract(
         ) for command in _strings(step.get("verification_commands")))
         for step in plan.get("steps", [])
     )
+    if not isinstance(plan.get("edges"), list) or not plan.get("edges"):
+        synthesize_plan_edges(plan)
     contract = {
         "schema_version": SCHEMA_VERSION,
         "task_sha256": hashlib.sha256(str(task).encode("utf-8")).hexdigest(),
@@ -595,6 +599,10 @@ def build_delivery_contract(
         "normalization_warnings": _strings(plan.get("normalization_warnings")),
         "software_delivery": software_delivery,
         "plan_obligations": obligations,
+        "edges": [
+            dict(item) for item in plan.get("edges") or []
+            if isinstance(item, dict) and item.get("from") and item.get("to")
+        ],
         "corpus_policy": corpus_policy,
     }
     frozen = json.dumps(contract, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
@@ -948,6 +956,31 @@ def evaluate_delivery(
         "name": "corpus_policy_evidence",
         "passed": not corpus_evidence_failures,
         "failures": corpus_evidence_failures,
+    })
+    evidence_graph = build_evidence_graph(
+        None, histories, corpus_policy=corpus_policy,
+    )
+    graph_failures = []
+    parseable_sources = [
+        node for node in evidence_graph.get("nodes", [])
+        if node.get("kind") in {"source", "image"}
+    ]
+    if (
+        corpus_policy.get("enabled")
+        and int(corpus_policy.get("document_count") or 0) > 0
+        and parseable_sources
+        and int((evidence_graph.get("stats") or {}).get("covered_sources") or 0) == 0
+    ):
+        graph_failures.append("evidence graph has sources without any covers edges")
+    if graph_failures:
+        failures.append(
+            "corpus evidence graph incomplete: " + "; ".join(graph_failures)
+        )
+    checks.append({
+        "name": "corpus_evidence_graph",
+        "passed": not graph_failures,
+        "failures": graph_failures,
+        "stats": evidence_graph.get("stats") or {},
     })
     interface_issues = declared_interface_issues(workspace, contract.get("interfaces", []))
     if interface_issues:

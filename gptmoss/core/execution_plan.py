@@ -119,7 +119,56 @@ def normalize_plan(plan: Dict[str, Any]) -> Dict[str, Any]:
         if not ready:
             raise ValueError("Plan contains cyclical dependencies.")
         completed.update(ready)
+    synthesize_plan_edges(plan)
     return plan
+
+
+EDGE_TYPES = ("produces_for", "validates", "repairs", "consolidates", "blocks")
+CAUSAL_EDGE_TYPES = ("produces_for", "validates", "repairs", "consolidates")
+
+
+def infer_edge_type(source: Dict[str, Any], dest: Dict[str, Any]) -> tuple[str, str | None]:
+    """Derive a semantic edge from the destination role or shard operation."""
+    dest_operation = str(dest.get("operation") or "").strip().lower()
+    source_operation = str(source.get("operation") or "").strip().lower()
+    dest_role = str(dest.get("role") or "").strip().lower()
+    if dest_operation == "consolidate" or (
+        source_operation in {"extract", "inventory"} and dest_operation == "consolidate"
+    ):
+        return "consolidates", "source_inventory"
+    if dest_role == "qa":
+        return "validates", "independent_validation"
+    if dest_role == "debugger":
+        return "repairs", "autonomous_repair"
+    if dest_role == "coordinator":
+        return "validates", "final_audit"
+    return "produces_for", None
+
+
+def synthesize_plan_edges(plan: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Rebuild typed edges from the scheduling spine. Dependencies stay IDs."""
+    steps = [step for step in plan.get("steps", []) if isinstance(step, dict)]
+    by_identifier = {str(step.get("id")): step for step in steps}
+    edges: List[Dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for step in steps:
+        destination = str(step.get("id"))
+        for dependency in step.get("dependencies") or []:
+            source_id = str(dependency)
+            source = by_identifier.get(source_id)
+            if source is None or source_id == destination:
+                continue
+            key = (source_id, destination)
+            if key in seen:
+                continue
+            seen.add(key)
+            kind, obligation = infer_edge_type(source, step)
+            edge = {"from": source_id, "to": destination, "type": kind}
+            if obligation:
+                edge["obligation"] = obligation
+            edges.append(edge)
+    plan["edges"] = edges
+    return edges
 
 
 def merge_inherited_requirements(

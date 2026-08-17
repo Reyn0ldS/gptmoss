@@ -65,7 +65,12 @@ dépendances terminées
        -> StepCompleted ou StepFailed
 ```
 
-Le plan est la source de l'ordre : une étape n'est exécutable qu'après ses dépendances.
+Le plan est la source de l'ordre : une étape n'est exécutable qu'après ses
+dépendances. Les arêtes typées (`produces_for`, `validates`, `repairs`,
+`consolidates`) expliquent pourquoi cette dépendance existe ; elles ne
+remplacent pas la spine d'ordonnancement. Un audit ou un quality gate
+rouvre le propriétaire de l'obligation fautive (inventaire, rédaction,
+implémentation) au lieu de toujours relancer le dernier debugger.
 Les prérequis validés sont réutilisés, et les chemins possédés empêchent les spécialistes
 concurrents de modifier le même livrable. Une répétition sans preuve consomme le budget de
 stagnation ; une modification durable ou une nouvelle validation réussie le remet à zéro.

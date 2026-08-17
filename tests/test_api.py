@@ -1145,6 +1145,7 @@ def test_gui_contains_complete_management_controls():
         '"pdf":"application/pdf"', 'requestApi("/corpora"',
         'id="library-corpora"', "toggleCorpusAttachment", "selectedLibraryCorpora", "deleteCorpus",
         "applyConversationScroll", "scheduleFetchExecutionDetails",
+        'id="plan-graph"', "switchPlanView", "planGraphSignature",
         "lastConversationSignature", "chatFollowLatest",
     ):
         assert marker in gui

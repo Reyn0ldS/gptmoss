@@ -31,6 +31,12 @@ from gptmoss.core.delivery import (
     path_is_owned,
 )
 from gptmoss.core.adaptive import AdaptiveRuntimePolicy, tool_call_fingerprint
+from gptmoss.core.delivery_feedback import (
+    classify_assurance_report,
+    classify_issue_texts,
+    select_reopen_step,
+    steps_to_reopen,
+)
 from gptmoss.core.plan_obligations import attach_plan_obligations
 from gptmoss.core.corpus_policy import normalize_corpus_policy
 from gptmoss.core.professional_delivery import apply_professional_profile
@@ -1000,9 +1006,12 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
         """Create/resume the provider-neutral long-document checkpoint."""
         if not self.document_engine_enabled or not self.document_checkpoint_enabled:
             return
-        if not any(marker in str(task).casefold() for marker in (
+        policy = state.variables.get("corpus_policy") if hasattr(state, "variables") else {}
+        professional = isinstance(policy, dict) and policy.get("professional_delivery")
+        if not professional and not any(marker in str(task).casefold() for marker in (
             "dossier", "rapport", "livrable", "long-form", "document-analysis",
             "rédige", "redige", "write a document", "professional document",
+            "professional report",
         )):
             return
         workspace = self._delivery_workspace(execution_id)
@@ -1473,10 +1482,9 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
                     ))
                     if not assurance_report.get("passed", False):
                         repair_round = int(state.variables.get("assurance_repair_round", 0))
-                        repair_step = next(
-                            (item for item in reversed(steps)
-                             if canonical_step_role(item.get("role")) == "debugger"),
-                            None,
+                        target = classify_assurance_report(assurance_report)
+                        repair_step = select_reopen_step(
+                            state.current_plan or {"steps": steps}, target
                         )
                         repair_budget = (
                             self._step_retry_budget(task, repair_step)
@@ -1484,23 +1492,30 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
                         )
                         if repair_step is not None and repair_round < repair_budget:
                             state.variables["assurance_repair_round"] = repair_round + 1
-                            repair_step["status"] = "pending"
-                            repair_step.pop("assigned_execution_id", None)
-                            repair_step["retry_context"] = (
+                            reopened = steps_to_reopen(
+                                state.current_plan or {"steps": steps}, target, repair_step
+                            )
+                            context = (
                                 "Independent delivery assurance rejected the assembled project. "
                                 "Fix these machine-observed defects without redoing validated work:\n"
                                 + json.dumps(assurance_report, ensure_ascii=False)[:10_000]
                             )
-                            for downstream in steps:
-                                if canonical_step_role(downstream.get("role")) == "coordinator":
-                                    downstream["status"] = "pending"
-                                    downstream.pop("assigned_execution_id", None)
+                            for item in reopened:
+                                item["status"] = "pending"
+                                item.pop("assigned_execution_id", None)
+                                item["retry_context"] = context
+                            if target.required_tool:
+                                runtime = state.variables.setdefault("step_runtime", {}).setdefault(
+                                    str(repair_step.get("id")), {}
+                                )
+                                runtime["required_next_tool"] = target.required_tool
                             await self.event_bus.publish(Event(
                                 type="DeliveryRepairScheduled",
                                 payload={
                                     "execution_id": execution_id,
                                     "round": repair_round + 1,
                                     "step_id": repair_step.get("id"),
+                                    "obligation": target.obligation,
                                 },
                             ))
                             continue
