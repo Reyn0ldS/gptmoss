@@ -91,7 +91,7 @@ def classify_issue_texts(texts: Iterable[Any]) -> FeedbackTarget:
         )
     if any(marker in blob for marker in SOFTWARE_MARKERS):
         return FeedbackTarget(
-            IMPLEMENTATION, "debugger", None, "software assurance",
+            AUTONOMOUS_REPAIR, "debugger", None, "software assurance",
             ("coordinator",),
         )
     return FeedbackTarget(None, None, None, "unclassified")
@@ -150,7 +150,7 @@ def classify_assurance_report(report: Any) -> FeedbackTarget:
         "syntax_imports_signatures", "independent_machine_evidence", "real_launch_smoke",
     )):
         return FeedbackTarget(
-            IMPLEMENTATION, "debugger", None, "software assurance",
+            AUTONOMOUS_REPAIR, "debugger", None, "software assurance",
             ("coordinator",),
         )
     return classify_issue_texts(texts)
@@ -162,6 +162,13 @@ def select_reopen_step(plan: Any, target: FeedbackTarget) -> Optional[Dict[str, 
         step for step in (plan or {}).get("steps", [])
         if isinstance(step, dict)
     ]
+    if target.role == "debugger":
+        matched = [
+            step for step in steps
+            if str(step.get("role") or "").strip().lower() == "debugger"
+        ]
+        if matched:
+            return matched[-1]
     if target.obligation:
         matched = matching_steps(steps, target.obligation)
         if matched:

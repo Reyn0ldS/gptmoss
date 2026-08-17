@@ -5,7 +5,12 @@ from gptmoss.core.delivery_feedback import (
     select_reopen_step,
     steps_to_reopen,
 )
-from gptmoss.core.plan_obligations import DOCUMENT_RENDER, IMPLEMENTATION, SOURCE_INVENTORY
+from gptmoss.core.plan_obligations import (
+    AUTONOMOUS_REPAIR,
+    DOCUMENT_RENDER,
+    IMPLEMENTATION,
+    SOURCE_INVENTORY,
+)
 
 
 def _plan():
@@ -73,8 +78,26 @@ def test_software_check_names_reopen_debugger():
         "checks": [{"name": "syntax_imports_signatures", "passed": False}],
         "failures": ["1 static integration issue(s)"],
     })
-    assert target.obligation == IMPLEMENTATION
+    assert target.obligation == AUTONOMOUS_REPAIR
     assert select_reopen_step(_plan(), target)["role"] == "debugger"
+
+
+def test_software_smoke_does_not_reopen_decorated_developer():
+    plan = {
+        "steps": [
+            {
+                "id": 0, "role": "developer", "operation": "implement",
+                "satisfies_obligations": [IMPLEMENTATION],
+            },
+            {
+                "id": 1, "role": "debugger", "operation": "repair",
+                "satisfies_obligations": [AUTONOMOUS_REPAIR],
+            },
+            {"id": 2, "role": "coordinator", "operation": "audit"},
+        ]
+    }
+    target = classify_issue_texts(["CLI smoke failed"])
+    assert select_reopen_step(plan, target)["id"] == 1
 
 
 def test_disjoint_owned_paths_require_both_claims():

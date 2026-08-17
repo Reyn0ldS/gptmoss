@@ -40,6 +40,21 @@ def test_evidence_graph_covers_read_blocks_and_unifies_sources():
     assert len(sources) == 1
     assert graph["stats"]["covered_sources"] == 1
     assert any(edge["type"] == "covers" for edge in graph["edges"])
+    assert any(edge["type"] == "inventories" and edge["to"] == "sha256:abc" for edge in graph["edges"])
+
+
+def test_image_reads_create_covers_edges():
+    graph = build_evidence_graph(
+        {},
+        [{
+            "capability": "documents",
+            "action": "read_image",
+            "result": {"artifact_id": "img-1", "source_name": "photo.png"},
+        }],
+        corpus_policy={"enabled": True, "image_count": 1},
+    )
+    assert graph["stats"]["covered_sources"] == 1
+    assert any(edge["type"] == "covers" and edge["from"] != edge["to"] for edge in graph["edges"])
 
 
 def test_evidence_graph_route_is_scoped_to_execution():

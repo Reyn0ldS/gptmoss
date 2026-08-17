@@ -96,13 +96,15 @@ def build_evidence_graph(
                         str(item.get("source_name") or item.get("filename") or ""),
                         str(item.get("sha256") or ""),
                     )
+                    artifact_id = str(item.get("id") or item.get("artifact_id") or "")
                     if add_node(
                         key, kind,
-                        artifact_id=item.get("id") or item.get("artifact_id"),
+                        artifact_id=artifact_id,
                         source_name=item.get("source_name") or item.get("filename"),
                         sha256=item.get("sha256"),
                     ):
-                        add_edge("inventories", "inventory", key)
+                        resolved = aliases.get(artifact_id) or key
+                        add_edge("inventories", "inventory", resolved)
             add_node("inventory", "inventory")
         elif action in {"read", "read_chunk"}:
             artifact_id = str(
@@ -120,7 +122,9 @@ def build_evidence_graph(
                 if add_node(block_id, "block_range", order=order, artifact_id=artifact_id):
                     add_edge("covers", key, block_id)
             if not payload.get("blocks") and key:
-                add_edge("covers", key, key)
+                seen_id = f"{key}:read"
+                if add_node(seen_id, "coverage", artifact_id=artifact_id):
+                    add_edge("covers", key, seen_id)
         elif action in {"read_image", "read_images"}:
             items = payload.get("images") or payload.get("documents") or [payload]
             if isinstance(payload.get("artifact_id"), str):
@@ -129,9 +133,14 @@ def build_evidence_graph(
                 if not isinstance(item, Mapping):
                     continue
                 artifact_id = str(item.get("artifact_id") or item.get("id") or arguments.get("artifact_id") or "")
-                key = _source_key(artifact_id, str(item.get("source_name") or ""), str(item.get("sha256") or ""))
-                if add_node(key, "image", artifact_id=artifact_id):
-                    add_edge("covers", key, key)
+                key = aliases.get(artifact_id) or _source_key(
+                    artifact_id, str(item.get("source_name") or ""), str(item.get("sha256") or ""),
+                )
+                if add_node(key, "image", artifact_id=artifact_id, sha256=item.get("sha256")):
+                    key = aliases.get(artifact_id) or key
+                    seen_id = f"{key}:image"
+                    if add_node(seen_id, "coverage", artifact_id=artifact_id):
+                        add_edge("covers", key, seen_id)
 
     return {
         "schema_version": 1,

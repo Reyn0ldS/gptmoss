@@ -1524,8 +1524,11 @@
             while (remaining.size) {
                 const ready = steps
                     .map((step) => String(step.id))
-                    .filter((id) => remaining.has(id) && (steps.find((step) => String(step.id) === id).dependencies || [])
-                        .every((dep) => !remaining.has(String(dep))));
+                    .filter((id) => {
+                        if (!remaining.has(id)) return false;
+                        const current = steps.find((step) => String(step.id) === id);
+                        return ((current && current.dependencies) || []).every((dep) => !remaining.has(String(dep)));
+                    });
                 const layer = ready.length ? ready : [...remaining];
                 layers.push(layer);
                 layer.forEach((id) => remaining.delete(id));
