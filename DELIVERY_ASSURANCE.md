@@ -91,10 +91,15 @@ Avant `completed`, GPTMOSS évalue lui-même :
 7. l'exécution réelle des commandes de lancement CLI/API prévues.
 
 Le rapport est disponible dans `results.delivery_assurance` et dans l'interface.
-S'il échoue, le dernier réparateur est rouvert avec le rapport exact, puis
-l'auditeur final est rejoué. Les lots déjà validés ne sont pas relancés. Après
+S'il échoue, `delivery_feedback` classifie le défaut et rouvre le propriétaire
+de l'obligation (inventaire, rédacteur, debugger) avec le rapport exact, puis
+l'auditeur final est rejoué. Le dernier debugger reste seulement le repli si
+aucune cible n'est classée. Les lots déjà validés ne sont pas relancés. Après
 épuisement des reprises, le projet passe à `failed` au lieu de produire une
 fausse réussite.
+
+`plan.edges` documente le rôle de chaque dépendance. `GET /executions/{id}/evidence-graph`
+projette les preuves corpus en un graphe borné, distinct de l'historique d'outils.
 
 Le coordinateur évalue les commandes obligatoires à partir de son historique et
 de celui de tous ses sous-agents. Une validation QA exacte et réussie reste donc

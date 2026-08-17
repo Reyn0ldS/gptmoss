@@ -39,14 +39,14 @@ pas un ordonnanceur distribué ni une implémentation de cron.
 |---|---|---|
 | Entrée et bootstrap | `main.py` | Charge et normalise la configuration, construit les fournisseurs, registres, moteur et capacités, lance CLI ou Uvicorn. |
 | Contrôle du processus | `scripts/server_supervisor.py` | Conserve un point de contrôle local lorsque l'application est arrêtée ; vérifie port, santé et jeton éphémère. |
-| Interface | `gptmoss/api/gui.html` | Composition des tâches, suivi temps réel, bibliothèque, mémoire, skills, réglages, livraisons et contrôle serveur. |
-| API | `gptmoss/api/server.py` | Contrats HTTP/WebSocket, validation Pydantic, cycle de vie, réglages, diagnostics et téléchargements bornés. |
-| Orchestration | `core/kernel.py`, `core/execution.py`, `core/execution_plan.py`, `core/execution_progress.py`, `core/execution_rescue.py`, `core/workload.py`, `core/plan_obligations.py`, `core/scheduler.py`, `planners/simple.py`, `planners/complexity.py`, `planners/fallbacks.py` | Création/exécution planifiée, plan sémantique sans cardinalité fixe, contrats d'opération/preuve, réparation causale, compilation selon le volume réel, dépendances, spécialistes, reprises, approbations et convergence. |
+| Interface | `gptmoss/api/gui.html` | Composition des tâches, suivi temps réel, vues Liste/Graphe du plan DAG, bibliothèque, mémoire, skills, réglages, livraisons et contrôle serveur. |
+| API | `gptmoss/api/server.py` | Contrats HTTP/WebSocket, validation Pydantic, cycle de vie, réglages, diagnostics, graphe de preuves et téléchargements bornés. |
+| Orchestration | `core/kernel.py`, `core/execution.py`, `core/execution_plan.py`, `core/execution_progress.py`, `core/execution_rescue.py`, `core/workload.py`, `core/plan_obligations.py`, `core/scheduler.py`, `planners/simple.py`, `planners/complexity.py`, `planners/fallbacks.py` | Création/exécution planifiée, plan sémantique sans cardinalité fixe, contrats d'opération/preuve, arêtes typées dérivées des dépendances, réparation causale, compilation selon le volume réel, spécialistes, reprises, approbations et convergence. |
 | Domaines projet | `core/domains.py` | Catégories génériques et extensions de marqueurs propres à chaque projet, sans hypothèse métier globale. |
 | Contexte et mémoire | `core/context.py`, `memory/json_store.py`, `capabilities/memory.py` | Contexte borné et mémoire gouvernée par projet, validation, provenance, TTL, déduplication et supersession. |
 | Capacités | `capabilities/*` | Actions outillées exposées au modèle et contrôlées par la politique. |
 | Documents | `core/documents.py`, `core/artifacts.py`, `core/corpus_policy.py`, `capabilities/documents.py` | Détection sûre, manifestes de corpus par dossier, politique locale en lecture seule, déduplication SHA-256, normalisation, indexation, inventaire, recherche et lecture locale des pièces jointes. |
-| Qualité et livraison | `core/delivery.py`, `document_quality.py`, `professional_delivery.py`, `delivery_package.py` | Contrat gelé, preuves indépendantes, réparations et paquet professionnel DOCX/ZIP signé par empreintes. |
+| Qualité et livraison | `core/delivery.py`, `core/delivery_feedback.py`, `core/evidence_graph.py`, `document_quality.py`, `professional_delivery.py`, `delivery_package.py` | Contrat gelé, classification des défauts, réouverture du propriétaire d'obligation, graphe de preuves borné, réparations et paquet professionnel DOCX/ZIP signé par empreintes. |
 | Évolution | `core/skills.py`, `core/evolution.py` | Découverte de procédures, profils de spécialistes et évolution locale traçable. |
 | Configuration | `core/settings.py` | Contrat Pydantic unique partagé par bootstrap, API, GUI et tests ; valeurs sûres et limites strictes. |
 | Persistance | `core/state.py`, `core/durable_io.py`, `core/observability.py` | Index `state_store.json` plus sidecars par exécution/conversation, migration/quarantaine, historique borné et télémétrie locale. |
@@ -54,6 +54,25 @@ pas un ordonnanceur distribué ni une implémentation de cron.
 
 Les interfaces abstraites de `gptmoss/interfaces/` séparent capacités, LLM, mémoire,
 planification et politique de leurs implémentations actuelles.
+
+## Graphe de livraison
+
+Le contrat est détaillé dans [delivery-graph.md](delivery-graph.md). Trois couches
+coexistent sans se substituer :
+
+1. `dependencies` reste la spine d'ordonnancement : une liste d'identifiants
+   `int` ou `str`. Le scheduler n'accepte que cette forme.
+2. `plan.edges` porte la sémantique (`produces_for`, `validates`, `repairs`,
+   `consolidates`, `blocks`). `synthesize_plan_edges` les dérive des dépendances
+   et des rôles lorsque le planner n'en fournit pas.
+3. `evidence_graph` est une vue bornée des lectures corpus, citations et
+   couvertures. Il est exposé par `GET /executions/{id}/evidence-graph` et n'inclut
+   jamais `tool_call_history` brut.
+
+Un quality gate ou un audit classifie le défaut (`delivery_feedback`) puis rouvre
+le propriétaire de l'obligation : inventaire, rédacteur, debugger. Aucune étape
+n'est insérée pendant l'exécution. La GUI rend le plan en Liste ou en Graphe SVG
+local dans la colonne plan, sans script distant.
 
 ## Capacités agentiques
 

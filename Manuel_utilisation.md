@@ -10,7 +10,7 @@ La console Web est accessible sur `http://127.0.0.1:8000/`. Elle propose une vue
 
 * **Barre Latérale (Gestion de Tâches)** : Affiche la liste de vos tâches courantes. Les tâches sous-agents (spécialistes) sont imbriquées hiérarchiquement sous la tâche principale avec des lignes d'indendation claires, vous permettant de suivre l'arbre de délégation en direct.
 * **Dialogue Inter-Agents (Discussion)** : Flux de dialogue chronologique propre montrant les réflexions et les résultats textuels de chaque spécialiste (ex: Architecte, Développeur, Revue Sécurité). Les messages système internes redondants y sont filtrés pour éviter toute pollution visuelle.
-* **Liste d'étapes (Plan DAG)** : Affiche les étapes planifiées par le coordinateur. Chaque étape détaille ses dépendances (ex: `Dépend de : #1, #2`), sa description et son état actuel (Pending, Running, Completed, Failed).
+* **Plan DAG (Liste / Graphe)** : La colonne plan propose deux vues locales. **Liste** affiche chaque étape avec ses dépendances (ex: `Dépend de : #1, #2`), sa description et son état (Pending, Running, Completed, Failed). **Graphe** dessine la topologie du plan (`plan.edges` : production, validation, réparation, consolidation) sans script distant. Au-delà d'une cinquantaine d'étapes, la liste reste la vue de travail.
 * **Bannière d'Approbation Humaine (Human-in-the-Loop)** : Si une action sensible est déclenchée (ex: exécution d'un script shell ou passage d'une porte de qualité), le moteur suspend l'agent, affiche une bannière jaune d'alerte et attend votre accord ("Autoriser" ou "Refuser" avec commentaire optionnel).
 
 ---
@@ -47,7 +47,7 @@ GPT-Moss utilise un moteur d'ordonnancement par graphe orienté acyclique (DAG).
 * **Sécurité antidécurrence** : Le graphe intègre une détection de dépendances cycliques pour éviter les blocages. Si une étape échoue, les autres tâches actives sont annulées de façon propre.
 * **Déduplication** : Une étape garde le même sous-agent lors d'une reprise et un second lancement concurrent de la même exécution est ignoré.
 * **Passage de relais** : Les résultats structurés des dépendances sont injectés dans la tâche du spécialiste suivant, puis toutes les livraisons sont remises au coordinateur final.
-* **Reprise autonome** : Après un échec, un nouveau spécialiste reprend les fichiers partiels et les preuves d'erreur sans recommencer les dépendances validées.
+* **Reprise autonome** : Après un échec, un audit classifie le défaut et rouvre le propriétaire de l'obligation (inventaire, rédacteur, debugger) plutôt que de toujours relancer le dernier réparateur. Les fichiers partiels et les preuves d'erreur sont conservés ; les dépendances déjà validées ne sont pas recommencées.
 * **Tâches longues** : Avec « Continuer tant que le travail progresse », il n'y a ni limite globale d'itérations ni timeout global de projet. Le budget configuré mesure seulement les tours consécutifs sans progrès durable. Une commande shell individuelle conserve son propre délai de sécurité.
 * **Panne temporaire du LLM** : Les erreurs réseau, timeouts, limitations de débit et erreurs serveur sont retentés avec un délai progressif. Les artefacts déjà écrits restent dans le workspace. Une erreur d'authentification n'est pas masquée par ces reprises.
 

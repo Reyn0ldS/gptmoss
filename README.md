@@ -15,7 +15,8 @@ sécurité shell et cartographie GUI/API sont détaillées dans le
 La cartographie vivante de l'application est répartie entre
 [l'architecture](docs/architecture.md), les
 [parcours fonctionnels](docs/functional-map.md), la
-[matrice de couverture](docs/coverage-matrix.md) et le
+[matrice de couverture](docs/coverage-matrix.md), le
+[graphe de livraison](docs/delivery-graph.md) et le
 [contrat du paquet offline](docs/offline-package-manifest.md). Son inventaire machine
 `docs/application-map.json` et son [graphe relationnel des classes, méthodes et données](docs/symbol-relations.md)
 sont vérifiés par `python scripts/validate_application_map.py`. Avant une évolution,
@@ -335,7 +336,7 @@ Vous pouvez ajouter, renommer ou supprimer un projet, puis lui associer un dossi
 
 1. Lancez GPTMOSS et ouvrez <http://127.0.0.1:8000>.
 2. Choisissez le projet puis décrivez la tâche avec un résultat attendu, les contraintes et les fichiers concernés.
-3. Soumettez la tâche. La liste affiche son état et son plan ; le fil unifié rassemble les messages du coordinateur et des sous-agents.
+3. Soumettez la tâche. La liste affiche son état et son plan. Dans la colonne plan, **Liste** détaille chaque étape et **Graphe** dessine localement la topologie (`plan.edges`) ; le fil unifié rassemble les messages du coordinateur et des sous-agents.
 4. Lorsqu'une action protégée est demandée, l'exécution passe à `paused`. Utilisez **Autoriser** ou **Refuser**, avec un motif si utile.
 5. Consultez le résultat, les sous-tâches, les événements et les métriques. Une exécution terminée peut être supprimée de l'historique.
 
@@ -413,6 +414,8 @@ Routes principales :
 | `GET /executions/{id}/unified-feed` | Fil des messages, sous-agents compris. |
 | `GET /executions/{id}/metrics` | Compteurs et durées de télémétrie. |
 | `GET /executions/{id}/delivery` | Métadonnées ou téléchargement ZIP du paquet professionnel assuré. |
+| `GET /executions/{id}/evidence-graph` | Vue bornée des lectures corpus, citations et couvertures, sans historique d'outils brut. |
+| `GET /executions/{id}/document` | État du moteur de document long (sections et checkpoints). |
 | `POST /executions` | Crée une exécution. |
 | `GET /projects` | Liste les projets configurés. |
 | `POST /projects` | Crée atomiquement un projet et son dossier. |
@@ -481,7 +484,7 @@ Le client doit garder la connexion ouverte et peut envoyer un message périodiqu
 
 Une tâche est d'abord classée selon sa taille, ses domaines et ses résultats attendus. Le socle ne contient que des domaines génériques (logiciel, données/automatisation, traitement intelligent, média/espace, expérience utilisateur, sécurité, opérations offline et documents). Chaque projet peut ajouter ses propres domaines par configuration. Le plan adaptatif fournit ensuite un rôle canonique (`architect`, `security`, `developer`, `qa`, `debugger`, `writer` ou `coordinator`) et un profil métier distinct (`specialist`, `expertise`, artefacts, critères d'acceptation et commandes de vérification). Les règles spécialisées livrées dans certains skills sont optionnelles et ne sont activées que sur demande explicite.
 
-Le moteur valide les identifiants, les références et l'absence de cycle avant de démarrer. Les étapes indépendantes s'exécutent en parallèle. Un spécialiste ne peut annoncer sa réussite qu'après création des artefacts non vides, exécution exacte des vérifications déclarées et remise d'un résultat JSON structuré. Les agents QA importent le code réel : les dépendances locales factices, mocks de remplacement et géométries aléatoires sont refusés.
+Le moteur valide les identifiants, les références et l'absence de cycle avant de démarrer. Les étapes indépendantes s'exécutent en parallèle. Après normalisation, `plan.edges` porte la sémantique (`produces_for`, `validates`, `repairs`, `consolidates`, `blocks`) dérivée des dépendances et des rôles ; `dependencies` reste la seule spine d'ordonnancement. Un quality gate ou un audit classifie le défaut et rouvre le propriétaire de l'obligation (inventaire, rédacteur, debugger) au lieu de toujours relancer le dernier réparateur. `GET /executions/{id}/evidence-graph` expose une projection bornée des lectures et citations, distincte de `tool_call_history`. Un spécialiste ne peut annoncer sa réussite qu'après création des artefacts non vides, exécution exacte des vérifications déclarées et remise d'un résultat JSON structuré. Les agents QA importent le code réel : les dépendances locales factices, mocks de remplacement et géométries aléatoires sont refusés.
 
 Chaque étape spécialiste possède un seul sous-agent persistant. Son identifiant et
 son résultat sont enregistrés avant et après l'exécution, ce qui empêche une reprise

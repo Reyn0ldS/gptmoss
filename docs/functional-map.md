@@ -163,13 +163,17 @@ comme livré. Ce pipeline est une fonctionnalité spécialisée, pas le comporte
 
 Après toutes les étapes :
 
-1. le moteur évalue le contrat gelé à partir du workspace et des historiques réels ;
-2. toute défaillance déclenche une réparation ciblée ou échoue explicitement ;
+1. le moteur évalue le contrat gelé à partir du workspace et des historiques réels,
+   y compris `evidence_graph` (lectures, citations, couvertures unifiées par SHA) ;
+2. toute défaillance est classifiée (`delivery_feedback`) puis rouvre le propriétaire
+   de l'obligation, ou échoue explicitement ;
 3. `DeliveryAssuranceCompleted` enregistre contrôles et preuves ;
 4. une tâche documentaire professionnelle génère un DOCX, le rapport d'assurance JSON,
    un manifeste SHA-256 et un ZIP ;
 5. l'état devient `completed` seulement après convergence ;
-6. la GUI affiche le bouton de téléchargement uniquement si le paquet existe.
+6. la GUI affiche le bouton de téléchargement uniquement si le paquet existe ;
+7. `GET /executions/{id}/evidence-graph` expose la vue bornée ; la colonne plan
+   bascule entre Liste et Graphe SVG local.
 
 Les critères documentaires interdisent notamment les placeholders, doublons et volumes
 insuffisants, et exigent couverture des pièces et références locales selon le profil.

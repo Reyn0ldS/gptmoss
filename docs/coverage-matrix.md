@@ -19,7 +19,7 @@ modules et tests est dans `application-map.json` ; le présent document apporte 
 | Skills/évolution | skills, evolution | bibliothèque, profils, évolution | skills par défaut, création/amélioration | `test_autonomous_evolution`, `test_skills_and_artifacts` |
 | Fournisseur LLM | qwen, politique de fenêtre, reprise execution | test de connexion, diagnostics | URL, clé, modèle, TLS, vision, fenêtre/réserve de contexte | `test_generic_planning_and_context`, `test_provider_integration`, `test_api` |
 | Qualité documentaire | corpus, document_quality | résultats d'exécution | profil professionnel | `test_document_quality`, `test_quality_benchmarks`, `test_corpus` |
-| Assurance logiciel | delivery, artifact_validation | plan, métriques, feed | contrat produit par plan | `test_delivery_assurance`, `test_delivery_benchmarks` |
+| Assurance logiciel | `core/delivery.py`, `core/delivery_feedback.py`, `core/evidence_graph.py`, artifact_validation | plan, métriques, feed, `GET /executions/{id}/evidence-graph` | contrat produit par plan, arêtes typées, reprise ciblée | `test_delivery_assurance`, `test_delivery_benchmarks`, `test_delivery_feedback`, `test_evidence_graph`, `test_plan_graph` |
 | Paquet professionnel | professional_delivery, delivery_package | bouton Télécharger | profil professionnel | `test_professional_delivery` |
 | État/événements | state, event_bus, observability | WebSockets, flux LLM, diagnostics, audit | index + sidecars du workspace | `test_event_bus`, `test_lifecycle_chronology`, `test_state_durability`, `test_runtime_ux` |
 | Offline/release | scripts préparation, manifests source/runtime | scripts BAT/install/start | versions épinglées | `test_offline_source_package`, `test_source_release`, `test_windows_portable_python`, CI archive propre |
@@ -48,9 +48,9 @@ nouvelle clé ne doit pas être considérée couverte par la seule présence JSO
 | Surface GUI | Services indispensables | Retour attendu dans la GUI |
 |---|---|---|
 | Compositeur | projets, artefacts, skills, création exécution | tâche créée, sélection conservée, erreurs explicites |
-| Suivi | liste/détail, feed unifié, WebSocket | statut, plan, étapes, outils, approbations en temps réel |
+| Suivi | liste/détail, feed unifié, WebSocket, onglets Liste/Graphe | statut, plan, topologie `plan.edges`, étapes, outils, approbations en temps réel |
 | Contrôles d'exécution | pause, reprise, annulation, suppression | boutons activés selon l'état réel et retour serveur |
-| Livraison | endpoint delivery | bouton visible uniquement si manifeste/ZIP disponibles |
+| Livraison | endpoint delivery, `GET /executions/{id}/evidence-graph` | bouton visible uniquement si manifeste/ZIP disponibles ; graphe de preuves consultable par API |
 | Bibliothèque | artefacts, recherche, mémoire, skills, diagnostics, audit | inventaire actualisé après chaque mutation |
 | Réglages | lecture, écriture, révélation, test fournisseur | secret masqué, confirmation sensible, diagnostic précis |
 | Serveur | découverte du superviseur et actions de contrôle | état `starting/running/stopped/error`, port et erreur actualisés |

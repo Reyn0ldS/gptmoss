@@ -149,6 +149,16 @@ le consolidateur reçoit leurs résultats validés et non une nouvelle copie du 
 scheduler conserve toutes ces unités mais n'en exécute qu'une vague bornée simultanément,
 automatique avec `max_parallel_plan_steps=0`.
 
+Les arêtes typées (`plan.edges`) expliquent pourquoi une étape dépend d'une autre
+(`produces_for`, `validates`, `repairs`, `consolidates`, `blocks`) sans changer
+l'ordonnancement. Un quality gate documentaire classifie le défaut et rouvre le
+propriétaire : inventaire si la couverture source manque, rédacteur avec
+`replace_paragraph` pour un doublon ou un paragraphe non sourcé, debugger seulement
+pour un défaut logiciel. `GET /executions/{id}/evidence-graph` projette inventaires,
+lectures, images et citations en un graphe borné unifié par SHA-256 ; ce n'est pas
+un dump de `tool_call_history`. Dans la GUI, l'onglet **Graphe** de la colonne plan
+dessine cette topologie localement ; **Liste** reste la vue détaillée.
+
 L'identité canonique d'une source vient toujours du stockage d'artefacts. Pour un dossier,
 le chemin relatif complet remplace donc les éventuels basenames proposés par le planner
 dans toutes les politiques documentaires fondées sur les sources ; inventaire, analyses
