@@ -195,6 +195,7 @@ class ExecutionProgressMixin:
                     int(metrics.get("duplicate_headings") or 0)
                     - int(constraints.get("max_duplicate_headings") or 0),
                 ),
+                max(0, int(metrics.get("heading_number_restarts") or 0)),
                 max(0, int(metrics.get("invalid_record_sections") or 0)),
                 max(0, int(metrics.get("missing_record_section_ids") or 0)),
                 max(0, int(metrics.get("unsupported_claim_paragraphs") or 0)),

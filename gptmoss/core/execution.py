@@ -718,6 +718,7 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
         replacement_markers = (
             "citation-like pattern",
             "external link", "placeholder marker", "reasoning tag",
+            "heading numbering restart",
         )
         section_markers = ("record section", "invalid diagram")
         append_markers = (

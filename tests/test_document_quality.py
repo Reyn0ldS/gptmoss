@@ -200,6 +200,41 @@ Second section.
     assert "alternatives, risks" in failures
 
 
+def test_document_policy_rejects_a_second_numbered_section_series(tmp_path):
+    document = tmp_path / "architecture.md"
+    document.write_text(
+        "# Architecture\n\n## 1. Context\n\nA.\n\n## 2. Data\n\nB.\n\n"
+        "## 3. Runtime\n\nC.\n\n## 2. Interfaces bis\n\nAppended duplicate series.\n",
+        encoding="utf-8",
+    )
+
+    report = validate_artifact(
+        document, validator="document",
+        constraints={"reject_heading_number_restarts": True},
+    )
+
+    assert not report["valid"]
+    assert report["metrics"]["heading_number_restarts"] == 1
+    assert "## 2. Interfaces bis (number 2 after 3)" in "\n".join(report["failures"])
+
+
+def test_document_policy_allows_nested_numbering_to_restart(tmp_path):
+    document = tmp_path / "architecture.md"
+    document.write_text(
+        "# Architecture\n\n## 1. Context\n\n### 1. Scope\n\n### 2. Actors\n\n"
+        "## 2. Data\n\n### 1. Sources\n\n### 2. Flows\n",
+        encoding="utf-8",
+    )
+
+    report = validate_artifact(
+        document, validator="document",
+        constraints={"reject_heading_number_restarts": True},
+    )
+
+    assert report["valid"]
+    assert report["metrics"]["heading_number_restarts"] == 0
+
+
 def test_professional_document_rejects_incorrect_integer_sum_with_repair_prefix(tmp_path):
     document = tmp_path / "inventory.md"
     document.write_text(

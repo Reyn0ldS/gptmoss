@@ -41,6 +41,7 @@ RENDER_REWRITE_MARKERS = (
     "external link",
     "placeholder marker",
     "reasoning tag",
+    "heading numbering restart",
 )
 RENDER_APPEND_MARKERS = (
     "words=",

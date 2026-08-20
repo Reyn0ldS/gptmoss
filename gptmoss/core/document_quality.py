@@ -408,6 +408,34 @@ def validate_document(path: Path, constraints: Dict[str, Any]) -> ValidationRepo
                 + "; ".join(duplicate_heading_samples[:10]),
             )
 
+    heading_number_restarts: List[str] = []
+    if constraints.get("reject_heading_number_restarts"):
+        numbered_headings = []
+        for _, level, title in headings:
+            number_match = re.match(r"^\s*(\d+)\s*[.)-]?\s+", title)
+            if not number_match:
+                continue
+            numbered_headings.append((level, title, int(number_match.group(1))))
+        # Nested lists of sections commonly restart below each parent.  Only the
+        # shallowest numbered heading level represents the document-wide series.
+        primary_level = min((item[0] for item in numbered_headings), default=None)
+        previous = None
+        for level, title, number in numbered_headings:
+            if level != primary_level:
+                continue
+            if previous is not None and number <= previous:
+                heading_number_restarts.append(
+                    f"{'#' * level} {title} (number {number} after {previous})"
+                )
+            previous = number
+        if heading_number_restarts:
+            _failure(
+                report,
+                f"document contains {len(heading_number_restarts)} heading numbering "
+                "restart(s), suggesting an appended duplicate section series: "
+                + "; ".join(heading_number_restarts[:10]),
+            )
+
     record_policy = constraints.get("record_section_policy")
     record_sections_total = 0
     invalid_record_sections: List[Tuple[str, List[str]]] = []
@@ -749,6 +777,7 @@ def validate_document(path: Path, constraints: Dict[str, Any]) -> ValidationRepo
         "placeholder_markers": len(placeholder_hits),
         "duplicate_paragraphs": duplicate_count,
         "duplicate_headings": duplicate_heading_count,
+        "heading_number_restarts": len(heading_number_restarts),
         "record_sections": record_sections_total,
         "invalid_record_sections": len(invalid_record_sections),
         "missing_record_section_ids": len(missing_record_ids),
