@@ -51,6 +51,16 @@ def test_classify_duplicate_paragraph_targets_writer_paragraph_tool():
     assert select_reopen_step(_plan(), target)["role"] == "writer"
 
 
+def test_classify_code_wrapped_citations_authorizes_document_rewrite():
+    target = classify_issue_texts([
+        "48 citation-like pattern(s) inside Markdown code do not count as evidence; "
+        "write actual citations without backticks or code fences",
+    ])
+    assert target.obligation == DOCUMENT_RENDER
+    assert target.required_tool == "filesystem__write"
+    assert select_reopen_step(_plan(), target)["role"] == "writer"
+
+
 def test_classify_cli_smoke_keeps_debugger_fallback():
     target = classify_assurance_report({
         "passed": False, "checks": [], "failures": ["CLI smoke failed"],

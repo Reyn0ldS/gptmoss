@@ -849,6 +849,55 @@ async def test_specialist_cannot_globally_overwrite_existing_document_without_ga
 
 
 @pytest.mark.asyncio
+async def test_retry_child_can_rewrite_code_wrapped_citations_reported_by_gate(
+    tmp_path,
+):
+    engine, state = _engine(tmp_path)
+    execution = state.get_execution("citation-retry")
+    execution.variables["role_key"] = "architect"
+    execution.variables["delegated_step"] = {
+        "retry_context": (
+            "Current machine gate failures: dossier.md: 48 citation-like pattern(s) "
+            "inside Markdown code do not count as evidence; write actual citations "
+            "without backticks or code fences"
+        ),
+    }
+    execution.current_plan = {
+        "steps": [{
+            "id": 0,
+            "role": "architect",
+            "required_artifacts": ["dossier.md"],
+            "owned_paths": ["dossier.md"],
+        }],
+        "artifact_validations": [{
+            "path": "dossier.md",
+            "validator": "document",
+            "constraints": {"require_local_references": True},
+        }],
+    }
+    execution.current_step = 0
+    project = tmp_path / "projects" / "proj-default"
+    project.mkdir(parents=True)
+    target = project / "dossier.md"
+    target.write_text(
+        "Evidence: `[source.md > Scope > blocks 1-2]`", encoding="utf-8",
+    )
+
+    allowed = await engine._call_tool(
+        "citation-retry", "filesystem", "write",
+        {
+            "path": "dossier.md",
+            "content": "Evidence: [source.md > Scope > blocks 1-2]",
+        },
+    )
+
+    assert "written successfully" in allowed
+    assert target.read_text(encoding="utf-8") == (
+        "Evidence: [source.md > Scope > blocks 1-2]"
+    )
+
+
+@pytest.mark.asyncio
 async def test_targeted_repair_must_use_a_machine_reported_prefix(tmp_path):
     engine, state = _engine(tmp_path)
     execution = state.get_execution("guarded-targeted-repair")

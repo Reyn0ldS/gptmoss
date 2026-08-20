@@ -32,6 +32,7 @@ RENDER_TARGETED_MARKERS = (
 )
 RENDER_REWRITE_MARKERS = (
     "invalid local reference",
+    "citation-like pattern",
     "external link",
     "placeholder marker",
     "reasoning tag",

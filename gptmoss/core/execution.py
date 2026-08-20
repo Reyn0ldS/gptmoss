@@ -703,7 +703,8 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
             "duplicate paragraph", "invalid local reference", "lack a local reference",
         )
         replacement_markers = (
-            "external link", "placeholder marker", "reasoning tag",
+            "citation-like pattern", "external link", "placeholder marker",
+            "reasoning tag",
         )
         if not any(
             marker in issue
@@ -2975,6 +2976,8 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
                 "delivery response. Do not invoke repository-only validator scripts or fabricate constraints/report inputs. "
                 "Create and read back only your owned artifacts, then return the structured response to trigger validation; "
                 "if the engine rejects it, repair the reported violations and retry."
+                " Write bounded local evidence citations as plain Markdown text such as "
+                "[source.ext > Section > blocks 1-3], never inside inline-code backticks or code fences."
                 f"\nLong-document checkpoint: {json.dumps(state.variables.get('document_model_checkpoint', ''), ensure_ascii=False)}."
                 f"\nSection progress: {json.dumps(state.variables.get('document_sections', []), ensure_ascii=False)}."
                 f"\nDocument continuity memory: {state.variables.get('document_memory', 'none')}."
@@ -3376,7 +3379,24 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
         step_id = str(steps[index].get("id", index))
         runtimes = state.variables.get("step_runtime")
         runtime = runtimes.get(step_id) if isinstance(runtimes, dict) else None
-        return str(runtime.get("required_next_tool") or "") if isinstance(runtime, dict) else ""
+        required = (
+            str(runtime.get("required_next_tool") or "")
+            if isinstance(runtime, dict) else ""
+        )
+        if required:
+            return required
+        delegated = state.variables.get("delegated_step")
+        retry_context = (
+            str(delegated.get("retry_context") or "")
+            if isinstance(delegated, dict) else ""
+        )
+        if not retry_context:
+            return ""
+        # The parent builds retry_context exclusively from the preceding
+        # machine gate. A fresh child may therefore inspect first, then use
+        # the exact repair that gate authorized without weakening normal
+        # overwrite protection.
+        return str(classify_issue_texts([retry_context]).required_tool or "")
 
     @staticmethod
     def _active_required_repair_issues(state) -> List[str]:
@@ -3389,12 +3409,22 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
         step_id = str(steps[index].get("id", index))
         runtimes = state.variables.get("step_runtime")
         runtime = runtimes.get(step_id) if isinstance(runtimes, dict) else None
-        if not isinstance(runtime, dict):
-            return []
-        return [
-            str(item) for item in runtime.get("required_repair_issues", [])
-            if str(item).strip()
-        ]
+        issues = (
+            [
+                str(item) for item in runtime.get("required_repair_issues", [])
+                if str(item).strip()
+            ]
+            if isinstance(runtime, dict) else []
+        )
+        if issues:
+            return issues
+        delegated = state.variables.get("delegated_step")
+        retry_context = (
+            str(delegated.get("retry_context") or "")
+            if isinstance(delegated, dict) else ""
+        )
+        target = classify_issue_texts([retry_context]) if retry_context else None
+        return [retry_context] if target and target.required_tool else []
 
     @staticmethod
     def _shell_requests_deletion(command: str) -> bool:
