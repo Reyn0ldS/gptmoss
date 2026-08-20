@@ -28,11 +28,14 @@ INVENTORY_MARKERS = (
 )
 RENDER_TARGETED_MARKERS = (
     "duplicate paragraph",
+    "duplicate heading",
     "lack a local reference",
 )
 RENDER_REWRITE_MARKERS = (
     "invalid local reference",
+    "invalid diagram",
     "citation-like pattern",
+    "record section",
     "external link",
     "placeholder marker",
     "reasoning tag",
@@ -40,6 +43,9 @@ RENDER_REWRITE_MARKERS = (
 RENDER_APPEND_MARKERS = (
     "words=",
     "empty required section",
+    "uncited required source",
+    "cited_sources=",
+    "local_references=",
 )
 SOFTWARE_MARKERS = (
     "static integration",

@@ -367,6 +367,113 @@ def validate_document(path: Path, constraints: Dict[str, Any]) -> ValidationRepo
     if empty_headings:
         _failure(report, "empty required section(s): " + ", ".join(empty_headings))
 
+    duplicate_heading_count = 0
+    duplicate_heading_samples: List[str] = []
+    if "max_duplicate_headings" in constraints:
+        max_duplicate_headings = _positive_int(
+            constraints.get("max_duplicate_headings"),
+            "max_duplicate_headings",
+            0,
+        )
+        heading_counts = Counter(
+            (level, _fold(title)) for _, level, title in headings
+        )
+        duplicate_heading_count = sum(
+            count - 1 for count in heading_counts.values() if count > 1
+        )
+        duplicate_heading_samples = [
+            title
+            for _, level, title in headings
+            if heading_counts[(level, _fold(title))] > 1
+        ]
+        duplicate_heading_samples = list(dict.fromkeys(duplicate_heading_samples))
+        if duplicate_heading_count > max_duplicate_headings:
+            _failure(
+                report,
+                f"document contains {duplicate_heading_count} duplicate heading occurrence(s); "
+                f"maximum is {max_duplicate_headings}; repeated heading(s): "
+                + "; ".join(duplicate_heading_samples[:10]),
+            )
+
+    record_policy = constraints.get("record_section_policy")
+    record_sections_total = 0
+    invalid_record_sections: List[Tuple[str, List[str]]] = []
+    missing_record_ids: List[str] = []
+    if record_policy is not None:
+        if not isinstance(record_policy, dict):
+            raise TypeError("record_section_policy must be an object")
+        heading_pattern = str(record_policy.get("heading_pattern") or "").strip()
+        if not heading_pattern:
+            raise ValueError("record_section_policy.heading_pattern is required")
+        try:
+            record_heading = re.compile(heading_pattern, flags=re.IGNORECASE)
+        except re.error as error:
+            raise ValueError(
+                f"record_section_policy.heading_pattern is invalid: {error}"
+            ) from error
+        required_fields = record_policy.get("required_fields") or {}
+        if not isinstance(required_fields, dict):
+            raise TypeError("record_section_policy.required_fields must be an object")
+        normalized_fields: Dict[str, List[str]] = {}
+        for field_name, aliases in required_fields.items():
+            if not isinstance(field_name, str):
+                raise TypeError("record_section_policy field names must be strings")
+            normalized_fields[field_name] = _strings(
+                aliases,
+                f"record_section_policy.required_fields.{field_name}",
+            )
+        matched_records = [
+            (index, title)
+            for index, (_, _, title) in enumerate(headings)
+            if record_heading.search(title)
+        ]
+        record_sections_total = len(matched_records)
+        minimum_records = _positive_int(
+            record_policy.get("minimum_records"),
+            "record_section_policy.minimum_records",
+            1,
+        )
+        if record_sections_total < minimum_records:
+            _failure(
+                report,
+                f"record section count={record_sections_total} is below required minimum "
+                f"{minimum_records} for heading pattern {heading_pattern!r}",
+            )
+        required_record_ids = _strings(
+            record_policy.get("required_record_ids"),
+            "record_section_policy.required_record_ids",
+        )
+        matched_titles = "\n".join(title for _, title in matched_records)
+        missing_record_ids = [
+            identifier for identifier in required_record_ids
+            if not _contains_identifier(matched_titles, identifier)
+        ]
+        if missing_record_ids:
+            _failure(
+                report,
+                "required record heading ID(s) missing: "
+                + ", ".join(missing_record_ids),
+            )
+        for index, title in matched_records:
+            section = _fold(_section_text(lines, headings, index))
+            missing_fields = [
+                field_name
+                for field_name, aliases in normalized_fields.items()
+                if aliases and not any(_fold(alias) in section for alias in aliases)
+            ]
+            if missing_fields:
+                invalid_record_sections.append((title, missing_fields))
+        if invalid_record_sections:
+            details = "; ".join(
+                f"{title!r} missing {', '.join(fields)}"
+                for title, fields in invalid_record_sections[:12]
+            )
+            _failure(
+                report,
+                f"{len(invalid_record_sections)} record section(s) violate the declared "
+                f"semantic schema: {details}",
+            )
+
     missing_ids = [
         identifier for identifier in required_ids if not _contains_identifier(text, identifier)
     ]
@@ -628,6 +735,10 @@ def validate_document(path: Path, constraints: Dict[str, Any]) -> ValidationRepo
         "invalid_diagrams": len(invalid_diagrams),
         "placeholder_markers": len(placeholder_hits),
         "duplicate_paragraphs": duplicate_count,
+        "duplicate_headings": duplicate_heading_count,
+        "record_sections": record_sections_total,
+        "invalid_record_sections": len(invalid_record_sections),
+        "missing_record_section_ids": len(missing_record_ids),
         "unsupported_claim_paragraphs": len(unsupported_claims),
         "arithmetic_mismatches": len(arithmetic_mismatches),
         "inventory_total_mismatches": len(inventory_total_mismatches),

@@ -61,6 +61,23 @@ def test_classify_code_wrapped_citations_authorizes_document_rewrite():
     assert select_reopen_step(_plan(), target)["role"] == "writer"
 
 
+def test_classify_missing_source_coverage_requires_append_not_ungated_edits():
+    target = classify_issue_texts([
+        "uncited required source file(s): source-a.docx, source-b.pptx; "
+        "cited_sources=3 is below required minimum 5",
+    ])
+    assert target.obligation == DOCUMENT_RENDER
+    assert target.required_tool == "filesystem__append"
+
+
+def test_classify_semantically_incomplete_records_requires_clean_rewrite():
+    target = classify_issue_texts([
+        "4 record section(s) violate the declared semantic schema",
+    ])
+    assert target.obligation == DOCUMENT_RENDER
+    assert target.required_tool == "filesystem__write"
+
+
 def test_classify_cli_smoke_keeps_debugger_fallback():
     target = classify_assurance_report({
         "passed": False, "checks": [], "failures": ["CLI smoke failed"],

@@ -171,6 +171,13 @@ def test_document_capability_search_read_and_read_chunk_keep_provenance(tmp_path
     assert first_page["has_more"] is True
     assert first_page["next_start"] == 1
     assert first_page["blocks"][0]["provenance"]["source_name"] == "architecture.md"
+    assert first_page["blocks"][0]["citation"].startswith(
+        "[architecture.md > Architecture > blocks 1-1]"
+    )
+    assert "one-based" in first_page["citation_convention"]
+    assert first["citation"].startswith("[architecture.md >")
+    assert "blocks 2-3" in first["citation"]
+    assert chunk["citation"].startswith("[architecture.md >")
 
 
 def test_document_capability_refuses_unattached_document_access(tmp_path: Path):

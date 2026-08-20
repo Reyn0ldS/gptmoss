@@ -18,6 +18,69 @@ from gptmoss.core.execution_plan import (
 
 
 class ExecutionProgressMixin:
+    def _reopen_invalid_completed_steps(
+        self, execution_id: str, state, steps: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        """Reopen persisted work invalidated by stronger deterministic gates.
+
+        Profile upgrades are intentionally applied on resume. Completed steps
+        must not bypass those new gates: reopen the invalid producer and every
+        transitive consumer while preserving their durable files for repair.
+        """
+        invalid: Dict[str, List[str]] = {}
+        for step in steps:
+            if step.get("status") != "completed":
+                continue
+            issues = self._step_artifact_validation_issues(execution_id, step)
+            if issues:
+                invalid[str(step.get("id"))] = issues
+        if not invalid:
+            return []
+
+        affected = set(invalid)
+        changed = True
+        while changed:
+            changed = False
+            for step in steps:
+                identifier = str(step.get("id"))
+                dependencies = {str(item) for item in step.get("dependencies", [])}
+                if identifier not in affected and dependencies & affected:
+                    affected.add(identifier)
+                    changed = True
+
+        reopened: List[Dict[str, Any]] = []
+        stored_steps = state.results.get("steps")
+        for step in steps:
+            identifier = str(step.get("id"))
+            if identifier not in affected:
+                continue
+            own_issues = invalid.get(identifier)
+            step["status"] = "pending"
+            step.pop("assigned_execution_id", None)
+            step.pop("delivery", None)
+            step.pop("result", None)
+            step.pop("error", None)
+            step.pop("validation_passed", None)
+            if own_issues:
+                step["retry_context"] = (
+                    "A deterministic profile upgrade invalidated this persisted artifact. "
+                    "Preserve valid content and repair these machine-observed defects:\n"
+                    + "; ".join(own_issues)
+                )[:12_000]
+            else:
+                step["retry_context"] = (
+                    "A completed upstream artifact was reopened by stronger deterministic "
+                    "quality gates. Reuse its corrected result and refresh this dependent "
+                    "artifact without trusting stale conclusions."
+                )
+            if isinstance(stored_steps, dict):
+                stored_steps.pop(identifier, None)
+            reopened.append(step)
+        state.current_step = sum(
+            1 for step in steps if step.get("status") == "completed"
+        )
+        return reopened
+
     def _artifact_quality_defects(
         self, execution_id: str, step: Dict[str, Any]
     ) -> tuple:
@@ -65,6 +128,13 @@ class ExecutionProgressMixin:
                     int(metrics.get("duplicate_paragraphs") or 0)
                     - int(constraints.get("max_duplicate_paragraphs") or 0),
                 ),
+                max(
+                    0,
+                    int(metrics.get("duplicate_headings") or 0)
+                    - int(constraints.get("max_duplicate_headings") or 0),
+                ),
+                max(0, int(metrics.get("invalid_record_sections") or 0)),
+                max(0, int(metrics.get("missing_record_section_ids") or 0)),
                 max(0, int(metrics.get("unsupported_claim_paragraphs") or 0)),
                 max(0, int(metrics.get("placeholder_markers") or 0)),
                 (

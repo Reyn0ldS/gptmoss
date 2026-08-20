@@ -41,6 +41,7 @@ from gptmoss.core.delivery_feedback import (
 from gptmoss.core.plan_obligations import attach_plan_obligations
 from gptmoss.core.corpus_policy import normalize_corpus_policy
 from gptmoss.core.professional_delivery import apply_professional_profile
+from gptmoss.core.document_planning import optimize_professional_document_dag
 from gptmoss.core.delivery_package import build_delivery_package
 from gptmoss.core.delivery_coordinator import DeliveryCoordinator
 from gptmoss.core.approval_coordinator import ApprovalCoordinator
@@ -700,11 +701,15 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
         """Return the exact mutation required to repair a long writer delivery."""
         targeted_markers = (
             "arithmetic sum mismatch", "source inventory total mismatch",
-            "duplicate paragraph", "invalid local reference", "lack a local reference",
+            "duplicate paragraph", "duplicate heading", "invalid local reference",
+            "lack a local reference",
         )
         replacement_markers = (
-            "citation-like pattern", "external link", "placeholder marker",
-            "reasoning tag",
+            "citation-like pattern", "invalid diagram", "record section",
+            "external link", "placeholder marker", "reasoning tag",
+        )
+        append_markers = (
+            "uncited required source", "cited_sources=", "local_references=",
         )
         if not any(
             marker in issue
@@ -713,6 +718,7 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
                 "words=", "empty required section", "lack a local reference",
                 *targeted_markers,
                 *replacement_markers,
+                *append_markers,
             )
         ):
             return ""
@@ -724,6 +730,8 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
             return "filesystem__replace_paragraph"
         if any(marker in issue for issue in issues for marker in replacement_markers):
             return "filesystem__write"
+        if any(marker in issue for issue in issues for marker in append_markers):
+            return "filesystem__append"
         exists = self._artifact_exists(execution_id, target)
         return "filesystem__append" if exists else "filesystem__write"
 
@@ -756,9 +764,20 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
                 "paragraph per iteration; never rewrite or delete the whole document."
             )
         if action == "filesystem__append":
-            continuity = (
-                "Preserve the existing valid content and append the next missing or underdeveloped section"
-            )
+            if any(
+                marker in str(issue).casefold()
+                for issue in issues
+                for marker in ("uncited required source", "cited_sources=", "local_references=")
+            ):
+                continuity = (
+                    "Preserve the existing valid content and append one concise evidence-coverage "
+                    "section citing every currently missing source exactly once with a plain, "
+                    "one-based bounded locator from source_inventory"
+                )
+            else:
+                continuity = (
+                    "Preserve the existing valid content and append the next missing or underdeveloped section"
+                )
         elif self._artifact_exists(execution_id, target):
             continuity = (
                 "Replace the defective document with only the first clean, complete section; "
@@ -1553,6 +1572,7 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
                 self.artifact_store,
                 state.variables.get("attachment_ids", []),
             )
+            plan_result = optimize_professional_document_dag(plan_result)
             plan_result["corpus_policy"] = dict(
                 state.variables.get("corpus_policy") or {}
             )
@@ -1597,6 +1617,7 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
             self.artifact_store,
             state.variables.get("attachment_ids", []),
         )
+        state.current_plan = optimize_professional_document_dag(state.current_plan)
         self._initialize_document_state(execution_id, task, state.current_plan, state)
         # Rebuild after deterministic profile upgrades. A persisted contract
         # must never keep weaker validations or stale requirement ownership.
@@ -1604,6 +1625,17 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
             state.current_plan, task,
             repair_obligations=not bool(state.variables.get("parent_execution_id")),
         )
+        if not state.variables.get("parent_execution_id"):
+            reopened = self._reopen_invalid_completed_steps(
+                execution_id,
+                state,
+                state.current_plan.get("steps", []),
+            )
+            if reopened:
+                self.telemetry.record(
+                    "persisted_steps_reopened", execution_id,
+                    step_ids=[step.get("id") for step in reopened],
+                )
         delivery_contract = state.variables["delivery_contract"]
         scope_changes = delivery_contract.get("scope_changes", [])
         approved_contract = state.variables.get("approved_scope_contract_sha256")
@@ -2977,7 +3009,11 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
                 "Create and read back only your owned artifacts, then return the structured response to trigger validation; "
                 "if the engine rejects it, repair the reported violations and retry."
                 " Write bounded local evidence citations as plain Markdown text such as "
-                "[source.ext > Section > blocks 1-3], never inside inline-code backticks or code fences."
+                "[source.ext > Section > blocks 1-3], never inside inline-code backticks or code fences. "
+                "Citation bounds are strictly one-based and inclusive even though documents.read "
+                "start_block and returned block.order values are zero-based. Use only `blocks N-M` "
+                "for documents or `slide N`/`slides N-M` for presentations; never use `sections`, "
+                "zero bounds, raw tool offsets, or a range outside source_inventory."
                 f"\nLong-document checkpoint: {json.dumps(state.variables.get('document_model_checkpoint', ''), ensure_ascii=False)}."
                 f"\nSection progress: {json.dumps(state.variables.get('document_sections', []), ensure_ascii=False)}."
                 f"\nDocument continuity memory: {state.variables.get('document_memory', 'none')}."

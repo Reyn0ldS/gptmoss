@@ -7,7 +7,11 @@ import httpx
 
 from gptmoss.api.server import app, app_state
 from gptmoss.core.document_model import DocumentModel, DocumentModelStore, EvidenceReference
-from gptmoss.core.document_planning import adapt_document_steps, estimate_document_work
+from gptmoss.core.document_planning import (
+    adapt_document_steps,
+    estimate_document_work,
+    optimize_professional_document_dag,
+)
 from gptmoss.core.execution import ExecutionEngine
 from gptmoss.core.long_document_engine import LongDocumentEngine
 from gptmoss.core.state import StateEngine
@@ -109,6 +113,42 @@ def test_document_work_is_adaptive_for_small_requests():
         not step["dependencies"] or max(step["dependencies"]) < step["id"]
         for step in plan["steps"]
     )
+
+
+def test_document_analysis_tracks_form_a_real_parallel_wave():
+    task = (
+        "Analyse source-a.docx, source-b.docx et source-c.docx, puis produis "
+        "un dossier architecture.md avec diagrammes et une matrice de traçabilité."
+    )
+    analysis = analyze_task_complexity(task)
+    plan = SimplePlanner._document_fallback(task, analysis)
+    by_specialist = {step["specialist"]: step for step in plan["steps"]}
+    decisions = by_specialist["Architecture Decision Analyst"]
+    application = by_specialist["Application, Integration & Data Architect"]
+
+    assert decisions["dependencies"] == application["dependencies"]
+    assert len(decisions["dependencies"]) >= 1
+    assert decisions["id"] not in application["dependencies"]
+    assert application["id"] not in decisions["dependencies"]
+
+
+def test_persisted_professional_chain_is_upgraded_to_parallel_analysis_wave():
+    plan = {
+        "delivery_profile": "professional-local",
+        "steps": [
+            {"id": 0, "specialist": "Local Corpus Evidence Analyst", "dependencies": []},
+            {"id": 1, "specialist": "Requirements & Traceability Architect", "dependencies": [0]},
+            {"id": 2, "specialist": "Architecture Decision Analyst", "dependencies": [0, 1]},
+            {"id": 3, "specialist": "Application, Integration & Data Architect", "dependencies": [1, 2]},
+            {"id": 4, "specialist": "Professional Architecture Dossier Editor", "dependencies": [1, 2, 3]},
+        ],
+    }
+
+    optimize_professional_document_dag(plan)
+
+    assert plan["steps"][2]["dependencies"] == [0, 1]
+    assert plan["steps"][3]["dependencies"] == [0, 1]
+    assert plan["steps"][4]["dependencies"] == [0, 1, 2, 3]
 
 
 def test_page_range_contributes_a_real_long_form_word_budget():

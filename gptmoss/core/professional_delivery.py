@@ -147,11 +147,13 @@ def apply_professional_profile(
         validations = []
         plan["artifact_validations"] = validations
     text_paths = []
+    text_owners: Dict[str, Dict[str, Any]] = {}
     for step in plan.get("steps", []):
         for path in step.get("required_artifacts", []):
             normalized = str(path).replace("\\", "/")
             if normalized.lower().endswith((".md", ".txt", ".html")):
                 text_paths.append(normalized)
+                text_owners[normalized] = step
     primary = str(plan.get("primary_artifact") or "")
     if not primary:
         primary = next(
@@ -192,6 +194,8 @@ def apply_professional_profile(
         constraints["forbid_placeholders"] = True
         constraints["validate_arithmetic"] = True
         constraints["max_duplicate_paragraphs"] = 0
+        constraints["max_duplicate_headings"] = 0
+        constraints["reject_invalid_diagrams"] = True
         constraints.setdefault("duplicate_min_words", 12)
         minimums = constraints.setdefault("minimums", {})
         if not isinstance(minimums, dict):
@@ -202,6 +206,37 @@ def apply_professional_profile(
             int(minimums.get("words") or 0),
             primary_minimum_words if path == primary else support_floor,
         )
+        owner = text_owners.get(path, {})
+        owner_blob = " ".join((
+            str(owner.get("specialist") or ""),
+            str(owner.get("description") or ""),
+            path,
+        )).casefold()
+        if "decision" in owner_blob or "adr" in owner_blob:
+            constraints["record_section_policy"] = {
+                "heading_pattern": r"\b(?:DEC|ADR)-\d{3}\b",
+                "minimum_records": 1,
+                "required_fields": {
+                    "context": ["contexte", "context"],
+                    "drivers": ["facteurs", "drivers", "motivations", "critères"],
+                    "alternatives": ["alternative", "options"],
+                    "decision": ["décision", "decision"],
+                    "consequences": ["conséquence", "consequence", "impact"],
+                    "risks": ["risque", "risk"],
+                    "owner": ["propriétaire", "responsable", "owner"],
+                    "validation_status": [
+                        "statut de validation", "validation status", "validation",
+                    ],
+                },
+            }
+        if requested_diagrams and any(
+            marker in owner_blob
+            for marker in ("application", "integration", "data architect")
+        ):
+            minimums["valid_diagrams"] = max(
+                int(minimums.get("valid_diagrams") or 0),
+                min(2, requested_diagrams),
+            )
         source_grounded = bool(
             path == primary
             or constraints.get("source_inventory")

@@ -119,7 +119,7 @@ $execution = Invoke-RestMethod -Method Post -Uri 'http://127.0.0.1:8000/executio
 
 La capability `documents` ne peut inventorier, rechercher et lire que les identifiants présents dans `attachment_ids`. Une autre exécution ne gagne donc pas implicitement accès à tout le corpus stocké. `documents.read` et le filtre de `documents.search` acceptent l'`artifact_id` recommandé, mais aussi le nom de fichier exact ou l'empreinte `document_id` renvoyés par l'inventaire. Ces alias sont résolus uniquement parmi les pièces jointes de l'exécution ; un identifiant inventé, ambigu ou appartenant à un autre corpus reste refusé et l'erreur rappelle les références autorisées.
 
-L'inventaire distingue explicitement deux systèmes de coordonnées. `normalized_block_offsets` décrit les offsets à base zéro attendus par `documents.read start_block`. `citation_bounds` décrit les bornes à base un autorisées dans les références du livrable. Pour un PPTX, ces bornes utilisent les numéros de diapositives déclarés par le document, y compris une diapositive sans bloc textuel ; elles ne doivent jamais être déduites du nombre ou de l'ordre des blocs normalisés.
+L'inventaire distingue explicitement deux systèmes de coordonnées. `normalized_block_offsets` décrit les offsets à base zéro attendus par `documents.read start_block`. `citation_bounds` décrit les bornes à base un autorisées dans les références du livrable. Pour éviter toute conversion laissée au modèle, chaque résultat de `documents.search`, chaque bloc de `documents.read` et chaque `documents.read_chunk` contient aussi un champ `citation` prêt à copier en Markdown simple. Pour un PPTX, ces citations utilisent les numéros de diapositives déclarés par le document, y compris une diapositive sans bloc textuel ; elles ne sont jamais déduites du nombre ou de l'ordre des blocs normalisés. Les pseudo-locators `sections`, une borne zéro ou une citation entourée de backticks sont refusés.
 
 ## Fonctionnement interne
 
@@ -150,7 +150,11 @@ justifie, il remplace uniquement l'opération source par des partitions stables 
 persistance 128) puis une consolidation. Chaque pièce appartient à une seule partition ;
 le consolidateur reçoit leurs résultats validés et non une nouvelle copie du corpus. Le
 scheduler conserve toutes ces unités mais n'en exécute qu'une vague bornée simultanément,
-automatique avec `max_parallel_plan_steps=0`.
+automatique avec `max_parallel_plan_steps=0`. Dans le plan professionnel, décisions et
+architecture application/intégration/données forment une même vague après inventaire et
+exigences ; sécurité et plateforme/SRE forment la vague suivante lorsqu'elles sont présentes.
+La suppression adaptative d'une étape facultative conserve ses ancêtres causaux et n'ajoute
+jamais une dépendance artificielle vers l'étape précédente.
 
 Les arêtes typées (`plan.edges`) expliquent pourquoi une étape dépend d'une autre
 (`produces_for`, `validates`, `repairs`, `consolidates`, `blocks`) sans changer
@@ -204,7 +208,7 @@ Pour une revue exhaustive, l'agent tient une matrice contenant au minimum : iden
 
 ## Politique qualité déclarative
 
-Le plan peut déclarer un validateur `document` dans `artifact_validations`. Chaque politique est appliquée immédiatement à l'artefact produit avant tout handoff, puis lors de l'audit final. Le fallback de rédaction professionnelle crée aussi des politiques pour l'inventaire, les matrices, les analyses spécialisées, les registres et les rapports JSON/Markdown : un simple fichier non vide ne suffit donc plus. Les locators bornés acceptent `block/blocks`, `bloc/blocs`, `slide` et `diapositive`, sans changer les bornes numériques exigées. La même politique peut être enregistrée dans `quality-policy.json` :
+Le plan peut déclarer un validateur `document` dans `artifact_validations`. Chaque politique est appliquée immédiatement à l'artefact produit avant tout handoff, puis lors de l'audit final. Le fallback de rédaction professionnelle crée aussi des politiques pour l'inventaire, les matrices, les analyses spécialisées, les registres et les rapports JSON/Markdown : un simple fichier non vide ne suffit donc plus. Il refuse également les titres répétés et tout diagramme présent mais invalide. Les registres DEC/ADR doivent compléter, dans chaque fiche, contexte, facteurs, alternatives, décision, conséquences, risques, responsable et statut de validation. À la reprise, un artefact terminé qui échoue à une politique renforcée rouvre automatiquement son producteur et les consommateurs qui dépendaient de son ancien contenu. Les locators bornés acceptent `block/blocks`, `bloc/blocs`, `slide` et `diapositive`, sans changer les bornes numériques exigées. La même politique peut être enregistrée dans `quality-policy.json` :
 
 ```json
 {

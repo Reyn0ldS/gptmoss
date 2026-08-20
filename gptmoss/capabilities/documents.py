@@ -36,6 +36,32 @@ class DocumentCapability:
     def _json(value: Any) -> str:
         return json.dumps(value, ensure_ascii=False, sort_keys=True)
 
+    @staticmethod
+    def _citation(
+        filename: str,
+        heading_path: Any,
+        start_order: int,
+        end_order: int,
+        provenance: Any = (),
+    ) -> str:
+        """Render a validator-ready, one-based local evidence locator."""
+        headings = [str(item).strip() for item in (heading_path or []) if str(item).strip()]
+        section = " / ".join(headings) or "(root)"
+        slides = sorted({
+            int(item.get("slide_number"))
+            for item in (provenance or [])
+            if isinstance(item, dict) and item.get("slide_number") is not None
+        })
+        if slides:
+            locator = (
+                f"slide {slides[0]}"
+                if len(slides) == 1
+                else f"slides {slides[0]}-{slides[-1]}"
+            )
+        else:
+            locator = f"blocks {int(start_order) + 1}-{int(end_order) + 1}"
+        return f"[{filename} > {section} > {locator}]"
+
     def _resolve_attached(
         self,
         reference: str,
@@ -319,6 +345,13 @@ class DocumentCapability:
         used = 0
         for result in results:
             item = dict(result)
+            item["citation"] = self._citation(
+                str(item.get("filename") or ""),
+                item.get("heading_path"),
+                int(item.get("start_order") or 0),
+                int(item.get("end_order") or 0),
+                item.get("provenance"),
+            )
             text = str(item.get("text") or "")
             allowance = max(600, min(2_400, budget - used))
             if len(text) > allowance:
@@ -360,6 +393,17 @@ class DocumentCapability:
         count = max(1, min(int(block_count), 200))
         selected = document.blocks[start : start + count]
         next_start = start + len(selected)
+        rendered_blocks = []
+        for block in selected:
+            item = block.to_dict()
+            item["citation"] = self._citation(
+                document.filename,
+                block.heading_path,
+                block.order,
+                block.order,
+                [block.provenance.to_dict()],
+            )
+            rendered_blocks.append(item)
         return self._json(
             {
                 "artifact_id": resolved_id,
@@ -373,7 +417,11 @@ class DocumentCapability:
                 "total_blocks": len(document.blocks),
                 "has_more": next_start < len(document.blocks),
                 "next_start": next_start if next_start < len(document.blocks) else None,
-                "blocks": [block.to_dict() for block in selected],
+                "blocks": rendered_blocks,
+                "citation_convention": (
+                    "Copy each block.citation exactly as plain Markdown evidence. "
+                    "It is one-based; start_block and block.order are zero-based tool offsets."
+                ),
             }
         )
 
@@ -391,4 +439,12 @@ class DocumentCapability:
     ) -> str:
         chunk = self.artifact_store.document_index.get_chunk(chunk_id)
         self._resolve_attached(chunk.artifact_id, context)
-        return self._json(chunk.to_dict())
+        payload = chunk.to_dict()
+        payload["citation"] = self._citation(
+            chunk.filename,
+            chunk.heading_path,
+            chunk.start_order,
+            chunk.end_order,
+            chunk.provenance,
+        )
+        return self._json(payload)

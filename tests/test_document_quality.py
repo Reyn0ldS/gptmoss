@@ -144,6 +144,57 @@ def test_duplicate_failure_exposes_machine_actionable_paragraph_prefix(tmp_path)
     assert "this repeated architectural decision paragraph" in failure
 
 
+def test_document_policy_rejects_duplicate_headings_and_incomplete_record_sections(
+    tmp_path,
+):
+    document = tmp_path / "decisions.md"
+    document.write_text(
+        """# Decision register
+
+## Repeated
+
+First section.
+
+## Repeated
+
+Second section.
+
+### DEC-001: Storage
+
+- **Context:** Local durability is required.
+- **Decision:** Use an atomic local store.
+""",
+        encoding="utf-8",
+    )
+
+    report = validate_artifact(
+        document,
+        validator="document",
+        constraints={
+            "max_duplicate_headings": 0,
+            "record_section_policy": {
+                "heading_pattern": r"\bDEC-\d{3}\b",
+                "minimum_records": 1,
+                "required_fields": {
+                    "context": ["context"],
+                    "decision": ["decision"],
+                    "alternatives": ["alternative"],
+                    "risks": ["risk"],
+                },
+            },
+        },
+    )
+
+    assert not report["valid"]
+    assert report["metrics"]["duplicate_headings"] == 1
+    assert report["metrics"]["record_sections"] == 1
+    assert report["metrics"]["invalid_record_sections"] == 1
+    failures = "\n".join(report["failures"])
+    assert "duplicate heading occurrence" in failures
+    assert "record section(s) violate the declared semantic schema" in failures
+    assert "alternatives, risks" in failures
+
+
 def test_professional_document_rejects_incorrect_integer_sum_with_repair_prefix(tmp_path):
     document = tmp_path / "inventory.md"
     document.write_text(

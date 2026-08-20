@@ -897,6 +897,47 @@ async def test_retry_child_can_rewrite_code_wrapped_citations_reported_by_gate(
     )
 
 
+def test_profile_upgrade_reopens_invalid_completed_producer_and_consumers(tmp_path):
+    engine, state = _engine(tmp_path)
+    execution = state.get_execution("resume-revalidation")
+    execution.current_plan = {
+        "steps": [
+            {
+                "id": 0, "status": "completed", "dependencies": [],
+                "required_artifacts": ["analysis/decisions.md"],
+                "assigned_execution_id": "old-producer",
+            },
+            {
+                "id": 1, "status": "completed", "dependencies": [0],
+                "required_artifacts": ["dossier.md"],
+                "assigned_execution_id": "old-consumer",
+            },
+        ],
+        "artifact_validations": [{
+            "path": "analysis/decisions.md", "validator": "document",
+            "constraints": {"required_headings": ["Validated decisions"]},
+        }],
+    }
+    execution.results["steps"] = {"0": {"old": True}, "1": {"old": True}}
+    project = tmp_path / "projects" / "proj-default"
+    (project / "analysis").mkdir(parents=True)
+    (project / "analysis" / "decisions.md").write_text(
+        "# Incomplete decisions\n\nNo validated section.\n", encoding="utf-8",
+    )
+    (project / "dossier.md").write_text("# Stale dossier\n", encoding="utf-8")
+
+    reopened = engine._reopen_invalid_completed_steps(
+        "resume-revalidation", execution, execution.current_plan["steps"],
+    )
+
+    assert [step["id"] for step in reopened] == [0, 1]
+    assert all(step["status"] == "pending" for step in reopened)
+    assert all("assigned_execution_id" not in step for step in reopened)
+    assert "deterministic profile upgrade" in reopened[0]["retry_context"]
+    assert "upstream artifact was reopened" in reopened[1]["retry_context"]
+    assert execution.results["steps"] == {}
+
+
 @pytest.mark.asyncio
 async def test_targeted_repair_must_use_a_machine_reported_prefix(tmp_path):
     engine, state = _engine(tmp_path)
@@ -1120,6 +1161,30 @@ def test_writer_unsupported_claim_gate_requires_cited_paragraph_repair(tmp_path)
     assert required == "filesystem__replace_paragraph"
     assert "corrected, evidence-grounded paragraph" in nudge
     assert "valid nearby bounded local citation" in nudge
+
+
+def test_missing_source_gate_requires_one_bounded_append(tmp_path):
+    engine, state = _engine(tmp_path)
+    state.get_execution("writer-source-append")
+    project = tmp_path / "projects" / "proj-default"
+    project.mkdir(parents=True)
+    (project / "dossier.md").write_text("existing evidence", encoding="utf-8")
+    step = {"role": "architect", "required_artifacts": ["dossier.md"]}
+    issues = [
+        "dossier.md: uncited required source file(s): source-a.docx, source-b.pptx; "
+        "cited_sources=3 is below required minimum 5",
+    ]
+
+    required = engine._writer_incremental_repair_tool(
+        "writer-source-append", "architect", step, issues,
+    )
+    nudge = engine._writer_incremental_repair_nudge(
+        "writer-source-append", "architect", step, issues,
+    )
+
+    assert required == "filesystem__append"
+    assert "currently missing source exactly once" in nudge
+    assert "one-based bounded locator" in nudge
 
 
 @pytest.mark.asyncio

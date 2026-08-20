@@ -112,6 +112,47 @@ def test_professional_profile_derives_long_form_and_diagram_gates_from_requireme
     assert plan["steps"][0]["requirement_ids"] == ["REQ-001", "REQ-002", "REQ-003"]
 
 
+def test_professional_profile_enforces_semantic_decisions_and_clean_support_diagrams():
+    plan = {
+        "delivery_profile": "professional-local",
+        "primary_artifact": "dossier.md",
+        "requirements": [{
+            "id": "REQ-001", "mandatory": True,
+            "statement": "Produire un dossier avec au moins trois diagrammes.",
+        }],
+        "steps": [
+            {
+                "role": "architect",
+                "specialist": "Architecture Decision Analyst",
+                "description": "Record decisions and alternatives.",
+                "required_artifacts": ["analysis/decision-register.md"],
+            },
+            {
+                "role": "architect",
+                "specialist": "Application, Integration & Data Architect",
+                "description": "Design architecture diagrams.",
+                "required_artifacts": ["analysis/application-data-architecture.md"],
+            },
+            {
+                "role": "writer", "specialist": "Professional Editor",
+                "required_artifacts": ["dossier.md"], "requirement_ids": [],
+            },
+        ],
+        "artifact_validations": [],
+    }
+
+    apply_professional_profile(plan)
+    policies = {item["path"]: item["constraints"] for item in plan["artifact_validations"]}
+    decisions = policies["analysis/decision-register.md"]
+    application = policies["analysis/application-data-architecture.md"]
+
+    assert decisions["record_section_policy"]["minimum_records"] == 1
+    assert "owner" in decisions["record_section_policy"]["required_fields"]
+    assert decisions["max_duplicate_headings"] == 0
+    assert application["reject_invalid_diagrams"] is True
+    assert application["minimums"]["valid_diagrams"] == 2
+
+
 def test_delivery_package_rejects_missing_required_embedded_diagrams(tmp_path):
     (tmp_path / "report.md").write_text("# Rapport\n\nTexte sans diagramme.\n", encoding="utf-8")
     plan = {
