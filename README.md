@@ -490,6 +490,11 @@ Invoke-RestMethod -Method Post "http://127.0.0.1:8000/executions/$id/cancel"
 
 `/resume` ne convient pas à une pause d'approbation : dans ce cas, utilisez impérativement `/approve` ou `/reject`. `cancel` est possible pour les états `pending`, `running`, `paused` ou `waiting_provider`. Le moteur conserve un registre unique des tâches `asyncio` actives : l'annulation interrompt l'appel LLM, les étapes du DAG et les sous-agents connus, arrête les processus shell, puis supprime les reprises planifiées avant de confirmer l'état final.
 
+L'approbation d'une réduction de périmètre est indexée par le hash canonique des seules
+réductions proposées. Un renforcement ultérieur des validateurs, du plan de rédaction ou
+du contrat de livraison ne redemande donc pas l'approbation d'une limite strictement
+identique ; toute modification réelle de la réduction produit en revanche un nouveau hash.
+
 La persistance v3 utilise un index atomique et des sidecars immuables adressés par leur
 SHA-256. Une sauvegarde ne crée que les générations modifiées ; l'index est remplacé
 après leur écriture, puis les anciennes générations sont nettoyées. Une interruption

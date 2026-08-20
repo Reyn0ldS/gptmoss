@@ -25,10 +25,13 @@ class ApprovalCoordinator:
         pending = state.variables.get("pending_scope_approval")
         if state.status != "paused" or not isinstance(pending, dict):
             raise ValueError(f"Execution {execution_id} has no pending scope approval.")
-        state.variables.setdefault("scope_decisions", []).append({
+        decision_record = {
             "contract_sha256": pending.get("contract_sha256"), "decision": decision,
             "reason": reason or "", "decided_at": time.time(),
-        })
+        }
+        if pending.get("scope_changes_sha256"):
+            decision_record["scope_changes_sha256"] = pending.get("scope_changes_sha256")
+        state.variables.setdefault("scope_decisions", []).append(decision_record)
         state.variables.pop("pending_scope_approval", None)
         if decision != "allow":
             self.state_engine.transition_execution(
@@ -41,6 +44,10 @@ class ApprovalCoordinator:
             }))
             return
         state.variables["approved_scope_contract_sha256"] = pending.get("contract_sha256")
+        if pending.get("scope_changes_sha256"):
+            state.variables["approved_scope_changes_sha256"] = pending.get(
+                "scope_changes_sha256"
+            )
         self.state_engine.transition_execution(
             state, "running", reason="scope reduction approved", actor="user"
         )

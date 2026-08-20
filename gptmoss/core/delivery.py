@@ -632,6 +632,12 @@ def build_delivery_contract(
         ],
         "corpus_policy": corpus_policy,
     }
+    frozen_scope = json.dumps(
+        scope_changes, sort_keys=True, ensure_ascii=False, separators=(",", ":")
+    )
+    contract["scope_changes_sha256"] = hashlib.sha256(
+        frozen_scope.encode("utf-8")
+    ).hexdigest()
     frozen = json.dumps(contract, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
     contract["contract_sha256"] = hashlib.sha256(frozen.encode("utf-8")).hexdigest()
     return contract

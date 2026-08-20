@@ -104,6 +104,7 @@ async def test_scope_reduction_requires_a_hashed_decision_before_resume(tmp_path
     execution.variables["task"] = "Build the complete application"
     execution.variables["pending_scope_approval"] = {
         "contract_sha256": "abc123",
+        "scope_changes_sha256": "scope123",
         "changes": [{"id": "SCOPE-001", "statement": "Defer the UI"}],
     }
     engine.execute_task = AsyncMock()
@@ -113,6 +114,7 @@ async def test_scope_reduction_requires_a_hashed_decision_before_resume(tmp_path
 
     assert execution.status == "running"
     assert execution.variables["approved_scope_contract_sha256"] == "abc123"
+    assert execution.variables["approved_scope_changes_sha256"] == "scope123"
     assert execution.variables["scope_decisions"][0]["reason"] == "accepted prototype"
     engine.execute_task.assert_awaited_once()
 

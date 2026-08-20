@@ -1606,13 +1606,20 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
         delivery_contract = state.variables["delivery_contract"]
         scope_changes = delivery_contract.get("scope_changes", [])
         approved_contract = state.variables.get("approved_scope_contract_sha256")
+        scope_changes_sha256 = delivery_contract.get("scope_changes_sha256")
+        approved_scope = state.variables.get("approved_scope_changes_sha256")
+        scope_is_approved = bool(
+            (scope_changes_sha256 and approved_scope == scope_changes_sha256)
+            or approved_contract == delivery_contract.get("contract_sha256")
+        )
         if (not state.variables.get("parent_execution_id") and scope_changes
-                and approved_contract != delivery_contract.get("contract_sha256")):
+                and not scope_is_approved):
             self.state_engine.transition_execution(
                 state, "paused", reason="scope approval required", actor="runtime"
             )
             state.variables["pending_scope_approval"] = {
                 "contract_sha256": delivery_contract.get("contract_sha256"),
+                "scope_changes_sha256": scope_changes_sha256,
                 "changes": scope_changes,
             }
             self.state_engine.save_to_disk()
@@ -1621,6 +1628,7 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
                 payload={
                     "execution_id": execution_id,
                     "contract_sha256": delivery_contract.get("contract_sha256"),
+                    "scope_changes_sha256": scope_changes_sha256,
                     "changes": scope_changes,
                 },
             ))

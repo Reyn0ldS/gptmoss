@@ -74,6 +74,7 @@ def test_contract_freezes_traceability_scope_and_ownership():
     assert row["implementation_steps"] == [0]
     assert row["validation_steps"] == [1]
     assert contract["scope_changes"][0]["statement"] == "Graphical interface is deferred"
+    assert len(contract["scope_changes_sha256"]) == 64
     assert len(contract["contract_sha256"]) == 64
     assert path_is_owned(contract, 0, "developer", "src/sample/cli.py")
     assert not path_is_owned(contract, 0, "developer", "tests/test_cli.py")
@@ -81,6 +82,27 @@ def test_contract_freezes_traceability_scope_and_ownership():
     assert not path_is_owned(contract, 1, "debugger", "tests/test_cli.py")
     assert not path_is_owned(contract, 1, "debugger", ".gptmoss/contract.json")
     assert not path_is_owned(contract, 1, "debugger", "./.gptmoss/contract.json")
+
+
+def test_scope_approval_hash_is_stable_when_only_delivery_gates_change():
+    first_plan = _plan()
+    first_plan["scope_changes"] = [{"statement": "Vision review remains deferred"}]
+    first_plan["artifact_validations"] = [{
+        "path": "report.md", "validator": "document",
+        "constraints": {"minimums": {"words": 600}},
+    }]
+    second_plan = _plan()
+    second_plan["scope_changes"] = [{"statement": "Vision review remains deferred"}]
+    second_plan["artifact_validations"] = [{
+        "path": "report.md", "validator": "document",
+        "constraints": {"minimums": {"words": 8750, "valid_diagrams": 3}},
+    }]
+
+    first = build_delivery_contract(first_plan, "Write the report")
+    second = build_delivery_contract(second_plan, "Write the report")
+
+    assert first["contract_sha256"] != second["contract_sha256"]
+    assert first["scope_changes_sha256"] == second["scope_changes_sha256"]
 
 
 def test_automatic_software_traceability_prefers_developer_and_relevant_qa():
