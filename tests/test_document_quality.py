@@ -110,7 +110,9 @@ def test_professional_document_checks_normalized_total_against_source_inventory(
     document = tmp_path / "inventory.md"
     document.write_text(
         "# Coverage\n\n**Total**: 2 documents; 9 normalized blocks.\n\n"
-        "- **Blocks read**: 4 + 6 = **10 blocks** of 9 expected.\n",
+        "- **Blocks read**: 4 + 6 = **10 blocks** of 9 expected.\n\n"
+        "- The PPTX contains 2 slides and 6 normalized blocks; the total corpus "
+        "comprises 10 normalized blocks.\n",
         encoding="utf-8",
     )
 

@@ -407,8 +407,10 @@ def validate_document(path: Path, constraints: Dict[str, Any]) -> ValidationRepo
                 )
         if expected_normalized_blocks:
             total_claim_patterns = (
-                re.compile(r"\b(\d+)\s+blocs?\s+normalises?\b"),
-                re.compile(r"\b(\d+)\s+normalized\s+blocks?\b"),
+                re.compile(
+                    r"\b(?:total|corpus(?:\s+inventory)?).{0,120}?"
+                    r"(\d+)\s+(?:blocs?\s+normalises?|normalized\s+blocks?)\b"
+                ),
                 re.compile(
                     r"\b(?:blocs?|blocks?)(?:\*{1,2})?\s+(?:sur|of)\s+(\d+)\s+"
                     r"(?:attendus?|expected)\b"
