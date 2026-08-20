@@ -2022,7 +2022,9 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
                 if step.get("retry_context"):
                     sub_task += (
                         "\n\nAUTONOMOUS RETRY: A previous specialist attempt did not satisfy its delivery gates. "
-                        "Inspect and reuse any valid partial artifacts, correct the root cause, and complete the assignment. "
+                        "Reuse every valid partial artifact and correct the root cause. When the machine defects "
+                        "already provide an exact selector, act on that selector before any broad inspection; "
+                        "never reread the complete artifact merely to rediscover a reported defect. "
                         + str(step["retry_context"])
                     )
                 if dependency_results:
@@ -2627,7 +2629,9 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
                 reuse_instruction += (
                     " Machine-verified complete document coverage was inherited from the exact prior "
                     "assignment. Do not inventory or reread the corpus; preserve the existing artifact, "
-                    "inspect it with filesystem.read, and apply only machine-reported repairs."
+                    "and apply only machine-reported repairs. If a defect includes an exact paragraph or "
+                    "Markdown heading selector, mutate it directly without reading the whole artifact; "
+                    "otherwise use one bounded filesystem.read window only around the necessary location."
                 )
             convo.messages.append({"role": "system", "content": f"Current Step objectives: {step_desc}.{reuse_instruction} Generate thought and select tools if needed.", "timestamp": time.time()})
 

@@ -73,7 +73,13 @@ class FilesystemCapability:
                 
         return full_path
 
-    @action(name="read", description="Read the content of a file. Path is relative to the workspace.")
+    @action(
+        name="read",
+        description=(
+            "Read a bounded character window from a workspace file. Large default reads are "
+            "capped and return an exact next_offset marker; pass that offset to continue."
+        ),
+    )
     def read(
         self,
         path: str,
@@ -97,8 +103,19 @@ class FilesystemCapability:
         start = max(0, int(offset or 0))
         if start >= len(content):
             return ""
-        count = max(0, int(limit or 0))
-        return content[start : start + count] if count else content[start:]
+        requested_count = max(0, int(limit or 0))
+        default_window = 12_000
+        maximum_window = 32_000
+        count = min(requested_count, maximum_window) if requested_count else default_window
+        chunk = content[start : start + count]
+        end = start + len(chunk)
+        if not requested_count and end < len(content):
+            return (
+                chunk
+                + f"\n\n[READ_WINDOW characters={start}-{end - 1} total={len(content)} "
+                f"next_offset={end} default_limit={default_window}]"
+            )
+        return chunk
 
     @action(name="write", description="Create or overwrite a file with contents. Path is relative to the workspace.")
     def write(self, path: str, content: str, context: Optional[Dict[str, Any]] = None) -> str:

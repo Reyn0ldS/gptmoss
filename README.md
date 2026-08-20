@@ -658,8 +658,11 @@ corpus déjà transmis pour une reprise sans retransfert.
 
 Les capacités de lecture tolèrent aussi les variantes d'appel courantes émises pendant
 une analyse autonome : `documents.inventory` peut recevoir une requête descriptive sans
-réduire l'inventaire exhaustif, et `filesystem.read` accepte des bornes `offset`/`limit`
-en caractères. Ces paramètres sont exposés par le schéma d'outils et restent strictement
+réduire l'inventaire exhaustif, et `filesystem.read` accepte des bornes `offset`/`limit`.
+Une lecture sans `limit` est plafonnée à 12 000 caractères pour les gros fichiers et renvoie
+un marqueur `READ_WINDOW` avec le `next_offset` exact ; une limite explicite est plafonnée à
+32 000 caractères afin qu'une seule inspection ne puisse pas saturer le contexte du modèle.
+Ces paramètres sont exposés par le schéma d'outils et restent strictement
 en lecture dans le workspace autorisé.
 
 ### Déposer un fichier puis le joindre à une tâche
