@@ -1317,6 +1317,22 @@ async def resume_execution(execution_id: str):
     # on resume: a fresh specialist must inherit the durable workspace edits
     # and the current runtime/tool schemas.
     for step in (state.current_plan or {}).get("steps", []):
+        if step.get("status") == "cancelled":
+            # A process restart can persist the coordinator's in-flight plan
+            # step as cancelled after its delegated child is stopped. Resuming
+            # the top-level execution is explicit authorization for a fresh
+            # attempt of that same step, while a cancelled top-level execution
+            # remains non-resumable above.
+            step["status"] = "pending"
+            step.pop("assigned_execution_id", None)
+            step.pop("error", None)
+            step["manual_retry_count"] = int(
+                step.get("manual_retry_count", 0)
+            ) + 1
+            runtimes = state.variables.get("step_runtime")
+            if isinstance(runtimes, dict):
+                runtimes.pop(str(step.get("id")), None)
+            continue
         if step.get("status") != "pending":
             continue
         assigned_id = step.get("assigned_execution_id")

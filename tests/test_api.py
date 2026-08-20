@@ -128,6 +128,46 @@ def test_resume_failed_delegated_execution_is_rejected():
     assert response.status_code == 400
     assert child.status == "failed"
 
+
+def test_resume_reopens_cancelled_inflight_plan_step_after_restart():
+    event_bus = EventBus()
+    state_engine = StateEngine()
+    llm = MockLLMProvider()
+    engine = ExecutionEngine(
+        event_bus, state_engine,
+        ContextEngine(state_engine, RAMMemoryProvider()), llm,
+        SimplePlanner(llm), SimplePolicyProvider(),
+    )
+    engine.execute_task = AsyncMock()
+    kernel = RuntimeKernel(event_bus, state_engine, engine)
+    init_app(kernel, engine, state_engine, event_bus)
+    client = ASGIClient(app)
+    root = state_engine.get_execution("restart-root")
+    root.status = "paused"
+    root.variables["task"] = "Resume durable document repair"
+    root.variables["step_runtime"] = {
+        "3": {"iterations": 44, "stagnant_iterations": 12},
+    }
+    root.current_plan = {"steps": [{
+        "id": 3, "status": "cancelled",
+        "assigned_execution_id": "cancelled-child",
+        "retry_context": "Preserve this exact machine diagnosis",
+    }]}
+    child = state_engine.get_execution("cancelled-child")
+    child.status = "cancelled"
+    child.variables["parent_execution_id"] = "restart-root"
+
+    response = client.post("/executions/restart-root/resume")
+
+    assert response.status_code == 200
+    assert root.status == "running"
+    step = root.current_plan["steps"][0]
+    assert step["status"] == "pending"
+    assert "assigned_execution_id" not in step
+    assert step["manual_retry_count"] == 1
+    assert step["retry_context"] == "Preserve this exact machine diagnosis"
+    assert "3" not in root.variables["step_runtime"]
+
 def test_api_submit_and_query_flow():
     # Setup test dependencies
     event_bus = EventBus()
