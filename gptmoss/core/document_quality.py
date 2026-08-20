@@ -187,6 +187,19 @@ def _is_safe_local_source(value: str) -> bool:
 
 
 def _locator_range(locator: str) -> Tuple[str, int, int] | None:
+    provenance_match = re.search(
+        r"(?i)\b(block|bloc|slide|diapositive)s?\s*:\s*(\d+)"
+        r"(?:\s*-\s*(\d+))?",
+        locator,
+    )
+    if provenance_match:
+        unit = (
+            "slides"
+            if provenance_match.group(1).casefold() in {"slide", "diapositive"}
+            else "blocks"
+        )
+        start = int(provenance_match.group(2))
+        return unit, start, int(provenance_match.group(3) or start)
     block_match = re.search(
         r"(?i)\bbloc(?:k)?s?\s+(\d+)(?:\s*[-–]\s*(\d+))?", locator
     )

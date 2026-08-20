@@ -148,6 +148,33 @@ def test_document_validator_accepts_complete_local_traceable_content(tmp_path):
     assert "Document quality report — PASS" in format_quality_report(report)
 
 
+def test_document_validator_accepts_tool_provenance_colon_locators(tmp_path):
+    document = tmp_path / "tool-provenance.md"
+    document.write_text(
+        "# Evidence\n\n"
+        "The normalized source is bounded. [requirements.docx > block:2]\n\n"
+        "The presentation evidence is bounded. [vision.pptx > slide:3]\n",
+        encoding="utf-8",
+    )
+
+    report = validate_artifact(
+        document,
+        validator="document",
+        constraints={
+            "required_source_files": ["requirements.docx", "vision.pptx"],
+            "source_inventory": {
+                "requirements.docx": {"blocks": 12},
+                "vision.pptx": {"slides": 4},
+            },
+            "require_local_references": True,
+            "require_bounded_references": True,
+        },
+    )
+
+    assert report["valid"], json.dumps(report, indent=2)
+    assert report["metrics"]["invalid_local_references"] == 0
+
+
 def test_document_validator_reports_content_and_provenance_defects(tmp_path):
     repeated = "This repeated architecture paragraph contains enough material words to be detected as duplicated content across the professional dossier."
     document = tmp_path / "defective.md"
