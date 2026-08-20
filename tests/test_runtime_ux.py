@@ -1339,6 +1339,31 @@ def test_writer_record_gate_requires_one_reported_section_repair(tmp_path):
     assert "every other record and section must remain untouched" in nudge
 
 
+def test_writer_invalid_diagram_gate_requires_its_reported_section(tmp_path):
+    engine, state = _engine(tmp_path)
+    state.get_execution("writer-diagram-repair")
+    project = tmp_path / "projects" / "proj-default"
+    project.mkdir(parents=True)
+    (project / "architecture.md").write_text("### Runtime flow\n", encoding="utf-8")
+    step = {"role": "architect", "required_artifacts": ["architecture.md"]}
+    issues = [
+        "architecture.md: document contains 1 invalid diagram(s): line 20 under "
+        "section selector '### Runtime flow': self-loop is not allowed: A"
+    ]
+
+    required = engine._writer_incremental_repair_tool(
+        "writer-diagram-repair", "architect", step, issues,
+    )
+    nudge = engine._writer_incremental_repair_nudge(
+        "writer-diagram-repair", "architect", step, issues,
+    )
+
+    assert required == "filesystem__replace_section"
+    assert "one complete, syntactically valid Mermaid diagram" in nudge
+    assert "including self-loops" in nudge
+    assert "preserving all other sections" in nudge
+
+
 def test_writer_unsupported_claim_gate_requires_cited_paragraph_repair(tmp_path):
     engine, state = _engine(tmp_path)
     state.get_execution("writer-citation-repair")

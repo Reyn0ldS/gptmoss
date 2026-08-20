@@ -33,10 +33,10 @@ RENDER_TARGETED_MARKERS = (
 )
 RENDER_SECTION_MARKERS = (
     "record section",
+    "invalid diagram",
 )
 RENDER_REWRITE_MARKERS = (
     "invalid local reference",
-    "invalid diagram",
     "citation-like pattern",
     "external link",
     "placeholder marker",

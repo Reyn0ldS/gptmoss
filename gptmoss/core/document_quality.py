@@ -311,8 +311,21 @@ def validate_document(path: Path, constraints: Dict[str, Any]) -> ValidationRepo
     diagram_reports = _diagram_reports(text)
     invalid_diagrams = [item for item in diagram_reports if not item.get("valid")]
     if constraints.get("reject_invalid_diagrams") and invalid_diagrams:
+        def diagram_section_selector(item: Dict[str, Any]) -> str:
+            diagram_line = int(item.get("line") or 0)
+            preceding = [
+                (level, title) for line_index, level, title in headings
+                if line_index < diagram_line
+            ]
+            if not preceding:
+                return ""
+            level, title = preceding[-1]
+            return f"{'#' * level} {title}"
+
         samples = "; ".join(
-            f"line {item.get('line')}: {', '.join(str(issue) for issue in item.get('issues', []))}"
+            f"line {item.get('line')} under section selector "
+            f"{diagram_section_selector(item)!r}: "
+            f"{', '.join(str(issue) for issue in item.get('issues', []))}"
             for item in invalid_diagrams[:5]
         )
         _failure(report, f"document contains {len(invalid_diagrams)} invalid diagram(s): {samples}")

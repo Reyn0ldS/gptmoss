@@ -80,6 +80,8 @@ U->>A: request
 A-->>U: response
 ```
 
+## Isolated diagram
+
 ```mermaid
 graph TD
 ONLY[Isolated]
@@ -101,6 +103,7 @@ ONLY[Isolated]
     assert report["metrics"]["diagrams"] == 3
     assert report["metrics"]["valid_diagrams"] == 2
     assert report["metrics"]["invalid_diagrams"] == 1
+    assert "section selector '## Isolated diagram'" in "\n".join(report["failures"])
 
 
 def test_json_validator_requires_declared_semantic_keys(tmp_path):

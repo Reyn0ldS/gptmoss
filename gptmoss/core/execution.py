@@ -716,10 +716,10 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
             "lack a local reference",
         )
         replacement_markers = (
-            "citation-like pattern", "invalid diagram",
+            "citation-like pattern",
             "external link", "placeholder marker", "reasoning tag",
         )
-        section_markers = ("record section",)
+        section_markers = ("record section", "invalid diagram")
         append_markers = (
             "uncited required source", "cited_sources=", "local_references=",
         )
@@ -788,6 +788,15 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
                 "paragraph per iteration; never rewrite or delete the whole document."
             )
         if action == "filesystem__replace_section":
+            if any("invalid diagram" in str(issue).casefold() for issue in issues):
+                return (
+                    f" Do not answer with a plan. Your next response must be exactly one valid "
+                    f"{action} tool call targeting '{target}'. Copy the exact Markdown section "
+                    "selector reported for the invalid diagram and replace only that section body "
+                    "with one complete, syntactically valid Mermaid diagram plus concise explanatory "
+                    "prose and nearby bounded local citations. Eliminate every reported semantic "
+                    "diagram defect, including self-loops, while preserving all other sections."
+                )
             return (
                 f" Do not answer with a plan. Your next response must be exactly one valid "
                 f"{action} tool call targeting '{target}'. Copy one exact Markdown heading "
