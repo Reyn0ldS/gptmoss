@@ -627,6 +627,47 @@ async def test_owned_markdown_heading_reference_can_be_repaired_by_reported_pref
 
 
 @pytest.mark.asyncio
+async def test_owned_plain_markdown_line_can_be_repaired_by_reported_prefix(tmp_path):
+    engine, state = _engine(tmp_path)
+    execution = state.get_execution("plain-line-repair")
+    execution.variables["delivery_contract"] = {
+        "steps": [{"step_id": 0, "role": "architect", "owned_paths": ["inventory.md"]}]
+    }
+    execution.variables["plan_step_id"] = 0
+    execution.variables["role_key"] = "architect"
+    project = tmp_path / "projects" / "proj-default"
+    project.mkdir(parents=True)
+    target = project / "inventory.md"
+    target.write_text(
+        "# Coverage\n\n**Evidence Trace:**\n"
+        "The first source remains valid [first.txt > blocks 1-2].\n"
+        "The second source has invalid bounds [second.txt > blocks 0-3].\n"
+        "The final source remains valid [third.txt > block 1].\n",
+        encoding="utf-8",
+    )
+
+    result = await engine._call_tool(
+        "plain-line-repair", "filesystem", "replace_paragraph",
+        {
+            "path": "inventory.md",
+            "paragraph_prefix": (
+                "The second source has invalid bounds [second.txt > blocks 0-3]."
+            ),
+            "content": (
+                "The second source has valid bounds [second.txt > blocks 1-4]."
+            ),
+        },
+    )
+
+    content = target.read_text(encoding="utf-8")
+    assert "Markdown line occurrence 1 replaced successfully" in result
+    assert "second.txt > blocks 0-3" not in content
+    assert "second.txt > blocks 1-4" in content
+    assert "The first source remains valid" in content
+    assert "The final source remains valid" in content
+
+
+@pytest.mark.asyncio
 async def test_paragraph_repair_rejects_ambiguous_short_prefix(tmp_path):
     engine, state = _engine(tmp_path)
     state.get_execution("short-prefix")

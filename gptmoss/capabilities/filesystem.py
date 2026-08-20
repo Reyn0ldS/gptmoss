@@ -146,7 +146,8 @@ class FilesystemCapability:
             "Replace one paragraph selected by a unique normalized prefix. Use occurrence=2 "
             "to remove the second copy of a duplicated paragraph. New content may be empty "
             "only when removing a duplicate; headings and surrounding paragraphs are preserved. "
-            "A Markdown heading or list item may also be targeted by its exact prefix."
+            "A single Markdown line grouped with adjacent content may also be targeted by its "
+            "exact prefix."
         ),
     )
     def replace_paragraph(
@@ -190,20 +191,17 @@ class FilesystemCapability:
             if self._paragraph_key(body).startswith(prefix):
                 matches.append((index, lines[:body_start]))
         if not matches:
-            # Blank-line paragraph segmentation groups adjacent Markdown list
-            # items into one segment. Quality gates report the defective item
-            # itself, so support a bounded single-line replacement rather than
-            # forcing a rewrite of the whole list or document.
+            # Blank-line paragraph segmentation can group adjacent Markdown
+            # lines into one segment. Quality gates report the exact defective
+            # line, so support a bounded single-line replacement rather than
+            # forcing a rewrite of the whole segment or document.
             source_lines = original.splitlines(keepends=True)
-            markdown_line_matches = [
+            line_matches = [
                 index for index, line in enumerate(source_lines)
-                if re.match(
-                    r"^\s*(?:#{1,6}\s+|[-*+]\s+|\d+[.)]\s+)", line
-                )
-                and self._paragraph_key(line).startswith(prefix)
+                if self._paragraph_key(line).startswith(prefix)
             ]
-            if len(markdown_line_matches) >= requested_occurrence:
-                line_index = markdown_line_matches[requested_occurrence - 1]
+            if len(line_matches) >= requested_occurrence:
+                line_index = line_matches[requested_occurrence - 1]
                 old_line = source_lines[line_index]
                 newline_match = re.search(r"(\r?\n)$", old_line)
                 newline = newline_match.group(1) if newline_match else ""
