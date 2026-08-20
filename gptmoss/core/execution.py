@@ -744,10 +744,14 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
             return "filesystem__replace_paragraph"
         if any(marker in issue for issue in issues for marker in section_markers):
             return "filesystem__replace_section"
-        if any(marker in issue for issue in issues for marker in replacement_markers):
-            return "filesystem__write"
+        # Missing real evidence takes precedence over citation examples that
+        # happen to be wrapped in Markdown code.  Appending the missing plain
+        # bounded citation can satisfy both observations without destroying a
+        # valid document merely to remove harmless syntax examples.
         if any(marker in issue for issue in issues for marker in append_markers):
             return "filesystem__append"
+        if any(marker in issue for issue in issues for marker in replacement_markers):
+            return "filesystem__write"
         exists = self._artifact_exists(execution_id, target)
         return "filesystem__append" if exists else "filesystem__write"
 

@@ -94,15 +94,15 @@ def classify_issue_texts(texts: Iterable[Any]) -> FeedbackTarget:
             DOCUMENT_RENDER, "writer", "filesystem__replace_section",
             "record section repair", ("coordinator",),
         )
-    if any(marker in blob for marker in RENDER_REWRITE_MARKERS):
-        return FeedbackTarget(
-            DOCUMENT_RENDER, "writer", "filesystem__write",
-            "document rewrite", ("coordinator",),
-        )
     if any(marker in blob for marker in RENDER_APPEND_MARKERS):
         return FeedbackTarget(
             DOCUMENT_RENDER, "writer", "filesystem__append",
             "document append", ("coordinator",),
+        )
+    if any(marker in blob for marker in RENDER_REWRITE_MARKERS):
+        return FeedbackTarget(
+            DOCUMENT_RENDER, "writer", "filesystem__write",
+            "document rewrite", ("coordinator",),
         )
     if any(marker in blob for marker in SOFTWARE_MARKERS):
         return FeedbackTarget(

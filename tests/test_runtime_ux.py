@@ -1494,6 +1494,27 @@ def test_missing_source_gate_requires_one_bounded_append(tmp_path):
     assert "one-based bounded locator" in nudge
 
 
+def test_missing_source_gate_precedes_code_example_rewrite(tmp_path):
+    engine, state = _engine(tmp_path)
+    state.get_execution("writer-source-code-example")
+    project = tmp_path / "projects" / "proj-default"
+    project.mkdir(parents=True)
+    (project / "dossier.md").write_text("existing evidence", encoding="utf-8")
+    step = {"role": "architect", "required_artifacts": ["dossier.md"]}
+    issues = [
+        "dossier.md: uncited required source file(s): source-a.docx; "
+        "2 citation-like pattern(s) inside Markdown code do not count as evidence; "
+        "write actual citations without backticks or code fences",
+        "dossier.md: cited_sources=3 is below required minimum 4",
+    ]
+
+    required = engine._writer_incremental_repair_tool(
+        "writer-source-code-example", "architect", step, issues,
+    )
+
+    assert required == "filesystem__append"
+
+
 @pytest.mark.asyncio
 async def test_kernel_stores_planning_mode_and_title():
     state = StateEngine()
