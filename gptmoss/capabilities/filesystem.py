@@ -145,7 +145,8 @@ class FilesystemCapability:
         description=(
             "Replace one paragraph selected by a unique normalized prefix. Use occurrence=2 "
             "to remove the second copy of a duplicated paragraph. New content may be empty "
-            "only when removing a duplicate; headings and surrounding paragraphs are preserved."
+            "only when removing a duplicate; headings and surrounding paragraphs are preserved. "
+            "A Markdown list item may also be targeted by the exact prefix of that item."
         ),
     )
     def replace_paragraph(
@@ -188,6 +189,31 @@ class FilesystemCapability:
             body = " ".join(line.strip() for line in lines[body_start:] if line.strip())
             if self._paragraph_key(body).startswith(prefix):
                 matches.append((index, lines[:body_start]))
+        if not matches:
+            # Blank-line paragraph segmentation groups adjacent Markdown list
+            # items into one segment. Quality gates report the defective item
+            # itself, so support a bounded single-line replacement rather than
+            # forcing a rewrite of the whole list or document.
+            source_lines = original.splitlines(keepends=True)
+            list_matches = [
+                index for index, line in enumerate(source_lines)
+                if re.match(r"^\s*(?:[-*+]\s+|\d+[.)]\s+)", line)
+                and self._paragraph_key(line).startswith(prefix)
+            ]
+            if len(list_matches) >= requested_occurrence:
+                line_index = list_matches[requested_occurrence - 1]
+                old_line = source_lines[line_index]
+                newline_match = re.search(r"(\r?\n)$", old_line)
+                newline = newline_match.group(1) if newline_match else ""
+                replacement = str(content or "").strip()
+                source_lines[line_index] = replacement + (newline if replacement else "")
+                updated = "".join(source_lines)
+                if updated == original:
+                    return "Error: replacement would not change the file."
+                write_text_atomic(resolved, updated)
+                return (
+                    f"List item occurrence {requested_occurrence} replaced successfully in {path}"
+                )
         if len(matches) < requested_occurrence:
             return (
                 f"Error: paragraph prefix matched {len(matches)} occurrence(s), "

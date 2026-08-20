@@ -550,6 +550,42 @@ async def test_owned_document_paragraph_can_be_repaired_without_global_rewrite(t
 
 
 @pytest.mark.asyncio
+async def test_owned_markdown_list_item_can_be_repaired_by_reported_prefix(tmp_path):
+    engine, state = _engine(tmp_path)
+    execution = state.get_execution("list-item-repair")
+    execution.variables["delivery_contract"] = {
+        "steps": [{"step_id": 0, "role": "architect", "owned_paths": ["inventory.md"]}]
+    }
+    execution.variables["plan_step_id"] = 0
+    execution.variables["role_key"] = "architect"
+    project = tmp_path / "projects" / "proj-default"
+    project.mkdir(parents=True)
+    target = project / "inventory.md"
+    target.write_text(
+        "# Coverage\n\n- First stable inventory item.\n"
+        "- Total of 751 normalized blocks across all documents.\n"
+        "- Final stable inventory item.\n",
+        encoding="utf-8",
+    )
+
+    result = await engine._call_tool(
+        "list-item-repair", "filesystem", "replace_paragraph",
+        {
+            "path": "inventory.md",
+            "paragraph_prefix": "- Total of 751 normalized blocks across all documents.",
+            "content": "- Total of 811 normalized blocks across all documents.",
+        },
+    )
+
+    content = target.read_text(encoding="utf-8")
+    assert "List item occurrence 1 replaced successfully" in result
+    assert "751" not in content
+    assert "- Total of 811 normalized blocks" in content
+    assert "- First stable inventory item." in content
+    assert "- Final stable inventory item." in content
+
+
+@pytest.mark.asyncio
 async def test_paragraph_repair_rejects_ambiguous_short_prefix(tmp_path):
     engine, state = _engine(tmp_path)
     state.get_execution("short-prefix")
