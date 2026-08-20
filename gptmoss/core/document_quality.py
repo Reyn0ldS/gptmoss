@@ -395,6 +395,47 @@ def validate_document(path: Path, constraints: Dict[str, Any]) -> ValidationRepo
     if not isinstance(raw_inventory, dict):
         raise TypeError("source_inventory must be an object")
     inventory = {_normalize_source(str(key)): value for key, value in raw_inventory.items()}
+    inventory_total_mismatches = []
+    if constraints.get("validate_arithmetic", False) and inventory:
+        expected_normalized_blocks = 0
+        for details in inventory.values():
+            if isinstance(details, int):
+                expected_normalized_blocks += int(details)
+            elif isinstance(details, dict):
+                expected_normalized_blocks += int(
+                    details.get("normalized_blocks") or details.get("blocks") or 0
+                )
+        if expected_normalized_blocks:
+            total_claim_patterns = (
+                re.compile(r"\b(\d+)\s+blocs?\s+normalises?\b"),
+                re.compile(r"\b(\d+)\s+normalized\s+blocks?\b"),
+                re.compile(
+                    r"\b(?:blocs?|blocks?)(?:\*{1,2})?\s+(?:sur|of)\s+(\d+)\s+"
+                    r"(?:attendus?|expected)\b"
+                ),
+            )
+            seen_claims = set()
+            for line in _without_markdown_code(text).splitlines():
+                folded_line = _fold(line)
+                for pattern in total_claim_patterns:
+                    for match in pattern.finditer(folded_line):
+                        claimed = int(match.group(1))
+                        key = (line, claimed)
+                        if key in seen_claims or claimed == expected_normalized_blocks:
+                            continue
+                        seen_claims.add(key)
+                        inventory_total_mismatches.append({
+                            "claimed": claimed,
+                            "actual": expected_normalized_blocks,
+                            "paragraph_prefix": " ".join(line.strip().split())[:180],
+                        })
+            if inventory_total_mismatches:
+                samples = "; ".join(
+                    f"expected {item['actual']} normalized blocks, not {item['claimed']}; "
+                    f"paragraph prefix: {item['paragraph_prefix']}"
+                    for item in inventory_total_mismatches[:5]
+                )
+                _failure(report, "source inventory total mismatch(es): " + samples)
     require_bounds = bool(constraints.get("require_bounded_references"))
     for reference in references:
         source = reference["source"]
@@ -515,6 +556,7 @@ def validate_document(path: Path, constraints: Dict[str, Any]) -> ValidationRepo
         "duplicate_paragraphs": duplicate_count,
         "unsupported_claim_paragraphs": len(unsupported_claims),
         "arithmetic_mismatches": len(arithmetic_mismatches),
+        "inventory_total_mismatches": len(inventory_total_mismatches),
         "required_headings_covered": len(required_headings) - len(missing_headings) - len(empty_headings),
         "required_headings_total": len(required_headings),
         "requirement_ids_covered": len(required_ids) - len(missing_ids),

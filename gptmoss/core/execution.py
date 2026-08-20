@@ -697,7 +697,8 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
     ) -> str:
         """Return the exact mutation required to repair a long writer delivery."""
         targeted_markers = (
-            "arithmetic sum mismatch", "duplicate paragraph", "lack a local reference",
+            "arithmetic sum mismatch", "source inventory total mismatch",
+            "duplicate paragraph", "lack a local reference",
         )
         replacement_markers = (
             "invalid local reference", "external link", "placeholder marker",
@@ -746,8 +747,8 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
                 "the gate. For a duplicate, remove occurrence=2 with empty content. For an "
                 "unsupported claim, replace occurrence=1 with one corrected, evidence-grounded "
                 "paragraph containing a valid nearby bounded local citation. For an arithmetic "
-                "mismatch, preserve the paragraph and replace only the claimed result with the "
-                "calculated value reported by the gate. Change exactly one "
+                "or inventory-total mismatch, preserve the paragraph and replace every incorrect "
+                "total in it with the calculated value reported by the gate. Change exactly one "
                 "paragraph per iteration; never rewrite or delete the whole document."
             )
         if action == "filesystem__append":

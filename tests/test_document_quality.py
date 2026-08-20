@@ -106,6 +106,33 @@ def test_professional_document_rejects_incorrect_integer_sum_with_repair_prefix(
     assert "paragraph prefix: - **Blocks read**" in failure
 
 
+def test_professional_document_checks_normalized_total_against_source_inventory(tmp_path):
+    document = tmp_path / "inventory.md"
+    document.write_text(
+        "# Coverage\n\n**Total**: 2 documents; 9 normalized blocks.\n\n"
+        "- **Blocks read**: 4 + 6 = **10 blocks** of 9 expected.\n",
+        encoding="utf-8",
+    )
+
+    report = validate_artifact(
+        document,
+        validator="document",
+        constraints={
+            "validate_arithmetic": True,
+            "source_inventory": {
+                "requirements.txt": {"blocks": 4},
+                "roadmap.pptx": {"slides": 2, "normalized_blocks": 6},
+            },
+        },
+    )
+
+    assert not report["valid"]
+    assert report["metrics"]["inventory_total_mismatches"] == 2
+    failures = "\n".join(report["failures"])
+    assert "expected 10 normalized blocks, not 9" in failures
+    assert "paragraph prefix: **Total**" in failures
+
+
 def test_document_validator_accepts_complete_local_traceable_content(tmp_path):
     document = tmp_path / "architecture.md"
     document.write_text(VALID_DOCUMENT, encoding="utf-8")

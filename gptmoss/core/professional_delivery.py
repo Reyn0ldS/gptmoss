@@ -23,7 +23,11 @@ def _source_inventory(artifact_store: Any, attachment_ids: Iterable[str]) -> Dic
             if block.provenance.slide_number is not None
         }
         inventory[document.filename] = (
-            {"slides": max(slides)} if slides else {"blocks": len(document.blocks)}
+            {
+                "slides": max(slides),
+                "normalized_blocks": len(document.blocks),
+            }
+            if slides else {"blocks": len(document.blocks)}
         )
     return inventory
 

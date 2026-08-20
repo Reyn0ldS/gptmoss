@@ -252,7 +252,7 @@ Renseignez les bornes depuis le corpus réel ; ne recopiez pas les nombres de ce
 
 Métriques disponibles : `characters`, `words`, `lines`, `headings`, `paragraphs`, `local_references`, `cited_sources`, `external_links`, `placeholder_markers`, `duplicate_paragraphs`, `unsupported_claim_paragraphs` et les compteurs de couverture des titres, exigences, lignes de traçabilité et sources.
 
-La métrique `arithmetic_mismatches` compte les additions entières explicites incohérentes. Avec `validate_arithmetic`, toute addition d'au moins trois termes est recalculée et le validateur fournit un préfixe de paragraphe pour une réparation ciblée.
+Les métriques `arithmetic_mismatches` et `inventory_total_mismatches` comptent les additions entières explicites incohérentes et les totaux incompatibles avec l'inventaire machine. Avec `validate_arithmetic`, toute addition d'au moins trois termes est recalculée ; les totaux de blocs normalisés sont comparés au corpus, indépendamment du nombre de diapositives, et le validateur fournit un préfixe de paragraphe pour une réparation ciblée.
 
 ## Générer et lire les rapports
 
