@@ -627,6 +627,39 @@ async def test_owned_markdown_heading_reference_can_be_repaired_by_reported_pref
 
 
 @pytest.mark.asyncio
+async def test_short_duplicate_markdown_heading_occurrence_can_be_removed(tmp_path):
+    engine, state = _engine(tmp_path)
+    execution = state.get_execution("duplicate-heading-repair")
+    execution.variables["delivery_contract"] = {
+        "steps": [{"step_id": 0, "role": "architect", "owned_paths": ["inventory.md"]}]
+    }
+    execution.variables["plan_step_id"] = 0
+    execution.variables["role_key"] = "architect"
+    project = tmp_path / "projects" / "proj-default"
+    project.mkdir(parents=True)
+    target = project / "inventory.md"
+    target.write_text(
+        "# Inventory\n\n## Conclusion\n\nFirst body.\n\n"
+        "## Conclusion\n\nSecond body remains.\n",
+        encoding="utf-8",
+    )
+
+    result = await engine._call_tool(
+        "duplicate-heading-repair", "filesystem", "replace_paragraph",
+        {
+            "path": "inventory.md", "paragraph_prefix": "## Conclusion",
+            "content": "", "occurrence": 2,
+        },
+    )
+
+    content = target.read_text(encoding="utf-8")
+    assert "Markdown line occurrence 2 replaced successfully" in result
+    assert content.count("## Conclusion") == 1
+    assert "First body." in content
+    assert "Second body remains." in content
+
+
+@pytest.mark.asyncio
 async def test_owned_plain_markdown_line_can_be_repaired_by_reported_prefix(tmp_path):
     engine, state = _engine(tmp_path)
     execution = state.get_execution("plain-line-repair")
@@ -1172,6 +1205,27 @@ def test_writer_duplicate_gate_requires_one_targeted_paragraph_repair(tmp_path):
     assert "exactly one valid filesystem__replace_paragraph" in nudge
     assert "remove occurrence=2" in nudge
     assert "never rewrite or delete the whole document" in nudge
+
+
+def test_writer_duplicate_heading_gate_requires_exact_second_heading(tmp_path):
+    engine, state = _engine(tmp_path)
+    state.get_execution("writer-heading-repair")
+    project = tmp_path / "projects" / "proj-default"
+    project.mkdir(parents=True)
+    (project / "dossier.md").write_text("# Repeated\n", encoding="utf-8")
+    step = {"role": "writer", "required_artifacts": ["dossier.md"]}
+    issues = [
+        "dossier.md: document contains 2 duplicate heading occurrence(s); "
+        "repeated Markdown heading selector(s): ## Conclusion"
+    ]
+
+    nudge = engine._writer_incremental_repair_nudge(
+        "writer-heading-repair", "writer", step, issues,
+    )
+
+    assert "including its # markers" in nudge
+    assert "occurrence=2" in nudge
+    assert "preserves all section body content" in nudge
 
 
 def test_writer_unsupported_claim_gate_requires_cited_paragraph_repair(tmp_path):

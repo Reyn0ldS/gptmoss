@@ -173,14 +173,19 @@ class FilesystemCapability:
         resolved = self._resolve_path(path, execution_id)
         key_function = self._paragraph_key
         literal_line_selector = False
+        markdown_heading_selector = bool(re.match(
+            r"^\s*#{1,6}\s+\S", str(paragraph_prefix or "")
+        ))
         has_local_reference = bool(re.search(
             r"\[[^\[\]\n]+?\s+>\s+[^\[\]\n]+?\]",
             str(paragraph_prefix or ""),
         ))
-        if has_local_reference:
+        if has_local_reference or markdown_heading_selector:
             # The same table label or prose can legitimately occur with two
             # different citations. Keep the reported defective citation in
             # the selector so an already-correct occurrence is never chosen.
+            # Markdown headings are line selectors too; unlike prose, a short
+            # heading is safely addressable by its exact marker and occurrence.
             key_function = self._literal_line_key
             literal_line_selector = True
         prefix = key_function(paragraph_prefix)
@@ -191,7 +196,8 @@ class FilesystemCapability:
             key_function = self._literal_line_key
             literal_line_selector = True
             prefix = key_function(paragraph_prefix)
-        if len(prefix) < 24:
+        minimum_prefix_length = 3 if markdown_heading_selector else 24
+        if len(prefix) < minimum_prefix_length:
             return "Error: paragraph_prefix must contain at least 24 normalized characters."
         try:
             requested_occurrence = int(occurrence)

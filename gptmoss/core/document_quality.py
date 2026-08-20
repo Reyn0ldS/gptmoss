@@ -382,7 +382,7 @@ def validate_document(path: Path, constraints: Dict[str, Any]) -> ValidationRepo
             count - 1 for count in heading_counts.values() if count > 1
         )
         duplicate_heading_samples = [
-            title
+            f"{'#' * level} {title}"
             for _, level, title in headings
             if heading_counts[(level, _fold(title))] > 1
         ]
@@ -391,7 +391,7 @@ def validate_document(path: Path, constraints: Dict[str, Any]) -> ValidationRepo
             _failure(
                 report,
                 f"document contains {duplicate_heading_count} duplicate heading occurrence(s); "
-                f"maximum is {max_duplicate_headings}; repeated heading(s): "
+                f"maximum is {max_duplicate_headings}; repeated Markdown heading selector(s): "
                 + "; ".join(duplicate_heading_samples[:10]),
             )
 

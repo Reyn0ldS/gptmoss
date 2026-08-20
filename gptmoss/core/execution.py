@@ -751,6 +751,15 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
         artifacts = [str(path).strip() for path in step.get("required_artifacts", []) if str(path).strip()]
         target = artifacts[0]
         if action == "filesystem__replace_paragraph":
+            if any("duplicate heading" in str(issue).casefold() for issue in issues):
+                return (
+                    f" Do not answer with a plan. Your next response must be exactly one valid "
+                    f"{action} tool call targeting '{target}'. Copy one exact Markdown heading "
+                    "selector (including its # markers) reported by the gate, set occurrence=2, "
+                    "and set content to an empty string. This removes only the repeated heading "
+                    "line and preserves all section body content. Change exactly one heading "
+                    "occurrence per iteration; never rewrite or delete the whole document."
+                )
             return (
                 f" Do not answer with a plan. Your next response must be exactly one valid "
                 f"{action} tool call targeting '{target}'. Use a paragraph prefix reported by "
