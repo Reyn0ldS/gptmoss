@@ -713,7 +713,7 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
         """Return the exact mutation required to repair a long writer delivery."""
         targeted_markers = (
             "arithmetic sum mismatch", "source inventory total mismatch",
-            "duplicate paragraph", "duplicate heading", "invalid local reference",
+            "duplicate paragraph", "duplicate list item", "duplicate heading", "invalid local reference",
             "lack a local reference",
         )
         replacement_markers = (

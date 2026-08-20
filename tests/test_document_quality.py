@@ -218,6 +218,28 @@ def test_document_policy_rejects_a_second_numbered_section_series(tmp_path):
     assert "## 2. Interfaces bis (number 2 after 3)" in "\n".join(report["failures"])
 
 
+def test_document_policy_rejects_duplicate_list_items(tmp_path):
+    document = tmp_path / "architecture.md"
+    repeated = (
+        "- **Access control**: The supervisor requires an ephemeral token for every "
+        "state-changing request. [architecture.md > Security > blocks 1-2]"
+    )
+    document.write_text(
+        f"# Architecture\n\n{repeated}\n\n## Review\n\n{repeated}\n",
+        encoding="utf-8",
+    )
+
+    report = validate_artifact(
+        document,
+        validator="document",
+        constraints={"max_duplicate_list_items": 0, "duplicate_min_words": 8},
+    )
+
+    assert not report["valid"]
+    assert report["metrics"]["duplicate_list_items"] == 1
+    assert "- **Access control**" in "\n".join(report["failures"])
+
+
 def test_document_policy_allows_nested_numbering_to_restart(tmp_path):
     document = tmp_path / "architecture.md"
     document.write_text(

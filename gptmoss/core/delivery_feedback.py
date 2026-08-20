@@ -28,6 +28,7 @@ INVENTORY_MARKERS = (
 )
 RENDER_TARGETED_MARKERS = (
     "duplicate paragraph",
+    "duplicate list item",
     "duplicate heading",
     "lack a local reference",
 )

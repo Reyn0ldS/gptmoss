@@ -594,6 +594,36 @@ def validate_document(path: Path, constraints: Dict[str, Any]) -> ValidationRepo
             + "; ".join(duplicate_samples[:5]),
         )
 
+    duplicate_list_item_count = 0
+    if "max_duplicate_list_items" in constraints:
+        max_duplicate_list_items = _positive_int(
+            constraints.get("max_duplicate_list_items"),
+            "max_duplicate_list_items",
+            0,
+        )
+        list_items: List[Tuple[str, str]] = []
+        for line in evidence_text.splitlines():
+            match = re.match(r"^\s*[-*+]\s+(.+?)\s*$", line)
+            if not match or len(_words(match.group(1))) < duplicate_min_words:
+                continue
+            normalized = _normalized_paragraph(match.group(1))
+            if normalized:
+                list_items.append((normalized, " ".join(line.strip().split())[:180]))
+        list_counts = Counter(key for key, _ in list_items)
+        duplicate_list_item_count = sum(
+            count - 1 for count in list_counts.values() if count > 1
+        )
+        if duplicate_list_item_count > max_duplicate_list_items:
+            duplicate_list_samples = list(dict.fromkeys(
+                sample for key, sample in list_items if list_counts[key] > 1
+            ))
+            _failure(
+                report,
+                f"document contains {duplicate_list_item_count} duplicate list item "
+                f"occurrence(s); maximum is {max_duplicate_list_items}; repeated list item "
+                "prefix(es): " + "; ".join(duplicate_list_samples[:5]),
+            )
+
     allowed_sources = {_normalize_source(source) for source in required_sources}
     cited_sources = {_normalize_source(reference["source"]) for reference in references}
     invalid_references = []
@@ -776,6 +806,7 @@ def validate_document(path: Path, constraints: Dict[str, Any]) -> ValidationRepo
         "invalid_diagrams": len(invalid_diagrams),
         "placeholder_markers": len(placeholder_hits),
         "duplicate_paragraphs": duplicate_count,
+        "duplicate_list_items": duplicate_list_item_count,
         "duplicate_headings": duplicate_heading_count,
         "heading_number_restarts": len(heading_number_restarts),
         "record_sections": record_sections_total,

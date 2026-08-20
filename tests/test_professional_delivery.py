@@ -156,6 +156,7 @@ def test_professional_profile_enforces_semantic_decisions_and_clean_support_diag
     assert decisions["record_section_policy"]["minimum_records"] == 1
     assert "owner" in decisions["record_section_policy"]["required_fields"]
     assert decisions["max_duplicate_headings"] == 0
+    assert decisions["max_duplicate_list_items"] == 0
     assert "record_section_policy" not in inventory
     assert application["reject_invalid_diagrams"] is True
     assert application["minimums"]["valid_diagrams"] == 2

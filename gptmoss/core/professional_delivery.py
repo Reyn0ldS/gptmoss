@@ -194,6 +194,7 @@ def apply_professional_profile(
         constraints["forbid_placeholders"] = True
         constraints["validate_arithmetic"] = True
         constraints["max_duplicate_paragraphs"] = 0
+        constraints["max_duplicate_list_items"] = 0
         constraints["max_duplicate_headings"] = 0
         constraints["reject_heading_number_restarts"] = True
         constraints["reject_invalid_diagrams"] = True

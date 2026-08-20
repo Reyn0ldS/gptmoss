@@ -192,6 +192,11 @@ class ExecutionProgressMixin:
                 ),
                 max(
                     0,
+                    int(metrics.get("duplicate_list_items") or 0)
+                    - int(constraints.get("max_duplicate_list_items") or 0),
+                ),
+                max(
+                    0,
                     int(metrics.get("duplicate_headings") or 0)
                     - int(constraints.get("max_duplicate_headings") or 0),
                 ),
