@@ -1874,3 +1874,98 @@ async def test_successful_required_mutation_immediately_routes_next_machine_defe
     )
     assert "gates were re-run immediately" in system_text
     assert "uncited required source file(s): source.md" in system_text
+
+
+@pytest.mark.asyncio
+async def test_delegated_retry_mutation_also_enters_immediate_revalidation(tmp_path):
+    class CapturingProvider(MockLLMProvider):
+        def __init__(self):
+            super().__init__()
+            self.requests = []
+
+        async def completion(self, messages, **kwargs):
+            self.requests.append({
+                "messages": [dict(message) for message in messages],
+                "tools": kwargs.get("tools"), "tool_choice": kwargs.get("tool_choice"),
+            })
+            return await super().completion(messages, **kwargs)
+
+    repeated = (
+        "This delegated retry paragraph is deliberately duplicated and long enough "
+        "for one deterministic occurrence repair."
+    )
+    delivery = json.dumps({
+        "summary": "repaired", "artifacts": ["report.md"],
+        "evidence": ["deterministic gate"], "risks": [], "next_action": "",
+    })
+    llm = CapturingProvider()
+    llm.add_response(tool_calls=[{
+        "id": "delegated-dedupe", "type": "function",
+        "function": {
+            "name": "filesystem__replace_paragraph",
+            "arguments": {
+                "path": "report.md", "paragraph_prefix": repeated,
+                "content": "", "occurrence": 2,
+            },
+        },
+    }])
+    llm.add_response(tool_calls=[{
+        "id": "delegated-cite", "type": "function",
+        "function": {
+            "name": "filesystem__append",
+            "arguments": {
+                "path": "report.md",
+                "content": "\n\n## Source coverage\n\nEvidence. [source.md > blocks 1-1]\n",
+            },
+        },
+    }])
+    llm.add_response(content=delivery)
+    engine, state = _engine(tmp_path, llm, max_iterations=8)
+    execution = state.get_execution("delegated-chained-repair")
+    execution.variables.update({
+        "parent_execution_id": "parent", "role_key": "writer",
+        "role_name": "Writer", "specialist": "Writer",
+        "delegated_step": {
+            "retry_context": (
+                "report.md: document contains 1 duplicate paragraph occurrence(s); "
+                "repeated paragraph prefix(es): " + repeated.casefold()
+            ),
+        },
+    })
+    execution.current_plan = {
+        "steps": [{
+            "id": 0, "role": "writer", "specialist": "Writer",
+            "description": "Repair a delegated report", "dependencies": [],
+            "expertise": [], "required_artifacts": ["report.md"],
+            "acceptance_criteria": ["No duplicates and all sources cited"],
+            "verification_commands": [], "owned_paths": ["report.md"],
+        }],
+        "artifact_validations": [{
+            "path": "report.md", "validator": "document", "required": True,
+            "constraints": {
+                "max_duplicate_paragraphs": 0, "duplicate_min_words": 8,
+                "required_source_files": ["source.md"],
+            },
+        }],
+    }
+    project = tmp_path / "projects" / "proj-default"
+    project.mkdir(parents=True)
+    target = project / "report.md"
+    target.write_text(
+        f"# Review\n\n{repeated}\n\n{repeated}\n", encoding="utf-8",
+    )
+
+    await engine.execute_task("delegated-chained-repair", "Repair the report")
+
+    assert execution.status == "completed"
+    assert target.read_text(encoding="utf-8").count(repeated) == 1
+    assert [
+        tool["function"]["name"] for tool in llm.requests[1]["tools"]
+    ] == ["filesystem__append"]
+    assert llm.requests[1]["tool_choice"] == "required"
+    system_text = "\n".join(
+        str(message.get("content") or "")
+        for message in llm.requests[1]["messages"]
+        if message.get("role") == "system"
+    )
+    assert "gates were re-run immediately" in system_text

@@ -3290,8 +3290,11 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
             )
             if pause_result is not None:
                 return pause_result
-            if required_next_tool and self._required_tool_succeeded(
-                convo.messages, tool_calls, required_next_tool,
+            effective_required_tool = (
+                required_next_tool or self._active_required_repair_tool(state)
+            )
+            if effective_required_tool and self._required_tool_succeeded(
+                convo.messages, tool_calls, effective_required_tool,
             ):
                 validation_probe = json.dumps({
                     "summary": "automatic post-mutation validation",
