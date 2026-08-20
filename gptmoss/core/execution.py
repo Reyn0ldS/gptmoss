@@ -3293,8 +3293,51 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
             if required_next_tool and self._required_tool_succeeded(
                 convo.messages, tool_calls, required_next_tool,
             ):
+                validation_probe = json.dumps({
+                    "summary": "automatic post-mutation validation",
+                    "artifacts": list(step.get("required_artifacts", [])),
+                    "evidence": ["deterministic artifact validation"],
+                    "risks": [],
+                    "next_action": "",
+                })
+                post_mutation_issues = self._step_completion_issues(
+                    execution_id, step, validation_probe,
+                )
+                if post_mutation_issues:
+                    next_repair_tool, next_repair_nudge = self._quality_repair_directive(
+                        execution_id, role_for_step, step, post_mutation_issues,
+                    )
+                    if next_repair_tool:
+                        runtime["required_next_tool"] = next_repair_tool
+                        runtime["required_repair_issues"] = [
+                            str(item) for item in post_mutation_issues if str(item).strip()
+                        ]
+                    else:
+                        runtime.pop("required_next_tool", None)
+                        runtime.pop("required_repair_issues", None)
+                    convo.messages.append({
+                        "role": "system",
+                        "content": (
+                            "The required mutation succeeded and deterministic gates were "
+                            "re-run immediately. Do not inspect or modify any unrelated content. "
+                            "Remaining defects: " + "; ".join(post_mutation_issues) + "."
+                            + next_repair_nudge
+                        ),
+                        "timestamp": time.time(),
+                    })
+                    continue
                 runtime.pop("required_next_tool", None)
                 runtime.pop("required_repair_issues", None)
+                convo.messages.append({
+                    "role": "system",
+                    "content": (
+                        "The required mutation succeeded and all machine-checkable delivery "
+                        "gates now pass. Stop calling tools and return only the compact raw JSON "
+                        "delivery contract immediately."
+                    ),
+                    "timestamp": time.time(),
+                })
+                continue
 
             tool_history = state.variables.get("tool_call_history", [])
             if (self._missing_artifacts(execution_id, step) and len(tool_history) >= 8
