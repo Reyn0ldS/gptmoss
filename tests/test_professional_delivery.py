@@ -4,6 +4,8 @@ import json
 from pathlib import Path
 from zipfile import ZipFile
 
+import pytest
+
 from gptmoss.core.delivery_package import build_delivery_package
 from gptmoss.core.documents import parse_document
 from gptmoss.core.professional_delivery import apply_professional_profile
@@ -64,3 +66,61 @@ def test_delivery_package_contains_docx_manifest_assurance_and_sources(tmp_path)
         assert manifest["assurance_passed"] is True
         with ZipFile(bundle.open("report.docx")) as docx:
             assert "word/document.xml" in docx.namelist()
+
+
+def test_professional_profile_derives_long_form_and_diagram_gates_from_requirements():
+    requirements = [
+        {
+            "id": "REQ-001", "mandatory": True,
+            "statement": "Produire un dossier professionnel autonome de 35 à 45 pages.",
+        },
+        {
+            "id": "REQ-002", "mandatory": True,
+            "statement": (
+                "Inclure une synthèse exécutive, une matrice de traçabilité, un registre "
+                "des risques, une feuille de route 30/60/90 jours, un plan de tests et "
+                "des critères d’acceptation."
+            ),
+        },
+        {
+            "id": "REQ-003", "mandatory": True,
+            "statement": "Produire au moins trois diagrammes utiles sans preuve Internet.",
+        },
+    ]
+    plan = {
+        "delivery_profile": "professional-local",
+        "primary_artifact": "dossier.md",
+        "requirements": requirements,
+        "steps": [{
+            "role": "writer", "required_artifacts": ["dossier.md"],
+            "requirement_ids": [],
+        }],
+        "artifact_validations": [],
+    }
+
+    apply_professional_profile(plan)
+
+    constraints = plan["artifact_validations"][0]["constraints"]
+    assert constraints["minimums"]["words"] == 8750
+    assert constraints["minimums"]["valid_diagrams"] == 3
+    assert constraints["reject_invalid_diagrams"] is True
+    assert constraints["forbid_external_links"] is True
+    assert constraints["required_requirement_ids"] == ["REQ-001", "REQ-002", "REQ-003"]
+    assert constraints["required_traceability_ids"] == ["REQ-001", "REQ-002", "REQ-003"]
+    assert "Synthèse exécutive" in constraints["required_headings"]
+    assert "Plan de tests" in constraints["required_headings"]
+    assert plan["steps"][0]["requirement_ids"] == ["REQ-001", "REQ-002", "REQ-003"]
+
+
+def test_delivery_package_rejects_missing_required_embedded_diagrams(tmp_path):
+    (tmp_path / "report.md").write_text("# Rapport\n\nTexte sans diagramme.\n", encoding="utf-8")
+    plan = {
+        "delivery_profile": "professional-local",
+        "professional_profile": {
+            "primary_artifact": "report.md", "minimum_valid_diagrams": 1,
+        },
+        "artifact_validations": [{"path": "report.md", "required": True}],
+    }
+
+    with pytest.raises(ValueError, match="embeds 0 diagram"):
+        build_delivery_package(tmp_path, "exec-diagram", plan, {"passed": True})

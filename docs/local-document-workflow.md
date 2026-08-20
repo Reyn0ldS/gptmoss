@@ -139,6 +139,8 @@ fichier local
 
 Le fallback professionnel estime désormais un budget d'étapes selon la taille réelle du corpus et du livrable. Une note courte reçoit un chemin compact ; un dossier à nombreuses sources, exigences, rapports ou diagrammes conserve les étapes d'analyse, rédaction, réparation et assurance indépendante. La production de la politique et des rapports qualité appartient à un rédacteur de preuves après réparation ; un QA distinct crée ensuite `analysis/final-delivery-audit.md` sans modifier les sorties des auteurs, puis le coordinateur contrôle toute la traçabilité. Les exigences complètes transmises à un spécialiste restent limitées à sa nature de travail et ne l'autorisent jamais à écrire les livrables des étapes sœurs.
 
+Une longueur exprimée en pages est convertie en budget minimal de rédaction à raison de 250 mots par page minimale demandée. Le rédacteur du livrable principal hérite systématiquement de toutes les exigences obligatoires, même lorsqu'elles ont aussi un propriétaire analytique spécialisé. Les titres professionnels explicitement demandés deviennent des sections contrôlées, et une reprise recalcule les contrats de sections ainsi que le contrat de livraison : elle ne conserve jamais silencieusement l'ancien plancher de 450 mots ni une politique devenue obsolète.
+
 Le plan LLM décrit des opérations et leurs dépendances, sans minimum global d'étapes. La
 politique `corpus_policy` impose les garanties locales sans devenir une nouvelle demande
 utilisateur. Les champs `operation`, `satisfies_obligations` et `required_evidence` sont
@@ -171,10 +173,13 @@ volume cible, exigences, preuves et dépendances), sauvegarde chaque révision d
 validées. Cette mémoire réduit les répétitions et permet de reprendre après une
 interruption fournisseur sans recommencer les sections terminées.
 
-Les blocs `mermaid` ou `diagram` sont convertis par le modèle canonique de diagramme,
+Les blocs `mermaid` ou `diagram` (`flowchart`, `sequenceDiagram` et
+`stateDiagram-v2`) sont convertis par le modèle canonique de diagramme,
 contrôlés (nœuds, arêtes, zones de confiance, densité, métadonnées), puis rendus en
 SVG déterministe. Le paquet DOCX conserve la figure dans `word/media/` et relie son
-`rId` dans `document.xml`; une erreur sémantique n'est jamais masquée par un dessin vide.
+`rId` dans `document.xml`; une erreur sémantique ou une figure sans relation ne sont
+jamais masquées par un dessin vide. Quand un minimum est demandé, le nombre de figures
+valides dans le Markdown puis le nombre de SVG réellement intégrés au DOCX sont vérifiés.
 
 L'index est lexical, accent-insensible et sans modèle à télécharger. Il est enregistré dans `workspace/uploads/document-index.json`, rechargé au redémarrage et reconstruit automatiquement si son état ne correspond plus aux documents. La représentation normalisée de chaque fichier évite de reparcourir l'archive à chaque lecture.
 
@@ -250,7 +255,7 @@ Le plan peut déclarer un validateur `document` dans `artifact_validations`. Cha
 
 Renseignez les bornes depuis le corpus réel ; ne recopiez pas les nombres de cet exemple. `required_traceability_ids` exige que chaque identifiant apparaisse dans une ligne de tableau Markdown, pas seulement quelque part dans le texte. `terminology` associe le terme canonique aux variantes interdites.
 
-Métriques disponibles : `characters`, `words`, `lines`, `headings`, `paragraphs`, `local_references`, `cited_sources`, `external_links`, `placeholder_markers`, `duplicate_paragraphs`, `unsupported_claim_paragraphs` et les compteurs de couverture des titres, exigences, lignes de traçabilité et sources.
+Métriques disponibles : `characters`, `words`, `lines`, `headings`, `paragraphs`, `local_references`, `cited_sources`, `external_links`, `placeholder_markers`, `duplicate_paragraphs`, `unsupported_claim_paragraphs`, `diagrams`, `valid_diagrams`, `invalid_diagrams` et les compteurs de couverture des titres, exigences, lignes de traçabilité et sources. Le validateur JSON accepte aussi `required_keys` afin qu'une politique ou un rapport qualité ne puisse pas passer avec un objet syntaxiquement valide mais vide de sens.
 
 Les métriques `arithmetic_mismatches` et `inventory_total_mismatches` comptent les additions entières explicites incohérentes et les totaux incompatibles avec l'inventaire machine. Avec `validate_arithmetic`, toute addition d'au moins trois termes est recalculée ; les totaux de blocs normalisés sont comparés au corpus, indépendamment du nombre de diapositives, et le validateur fournit un préfixe de paragraphe pour une réparation ciblée.
 

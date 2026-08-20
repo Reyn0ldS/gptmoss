@@ -246,6 +246,14 @@ de sections, conserve la mémoire de terminologie et de décisions, puis consoli
 les sections validées. Le nombre d'étapes est estimé selon les sources, livrables,
 objectifs de mots, exigences de preuve et diagrammes.
 
+Une plage explicite telle que « 35 à 45 pages » devient un budget vérifiable
+(250 mots par page minimale demandée) au lieu de retomber sur le plancher générique.
+Ce budget est réparti entre les sections et réappliqué aux checkpoints existants à
+la reprise, sans effacer les sections déjà rédigées. Le propriétaire du livrable
+principal reçoit toutes les exigences obligatoires ; les sorties explicitement
+nommées conservent toujours leur étape productrice même si le plan adaptatif retire
+des cérémonies inutiles.
+
 Les checkpoints JSON atomiques sont placés sous
 `.gptmoss/document-state/<execution>.document.json`. L'endpoint
 `GET /executions/{execution_id}/document` et le panneau **Document long format**
@@ -253,6 +261,11 @@ affichent l'avancement et permettent la reprise. Les tableaux Markdown deviennen
 de vrais tableaux DOCX ; les blocs `mermaid` ou `diagram` valides sont rendus en
 SVG et intégrés dans `word/media/`. Une figure invalide est explicitement
 signalée, jamais remplacée par une image trompeuse.
+Les sous-ensembles Mermaid `flowchart`, `sequenceDiagram` et `stateDiagram-v2`
+sont normalisés vers le même modèle contrôlé. Une figure isolée sans relation ne
+compte pas comme diagramme utile. Si la mission impose un nombre minimal de
+diagrammes, le Markdown et leur présence réelle dans le DOCX sont tous deux
+vérifiés avant que l'exécution puisse être déclarée terminée.
 
 Options dédiées : `document_engine_enabled`, `document_checkpoint_enabled`,
 `document_target_section_words`, `diagram_rendering` et `docx_embed_diagrams`.

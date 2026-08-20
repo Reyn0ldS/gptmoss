@@ -63,9 +63,41 @@ def estimate_document_work(task: str, analysis: dict[str, Any] | None = None) ->
     match = re.search(r"(?i)\b(?:minimums?\s+)?words\s*=\s*(\d[\d _]*)", text)
     if match:
         requested_words = int(match.group(1).replace(" ", "").replace("_", ""))
+    page_match = re.search(
+        r"(?i)\b(\d{1,4})\s*(?:a|à|to|[-–—])\s*(\d{1,4})\s+pages?\b",
+        text,
+    )
+    if page_match:
+        lower, upper = int(page_match.group(1)), int(page_match.group(2))
+        if 1 <= lower <= upper:
+            requested_words = max(requested_words, lower * 250)
+    else:
+        page_match = re.search(
+            r"(?i)\b(?:au\s+moins|minimum(?:\s+de)?|at\s+least)\s+"
+            r"(\d{1,4})\s+pages?\b",
+            text,
+        )
+        if page_match:
+            requested_words = max(requested_words, int(page_match.group(1)) * 250)
+        else:
+            page_match = re.search(
+                r"(?i)\b(?:environ\s+|about\s+|approximately\s+)?(\d{1,4})\s+pages?\b",
+                text,
+            )
+            if page_match:
+                requested_words = max(requested_words, int(page_match.group(1)) * 250)
+            elif re.search(
+                r"(?i)\b(?:une\s+quarantaine\s+de|about\s+forty)\s+pages?\b", text
+            ):
+                requested_words = max(requested_words, 40 * 250)
     has_diagrams = any(marker in lowered for marker in ("diagram", "mermaid", "schéma", "schema", "uml", "architecture view"))
     score = len(set(item.casefold() for item in sources)) * 2 + len(set(item.casefold() for item in outputs))
-    score += 3 if requested_words >= 3000 else 2 if requested_words >= 1200 else 0
+    score += (
+        11 if requested_words >= 8000
+        else 4 if requested_words >= 3000
+        else 2 if requested_words >= 1200
+        else 0
+    )
     score += 2 if len(text) >= 2500 else 1 if len(text) >= 900 else 0
     if has_diagrams:
         score += 2
@@ -176,13 +208,22 @@ def adapt_document_steps(
     if coordinator:
         wanted.append(coordinator)
 
-    selected = []
-    seen = set()
-    for name in wanted:
-        step = by_name.get(name)
-        if step is not None and name not in seen:
-            selected.append(step)
-            seen.add(name)
+    # Adaptation may remove optional ceremony, never an explicitly named
+    # output. Preserve the original owner of every artifact literal requested
+    # by the user, regardless of the aggregate complexity score.
+    lowered_task = str(task or "").casefold().replace("\\", "/")
+    for name, step in by_name.items():
+        if any(
+            str(path).casefold().replace("\\", "/") in lowered_task
+            for path in (step.get("required_artifacts") or [])
+            if path
+        ):
+            wanted.append(name)
+
+    selected_names = set(wanted)
+    selected = [
+        step for name, step in by_name.items() if name in selected_names
+    ]
     if len(selected) < 4:
         selected = [steps[0], steps[1], steps[7], steps[8], steps[9], steps[12]]
     selected = _renumber(selected)

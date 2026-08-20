@@ -17,6 +17,10 @@ def validate_diagram(spec: DiagramSpec, *, max_nodes: int = 80, max_edges: int =
         issues.append("title, caption and alt_text are required")
     if not spec.nodes:
         issues.append("diagram must contain at least one node")
+    elif len(spec.nodes) < 2:
+        issues.append("diagram must contain at least two nodes to communicate a relationship")
+    if not spec.edges:
+        issues.append("diagram must contain at least one relationship")
     if any(not node.node_id.strip() or not node.label.strip() for node in spec.nodes):
         issues.append("node identifiers and labels are required")
     if len(node_ids) != len(node_set):

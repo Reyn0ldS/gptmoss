@@ -105,6 +105,28 @@ def test_document_fallback_honors_primary_filename_named_in_a_sentence():
     }
 
 
+def test_unclassified_document_requirements_belong_to_primary_writer_not_quality_writer():
+    task = (
+        "Rédige un dossier professionnel depuis le corpus local. "
+        "Crée dossier.md et quality-report.json.\n"
+        "REQ-001 — Analyser l'architecture réelle et ses risques.\n"
+        "REQ-002 — Produire quality-report.json depuis le livrable final."
+    )
+    plan = SimplePlanner._document_fallback(task, analyze_task_complexity(task))
+    primary = next(
+        step for step in plan["steps"]
+        if "dossier.md" in step.get("required_artifacts", [])
+    )
+    quality = next(
+        step for step in plan["steps"]
+        if "quality-report.json" in step.get("required_artifacts", [])
+    )
+
+    assert "REQ-001" in primary["requirement_ids"]
+    assert "REQ-001" not in quality["requirement_ids"]
+    assert "REQ-002" in quality["requirement_ids"]
+
+
 def test_document_fallback_keeps_requirement_ownership_bounded():
     plan = SimplePlanner._fallback_plan(
         DOCUMENT_TASK, analyze_task_complexity(DOCUMENT_TASK)

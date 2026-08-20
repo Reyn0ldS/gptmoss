@@ -229,6 +229,19 @@ def build_delivery_package(
         render_diagrams=diagram_rendering,
         embed_diagrams=docx_embed_diagrams,
     )
+    with ZipFile(BytesIO(docx_bytes)) as rendered_docx:
+        docx_names = set(rendered_docx.namelist())
+        if "word/document.xml" not in docx_names:
+            raise ValueError("Rendered DOCX is missing word/document.xml")
+        embedded_diagrams = len([
+            name for name in docx_names if name.startswith("word/media/diagram-")
+        ])
+    minimum_diagrams = int(profile.get("minimum_valid_diagrams") or 0)
+    if embedded_diagrams < minimum_diagrams:
+        raise ValueError(
+            f"Rendered DOCX embeds {embedded_diagrams} diagram(s); "
+            f"the delivery requires at least {minimum_diagrams}"
+        )
     delivery_dir = root / ".gptmoss" / "deliveries" / execution_id
     delivery_dir.mkdir(parents=True, exist_ok=True)
     docx_path = delivery_dir / (primary_path.stem + ".docx")
@@ -261,10 +274,23 @@ def build_delivery_package(
         archive.write(assurance_path, assurance_path.name)
         archive.write(manifest_path, manifest_path.name)
     write_bytes_atomic(zip_path, stream.getvalue())
+    with ZipFile(zip_path) as delivery_archive:
+        archive_names = set(delivery_archive.namelist())
+        required_names = {
+            docx_path.name, assurance_path.name, manifest_path.name,
+            *(f"artifacts/{name}" for name, _ in artifacts),
+        }
+        missing_names = sorted(required_names - archive_names)
+        if missing_names:
+            raise ValueError(
+                "Delivery archive is missing required member(s): " + ", ".join(missing_names)
+            )
     return {
         "profile": "professional-local", "title": title,
         "primary_artifact": primary_name, "docx_path": str(docx_path),
         "manifest_path": str(manifest_path), "archive_path": str(zip_path),
         "archive_sha256": sha256(zip_path.read_bytes()).hexdigest(),
         "archive_size_bytes": zip_path.stat().st_size,
+        "embedded_diagrams": embedded_diagrams,
+        "validation_passed": True,
     }

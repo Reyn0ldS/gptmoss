@@ -295,6 +295,24 @@ def _assign_document_requirements(
     """Map document requirements to surviving specialists, never to frozen step ids."""
     requirements = extract_requirements(task)
     producers = [step for step in steps if step.get("role") in {"architect", "security", "writer"}]
+    writers = [step for step in producers if step.get("role") == "writer"]
+    primary_writers = [
+        step for step in writers
+        if (
+            "professional" in _step_search_blob(step)
+            or any(
+                str(path).casefold().endswith((".md", ".txt", ".html"))
+                and not str(path).replace("\\", "/").casefold().startswith("analysis/")
+                and not any(
+                    marker in str(path).casefold()
+                    for marker in ("quality", "review", "audit")
+                )
+                for path in (step.get("required_artifacts") or [])
+            )
+        )
+        and "quality evidence" not in _step_search_blob(step)
+    ]
+    primary_writer = primary_writers[0] if primary_writers else (writers[0] if writers else None)
     coordinators = [step for step in steps if step.get("role") == "coordinator"]
     final_coordinator = coordinators[-1] if coordinators else steps[-1]
     final_reviewers = [
@@ -375,15 +393,18 @@ def _assign_document_requirements(
         elif named_owners:
             targets = named_owners
         else:
-            writers = [step for step in producers if step.get("role") == "writer"]
-            targets = writers[-1:] if writers else (producers[-1:] if producers else [final_coordinator])
+            targets = [primary_writer] if primary_writer else (
+                producers[-1:] if producers else [final_coordinator]
+            )
         if not targets:
             if any(marker in statement for marker in ("inventor", "documents.inventory", "pièces jointes", "pieces jointes")):
                 targets = _steps_matching(steps, "corpus")[:1] or producers[:1]
             elif any(marker in statement for marker in ("quality", "review", "audit", "rapport")):
                 targets = _steps_matching(steps, "quality evidence", "deterministic")[:1] or producers[-1:]
             else:
-                targets = producers[-1:] if producers else [final_coordinator]
+                targets = [primary_writer] if primary_writer else (
+                    producers[-1:] if producers else [final_coordinator]
+                )
         for target in targets:
             _assign_requirement(target, requirement_id)
         _assign_requirement(final_coordinator, requirement_id)

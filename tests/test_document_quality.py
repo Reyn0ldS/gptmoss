@@ -63,6 +63,64 @@ def test_unconfigured_markdown_validation_remains_format_only(tmp_path):
     assert report["metrics"]["duplicate_paragraphs"] == 1
 
 
+def test_document_policy_counts_only_semantically_valid_diagrams(tmp_path):
+    document = tmp_path / "diagrams.md"
+    document.write_text(
+        """# Dossier
+
+```mermaid
+graph TD
+A[API] --> B[Store]
+```
+
+```mermaid
+sequenceDiagram
+participant U as User
+U->>A: request
+A-->>U: response
+```
+
+```mermaid
+graph TD
+ONLY[Isolated]
+```
+""",
+        encoding="utf-8",
+    )
+
+    report = validate_artifact(
+        document,
+        validator="document",
+        constraints={
+            "reject_invalid_diagrams": True,
+            "minimums": {"valid_diagrams": 3},
+        },
+    )
+
+    assert not report["valid"]
+    assert report["metrics"]["diagrams"] == 3
+    assert report["metrics"]["valid_diagrams"] == 2
+    assert report["metrics"]["invalid_diagrams"] == 1
+
+
+def test_json_validator_requires_declared_semantic_keys(tmp_path):
+    report_path = tmp_path / "quality-report.json"
+    report_path.write_text('{"valid": true}', encoding="utf-8")
+
+    report = validate_artifact(
+        report_path,
+        validator="json",
+        constraints={
+            "top_level_type": "dict",
+            "required_keys": ["valid", "metrics", "failures"],
+        },
+    )
+
+    assert not report["valid"]
+    assert report["metrics"]["required_keys_covered"] == 1
+    assert "metrics, failures" in report["failures"][0]
+
+
 def test_duplicate_failure_exposes_machine_actionable_paragraph_prefix(tmp_path):
     document = tmp_path / "duplicate.md"
     paragraph = (

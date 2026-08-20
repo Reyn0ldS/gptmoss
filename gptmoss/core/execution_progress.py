@@ -95,6 +95,11 @@ class ExecutionProgressMixin:
                 deficit("local_references"),
                 deficit("cited_sources"),
                 deficit("headings"),
+                deficit("valid_diagrams"),
+                (
+                    max(0, int(metrics.get("invalid_diagrams") or 0))
+                    if constraints.get("reject_invalid_diagrams") else 0
+                ),
             )
             defects.append((path, defect_vector))
         return tuple(sorted(defects))

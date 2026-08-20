@@ -5,6 +5,7 @@ import json
 import time
 import logging
 import inspect
+import math
 import os
 import re
 import shlex
@@ -50,6 +51,7 @@ from gptmoss.core.provider_recovery import (
 )
 from gptmoss.core.scheduler import Scheduler
 from gptmoss.core.long_document_engine import LongDocumentEngine
+from gptmoss.core.document_model import DocumentSection, SectionContract
 from gptmoss.core.execution_plan import (
     ROLE_ALIASES,
     ROLE_DISPLAY_NAMES,
@@ -1185,31 +1187,101 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
         except ValueError as exc:
             logger.warning("Recreating corrupt document checkpoint for %s: %s", execution_id, exc)
             model = None
+        primary = str(plan.get("primary_artifact") or "deliverable.md")
+        headings: list[str] = []
+        primary_minimum_words = 0
+        for artifact_policy in plan.get("artifact_validations", []):
+            if artifact_policy.get("path") != primary:
+                continue
+            constraints = artifact_policy.get("constraints", {})
+            headings = [str(item) for item in constraints.get("required_headings", [])]
+            minimums = constraints.get("minimums") or {}
+            if isinstance(minimums, dict):
+                try:
+                    primary_minimum_words = max(0, int(minimums.get("words") or 0))
+                except (TypeError, ValueError):
+                    primary_minimum_words = 0
+            break
         if model is None:
-            primary = str(plan.get("primary_artifact") or "deliverable.md")
             output_path = (workspace_path / primary).resolve()
             if output_path == workspace_path or workspace_path not in output_path.parents:
                 logger.warning("Unsafe primary document path %r; using deliverable.md", primary)
                 primary = "deliverable.md"
                 output_path = workspace_path / primary
             model = engine.create_model(execution_id, task, str(output_path), plan.get("requirements", []))
-            headings: list[str] = []
-            for policy in plan.get("artifact_validations", []):
-                if policy.get("path") == primary:
-                    headings = [str(item) for item in policy.get("constraints", {}).get("required_headings", [])]
-                    break
             if not headings:
                 headings = [
                     str(step.get("specialist") or f"Section {index}")
                     for index, step in enumerate(plan.get("steps", []), 1)
                     if step.get("role") in {"architect", "security", "writer"}
                 ]
+            selected_headings = headings or ["Executive Summary", "Architecture", "Conclusion"]
+            target_words = max(
+                self.document_target_section_words,
+                math.ceil(primary_minimum_words / max(1, len(selected_headings))),
+            )
             engine.plan_sections(
                 model,
-                headings or ["Executive Summary", "Architecture", "Conclusion"],
+                selected_headings,
                 requirements=plan.get("requirements", []),
-                target_words=self.document_target_section_words,
+                target_words=target_words,
             )
+        else:
+            # A resume must inherit stricter policies introduced after the
+            # checkpoint was first created. Preserve written content while
+            # increasing section contracts and refreshing requirements.
+            model.requirements = [dict(item) for item in plan.get("requirements", [])]
+            if headings and not any(section.content for section in model.sections):
+                target_words = max(
+                    self.document_target_section_words,
+                    math.ceil(primary_minimum_words / max(1, len(headings))),
+                )
+                engine.plan_sections(
+                    model,
+                    headings,
+                    requirements=model.requirements,
+                    target_words=target_words,
+                )
+            elif headings:
+                folded_existing = {
+                    section.contract.heading.casefold() for section in model.sections
+                }
+                for heading in headings:
+                    if heading.casefold() in folded_existing:
+                        continue
+                    section_number = len(model.sections) + 1
+                    model.sections.append(DocumentSection(contract=SectionContract(
+                        section_id=f"SEC-{section_number:03d}",
+                        heading=heading,
+                        purpose=f"Explain {heading} with source-grounded facts, decisions and consequences.",
+                        target_words=self.document_target_section_words,
+                        required_topics=[heading],
+                        dependencies=[f"SEC-{section_number - 1:03d}"] if section_number > 1 else [],
+                    )))
+                    folded_existing.add(heading.casefold())
+            section_count = max(1, len(model.sections))
+            target_words = max(
+                self.document_target_section_words,
+                math.ceil(primary_minimum_words / section_count),
+            )
+            for section in model.sections:
+                section.contract.target_words = max(
+                    int(section.contract.target_words or 0), target_words
+                )
+            assigned_ids = {
+                identifier
+                for section in model.sections
+                for identifier in section.contract.requirement_ids
+            }
+            missing_ids = [
+                str(item.get("id")) for item in model.requirements
+                if item.get("id") and str(item.get("id")) not in assigned_ids
+            ]
+            for index, identifier in enumerate(missing_ids):
+                if model.sections:
+                    model.sections[index % len(model.sections)].contract.requirement_ids.append(identifier)
+            model.revision += 1
+            engine.store.save(model)
         state.variables["document_model_checkpoint"] = str(
             Path(".gptmoss") / "document-state" / engine.store.path_for(execution_id).name
         ).replace("\\", "/")
@@ -1524,13 +1596,13 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
             self.artifact_store,
             state.variables.get("attachment_ids", []),
         )
-        if "document_model_checkpoint" not in state.variables:
-            self._initialize_document_state(execution_id, task, state.current_plan, state)
-        if not isinstance(state.variables.get("delivery_contract"), dict):
-            state.variables["delivery_contract"] = build_delivery_contract(
-                state.current_plan, task,
-                repair_obligations=not bool(state.variables.get("parent_execution_id")),
-            )
+        self._initialize_document_state(execution_id, task, state.current_plan, state)
+        # Rebuild after deterministic profile upgrades. A persisted contract
+        # must never keep weaker validations or stale requirement ownership.
+        state.variables["delivery_contract"] = build_delivery_contract(
+            state.current_plan, task,
+            repair_obligations=not bool(state.variables.get("parent_execution_id")),
+        )
         delivery_contract = state.variables["delivery_contract"]
         scope_changes = delivery_contract.get("scope_changes", [])
         approved_contract = state.variables.get("approved_scope_contract_sha256")
@@ -1703,19 +1775,45 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
                             },
                         ))
                         break
+                    workspace = self._delivery_workspace(execution_id)
+                    package = None
+                    delivery_plan = state.current_plan or {}
+                    try:
+                        if workspace:
+                            package = build_delivery_package(
+                                workspace, execution_id, delivery_plan,
+                                assurance_report,
+                                diagram_rendering=self.diagram_rendering,
+                                docx_embed_diagrams=self.docx_embed_diagrams,
+                            )
+                    except (OSError, TypeError, ValueError) as error:
+                        self.state_engine.transition_execution(
+                            state, "failed", reason="delivery packaging failed", actor="runtime"
+                        )
+                        state.results["error"] = f"Delivery packaging failed: {error}"
+                        await self.event_bus.publish(Event(
+                            type="ExecutionFailed",
+                            payload={"execution_id": execution_id, "error": state.results["error"]},
+                        ))
+                        break
+                    if delivery_plan.get("delivery_profile") == "professional-local" and not package:
+                        self.state_engine.transition_execution(
+                            state, "failed", reason="professional package missing", actor="runtime"
+                        )
+                        state.results["error"] = (
+                            "Professional delivery passed assurance but its DOCX/manifest/ZIP package "
+                            "could not be created."
+                        )
+                        await self.event_bus.publish(Event(
+                            type="ExecutionFailed",
+                            payload={"execution_id": execution_id, "error": state.results["error"]},
+                        ))
+                        break
+                    if package:
+                        state.results["delivery_package"] = package
                     self.state_engine.transition_execution(
                         state, "completed", reason="delivery completed", actor="runtime"
                     )
-                    workspace = self._delivery_workspace(execution_id)
-                    if workspace:
-                        package = build_delivery_package(
-                            workspace, execution_id, state.current_plan,
-                            assurance_report,
-                            diagram_rendering=self.diagram_rendering,
-                            docx_embed_diagrams=self.docx_embed_diagrams,
-                        )
-                        if package:
-                            state.results["delivery_package"] = package
                     state.results["deliveries"] = [
                         state.results.get("steps", {}).get(str(step.get("id"))) for step in steps
                     ]

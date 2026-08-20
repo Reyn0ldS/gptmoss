@@ -10,6 +10,8 @@ from collections import Counter
 from pathlib import Path, PurePosixPath
 from typing import Any, Dict, List, Sequence, Tuple
 
+from gptmoss.core.diagrams import parse_mermaid, validate_diagram
+
 
 ValidationReport = Dict[str, Any]
 _HEADING = re.compile(r"^(#{1,6})[ \t]+(.+?)\s*#*\s*$")
@@ -170,6 +172,36 @@ def _normalized_paragraph(value: str) -> str:
     return " ".join(re.findall(r"[^\W_]+", _fold(without_references)))
 
 
+def _diagram_reports(text: str) -> List[Dict[str, Any]]:
+    """Validate fenced diagrams while ignoring unrelated code examples."""
+    reports: List[Dict[str, Any]] = []
+    lines = text.splitlines()
+    index = 0
+    while index < len(lines):
+        match = re.match(r"^\s*```(?:mermaid|diagram)\s*$", lines[index], re.IGNORECASE)
+        if not match:
+            index += 1
+            continue
+        start = index + 1
+        index += 1
+        body: List[str] = []
+        while index < len(lines) and not re.match(r"^\s*```\s*$", lines[index]):
+            body.append(lines[index])
+            index += 1
+        if index >= len(lines):
+            reports.append({"valid": False, "issues": ["diagram fence is not closed"], "line": start})
+            break
+        try:
+            report = validate_diagram(
+                parse_mermaid("\n".join(body), diagram_id=f"diagram-{len(reports) + 1}")
+            )
+        except (TypeError, ValueError) as error:
+            report = {"valid": False, "issues": [str(error)]}
+        reports.append({**report, "line": start})
+        index += 1
+    return reports
+
+
 def _normalize_source(value: str) -> str:
     return value.strip().replace(chr(92), "/").casefold()
 
@@ -276,6 +308,14 @@ def validate_document(path: Path, constraints: Dict[str, Any]) -> ValidationRepo
         })
     code_reference_count = max(0, all_reference_count - len(references))
     external_links = _EXTERNAL_LINK.findall(text)
+    diagram_reports = _diagram_reports(text)
+    invalid_diagrams = [item for item in diagram_reports if not item.get("valid")]
+    if constraints.get("reject_invalid_diagrams") and invalid_diagrams:
+        samples = "; ".join(
+            f"line {item.get('line')}: {', '.join(str(issue) for issue in item.get('issues', []))}"
+            for item in invalid_diagrams[:5]
+        )
+        _failure(report, f"document contains {len(invalid_diagrams)} invalid diagram(s): {samples}")
     required_headings = _strings(constraints.get("required_headings"), "required_headings")
     required_ids = _strings(
         constraints.get("required_requirement_ids"), "required_requirement_ids"
@@ -583,6 +623,9 @@ def validate_document(path: Path, constraints: Dict[str, Any]) -> ValidationRepo
         "local_references": len(references),
         "cited_sources": len(cited_sources),
         "external_links": len(external_links),
+        "diagrams": len(diagram_reports),
+        "valid_diagrams": len(diagram_reports) - len(invalid_diagrams),
+        "invalid_diagrams": len(invalid_diagrams),
         "placeholder_markers": len(placeholder_hits),
         "duplicate_paragraphs": duplicate_count,
         "unsupported_claim_paragraphs": len(unsupported_claims),
