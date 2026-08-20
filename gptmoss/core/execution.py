@@ -886,6 +886,31 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
             f"{bounded_content}. Later turns can append further bounded sections after the first call succeeds."
         )
 
+    def _quality_repair_directive(
+        self,
+        execution_id: str,
+        role_key: str,
+        step: Dict[str, Any],
+        issues: List[str],
+    ) -> tuple[str, str]:
+        """Choose one safe repair, always gathering missing evidence before mutation."""
+        coverage_tool = self._document_coverage_repair_tool(issues)
+        if coverage_tool:
+            return coverage_tool, self._document_coverage_repair_nudge(issues)
+        artifact_tool = self._writer_incremental_repair_tool(
+            execution_id, role_key, step, issues,
+        )
+        if artifact_tool:
+            return artifact_tool, self._writer_incremental_repair_nudge(
+                execution_id, role_key, step, issues,
+            )
+        initialization_tool = self._required_artifact_initialization_tool(
+            execution_id, step, issues,
+        )
+        return initialization_tool, self._required_artifact_initialization_nudge(
+            execution_id, step, issues,
+        )
+
     @staticmethod
     def _schemas_for_required_tool(
         schemas: List[Dict[str, Any]], required_tool: str,
@@ -2983,19 +3008,8 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
                     malformed_issues = self._step_completion_issues(
                         execution_id, step, response_text,
                     )
-                    required_repair_tool = self._writer_incremental_repair_tool(
+                    required_repair_tool, repair_nudge = self._quality_repair_directive(
                         execution_id, role_for_step, step, malformed_issues,
-                    ) or self._document_coverage_repair_tool(
-                        malformed_issues
-                    ) or self._required_artifact_initialization_tool(
-                        execution_id, step, malformed_issues,
-                    )
-                    repair_nudge = self._writer_incremental_repair_nudge(
-                        execution_id, role_for_step, step, malformed_issues,
-                    ) or self._document_coverage_repair_nudge(
-                        malformed_issues
-                    ) or self._required_artifact_initialization_nudge(
-                        execution_id, step, malformed_issues,
                     )
                     if required_repair_tool:
                         runtime["required_next_tool"] = required_repair_tool
@@ -3018,19 +3032,8 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
                 if completion_issues:
                     if self._can_engine_finalize(execution_id, step):
                         return self._engine_delivery(execution_id, step)
-                    repair_nudge = self._writer_incremental_repair_nudge(
+                    required_repair_tool, repair_nudge = self._quality_repair_directive(
                         execution_id, role_for_step, step, completion_issues,
-                    ) or self._document_coverage_repair_nudge(
-                        completion_issues
-                    ) or self._required_artifact_initialization_nudge(
-                        execution_id, step, completion_issues,
-                    )
-                    required_repair_tool = self._writer_incremental_repair_tool(
-                        execution_id, role_for_step, step, completion_issues,
-                    ) or self._document_coverage_repair_tool(
-                        completion_issues
-                    ) or self._required_artifact_initialization_tool(
-                        execution_id, step, completion_issues,
                     )
                     if required_repair_tool:
                         runtime["required_next_tool"] = required_repair_tool

@@ -1266,6 +1266,24 @@ def test_arithmetic_quality_failure_forces_targeted_repair_for_any_specialist(tm
     )
 
 
+def test_missing_document_coverage_precedes_artifact_mutation(tmp_path):
+    engine, state = _engine(tmp_path, MockLLMProvider())
+    state.get_execution("repair-order")
+    step = {"required_artifacts": ["analysis/inventory.md"]}
+    issues = [
+        "read every normalized block of requirements.txt; missing 1-based block(s): 3",
+        "analysis/inventory.md: invalid local reference(s): undeclared local source 'legacy.txt'",
+    ]
+
+    tool, nudge = engine._quality_repair_directive(
+        "repair-order", "architect", step, issues,
+    )
+
+    assert tool == "documents__read"
+    assert "start_block=2" in nudge
+    assert "filesystem" not in nudge
+
+
 @pytest.mark.asyncio
 async def test_missing_specialist_artifact_forces_bounded_write_after_malformed_json(tmp_path):
     class CapturingProvider(MockLLMProvider):
