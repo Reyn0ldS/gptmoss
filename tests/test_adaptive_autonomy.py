@@ -1164,6 +1164,20 @@ def test_resumed_specialist_reuses_only_same_assignment_document_reads(tmp_path)
 
     assert engine._document_coverage_issues("resumed-specialist", step) == []
     assert engine._document_coverage_issues("unrelated-specialist", step)
+    assert engine._inherits_complete_document_coverage("resumed-specialist", step)
+    assert not engine._inherits_complete_document_coverage("unrelated-specialist", step)
+
+    schemas = [
+        {"function": {"name": "documents__inventory"}},
+        {"function": {"name": "documents__read"}},
+        {"function": {"name": "documents__read_chunk"}},
+        {"function": {"name": "documents__search"}},
+        {"function": {"name": "filesystem__read"}},
+    ]
+    filtered = engine._schemas_for_inherited_document_coverage(schemas)
+    assert [item["function"]["name"] for item in filtered] == [
+        "documents__search", "filesystem__read",
+    ]
 
 
 def test_exhaustive_inventory_gate_requires_each_attached_image_presented(tmp_path):

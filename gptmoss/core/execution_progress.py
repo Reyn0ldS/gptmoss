@@ -290,6 +290,41 @@ class ExecutionProgressMixin:
             )
         return issues
 
+    def _inherits_complete_document_coverage(
+        self, execution_id: str, step: Dict[str, Any]
+    ) -> bool:
+        """Identify a fresh retry whose exact prior assignment proved full coverage."""
+        state = self.state_engine.get_execution(execution_id)
+        variables = state.variables
+        parent_id = variables.get("parent_execution_id")
+        plan_step_id = variables.get("plan_step_id")
+        project_id = variables.get("project_id")
+        attachments = {
+            str(item) for item in variables.get("attachment_ids", []) if item
+        }
+        if parent_id is None or plan_step_id is None or not attachments:
+            return False
+        if any(
+            item.get("capability") == "documents" and item.get("action") == "read"
+            for item in variables.get("tool_call_history", [])
+        ):
+            return False
+        prior_assignment = any(
+            sibling.execution_id != execution_id
+            and sibling.variables.get("parent_execution_id") == parent_id
+            and sibling.variables.get("plan_step_id") == plan_step_id
+            and sibling.variables.get("project_id") == project_id
+            and {
+                str(item) for item in sibling.variables.get("attachment_ids", []) if item
+            } == attachments
+            and any(
+                item.get("capability") == "documents" and item.get("action") == "read"
+                for item in sibling.variables.get("tool_call_history", [])
+            )
+            for sibling in self.state_engine.executions.values()
+        )
+        return prior_assignment and not self._document_coverage_issues(execution_id, step)
+
     def _capability_gaps(self, state) -> List[Dict[str, Any]]:
         """Describe unavailable input modalities without pretending to use them."""
         gaps = []

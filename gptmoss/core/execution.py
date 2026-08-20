@@ -925,6 +925,19 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
         ]
 
     @staticmethod
+    def _schemas_for_inherited_document_coverage(
+        schemas: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Hide redundant bulk reads while retaining targeted document search."""
+        redundant = {
+            "documents__inventory", "documents__read", "documents__read_chunk",
+        }
+        return [
+            schema for schema in schemas
+            if schema.get("function", {}).get("name") not in redundant
+        ]
+
+    @staticmethod
     def _required_tool_succeeded(
         messages: List[Dict[str, Any]],
         tool_calls: List[Dict[str, Any]],
@@ -2433,6 +2446,9 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
         allowed_capabilities = self._allowed_capabilities(skills)
         
         step_desc = step.get("description", "")
+        inherited_document_coverage = self._inherits_complete_document_coverage(
+            execution_id, step,
+        )
         prerequisite_outputs = state.variables.get("dependency_results") or []
         if not prerequisite_outputs and state.current_plan:
             if role_for_step == "coordinator":
@@ -2459,6 +2475,12 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
             reuse_instruction = ""
             if prerequisite_outputs:
                 reuse_instruction = " Reuse the validated prerequisite outputs supplied in the task; do not repeat their work."
+            if inherited_document_coverage:
+                reuse_instruction += (
+                    " Machine-verified complete document coverage was inherited from the exact prior "
+                    "assignment. Do not inventory or reread the corpus; preserve the existing artifact, "
+                    "inspect it with filesystem.read, and apply only machine-reported repairs."
+                )
             convo.messages.append({"role": "system", "content": f"Current Step objectives: {step_desc}.{reuse_instruction} Generate thought and select tools if needed.", "timestamp": time.time()})
 
         runtime_key = str(step.get("id"))
@@ -2652,6 +2674,8 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
                     )
                 ),
             )
+            if inherited_document_coverage:
+                schemas = self._schemas_for_inherited_document_coverage(schemas)
             required_next_tool = str(runtime.get("required_next_tool") or "")
             if required_next_tool:
                 constrained_schemas = self._schemas_for_required_tool(
