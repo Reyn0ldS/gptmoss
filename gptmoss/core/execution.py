@@ -3308,16 +3308,14 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
         required_repair_tool = self._active_required_repair_tool(state)
         normalized_path = self._normalized_workspace_path(path)
         overwrites_existing_document = (
-            role == "writer"
-            and capability.lower() == "filesystem"
+            capability.lower() == "filesystem"
             and action.lower() == "write"
             and normalized_path in protected_document_artifacts
             and self._artifact_exists(execution_id, path)
             and required_repair_tool != "filesystem__write"
         )
         shell_mutates_document = (
-            role == "writer"
-            and capability.lower() == "shell"
+            capability.lower() == "shell"
             and action.lower() == "execute"
             and any(
                 self._normalized_workspace_path(target) in protected_document_artifacts

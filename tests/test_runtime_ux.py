@@ -681,15 +681,18 @@ async def test_active_required_artifact_cannot_be_deleted_by_its_writer(tmp_path
     assert target.read_text(encoding="utf-8") == "validated draft"
 
 
+@pytest.mark.parametrize("role", ["writer", "architect"])
 @pytest.mark.asyncio
-async def test_writer_cannot_globally_overwrite_existing_document_without_gate(tmp_path):
+async def test_specialist_cannot_globally_overwrite_existing_document_without_gate(
+    tmp_path, role,
+):
     engine, state = _engine(tmp_path)
     execution = state.get_execution("guarded-document")
-    execution.variables["role_key"] = "writer"
+    execution.variables["role_key"] = role
     execution.current_plan = {
         "steps": [{
             "id": 0,
-            "role": "writer",
+            "role": role,
             "required_artifacts": ["dossier.md"],
             "owned_paths": ["dossier.md"],
         }],
