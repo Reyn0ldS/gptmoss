@@ -274,6 +274,20 @@ def test_requirement_extraction_preserves_lists_punctuation_and_has_no_hidden_ca
     assert requirements[-1]["statement"].startswith("Outcome 29")
 
 
+def test_requirement_extraction_preserves_explicit_stable_identifiers():
+    requirements = extract_requirements(
+        "REQ-E2E-001 — Inventorier toutes les pièces.\n"
+        "REQ-E2E-002: Produire une matrice de traçabilité.\n"
+        "- Conserver aussi cette exigence sans identifiant."
+    )
+
+    assert [item["id"] for item in requirements] == [
+        "REQ-E2E-001", "REQ-E2E-002", "REQ-001",
+    ]
+    assert requirements[0]["statement"] == "Inventorier toutes les pièces"
+    assert requirements[1]["statement"] == "Produire une matrice de traçabilité"
+
+
 def test_complete_without_placeholders_is_not_misclassified_as_scope_reduction():
     plan = {"steps": [{
         "id": 0,

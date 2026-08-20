@@ -11,7 +11,8 @@ from gptmoss.core.document_planning import adapt_document_steps, estimate_docume
 from gptmoss.planners.complexity import analyze_task_complexity
 
 _ARTIFACT_NAME = re.compile(
-    r"(?<![\w./-])([A-Za-z0-9][A-Za-z0-9_.-]*\.(?:md|json|txt|html|docx|pptx))(?![\w.-])",
+    r"(?<![\w./-])([A-Za-z0-9][A-Za-z0-9_.-]*\.(?:md|json|txt|html|docx|pptx))"
+    r"(?![\w-]|\.[A-Za-z0-9])",
     flags=re.IGNORECASE,
 )
 
@@ -60,6 +61,15 @@ def _requested_output_artifacts(task: str) -> List[str]:
         r"[^\r\n]{0,100}?" + _ARTIFACT_NAME.pattern
     )
     for match in verb_pattern.finditer(str(task or "")):
+        filename = match.group(1)
+        if filename and filename not in outputs:
+            outputs.append(filename)
+    naming_pattern = re.compile(
+        r"(?i)\b(?:s['\N{RIGHT SINGLE QUOTATION MARK}]appelle|"
+        r"s['\N{RIGHT SINGLE QUOTATION MARK}]appeler|named|called|nomm[\N{LATIN SMALL LETTER E WITH ACUTE}e])"
+        r"[^\r\n]{0,40}?" + _ARTIFACT_NAME.pattern
+    )
+    for match in naming_pattern.finditer(str(task or "")):
         filename = match.group(1)
         if filename and filename not in outputs:
             outputs.append(filename)

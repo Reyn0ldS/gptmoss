@@ -84,6 +84,27 @@ def test_document_fallback_preserves_outputs_roles_and_repair_gates():
     )
 
 
+def test_document_fallback_honors_primary_filename_named_in_a_sentence():
+    task = (
+        "Rédige un dossier professionnel depuis le corpus local et les fichiers "
+        "joints DOCX/PPTX.\n"
+        "REQ-E2E-001 — Inventorier toutes les pièces.\n"
+        "REQ-E2E-002 — Produire la matrice de traçabilité.\n"
+        "Le livrable principal doit s'appeler dossier-architecture-gptmoss.md."
+    )
+
+    plan = SimplePlanner._fallback_plan(task, analyze_task_complexity(task))
+
+    assert plan["primary_artifact"] == "dossier-architecture-gptmoss.md"
+    assert any(
+        "dossier-architecture-gptmoss.md" in step.get("required_artifacts", [])
+        for step in plan["steps"]
+    )
+    assert {"REQ-E2E-001", "REQ-E2E-002"} <= {
+        item["id"] for item in plan["requirements"]
+    }
+
+
 def test_document_fallback_keeps_requirement_ownership_bounded():
     plan = SimplePlanner._fallback_plan(
         DOCUMENT_TASK, analyze_task_complexity(DOCUMENT_TASK)
