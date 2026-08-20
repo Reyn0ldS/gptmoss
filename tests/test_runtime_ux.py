@@ -578,11 +578,52 @@ async def test_owned_markdown_list_item_can_be_repaired_by_reported_prefix(tmp_p
     )
 
     content = target.read_text(encoding="utf-8")
-    assert "List item occurrence 1 replaced successfully" in result
+    assert "Markdown line occurrence 1 replaced successfully" in result
     assert "751" not in content
     assert "- Total of 811 normalized blocks" in content
     assert "- First stable inventory item." in content
     assert "- Final stable inventory item." in content
+
+
+@pytest.mark.asyncio
+async def test_owned_markdown_heading_reference_can_be_repaired_by_reported_prefix(tmp_path):
+    engine, state = _engine(tmp_path)
+    execution = state.get_execution("heading-repair")
+    execution.variables["delivery_contract"] = {
+        "steps": [{"step_id": 0, "role": "architect", "owned_paths": ["inventory.md"]}]
+    }
+    execution.variables["plan_step_id"] = 0
+    execution.variables["role_key"] = "architect"
+    project = tmp_path / "projects" / "proj-default"
+    project.mkdir(parents=True)
+    target = project / "inventory.md"
+    target.write_text(
+        "# Inventory\n\n### 2.1 `qualification/requirements-specification.txt` "
+        "[> (root) > blocks 0-3]\n\n"
+        "Material evidence remains below this heading.\n",
+        encoding="utf-8",
+    )
+
+    result = await engine._call_tool(
+        "heading-repair", "filesystem", "replace_paragraph",
+        {
+            "path": "inventory.md",
+            "paragraph_prefix": (
+                "### 2.1 `qualification/requirements-specification.txt` "
+                "[> (root) > blocks 0-3]"
+            ),
+            "content": (
+                "### 2.1 `qualification/requirements-specification.txt` "
+                "[qualification/requirements-specification.txt > (root) > blocks 1-4]"
+            ),
+        },
+    )
+
+    content = target.read_text(encoding="utf-8")
+    assert "Markdown line occurrence 1 replaced successfully" in result
+    assert "[> (root)" not in content
+    assert "[qualification/requirements-specification.txt > (root) > blocks 1-4]" in content
+    assert "Material evidence remains below this heading." in content
 
 
 @pytest.mark.asyncio

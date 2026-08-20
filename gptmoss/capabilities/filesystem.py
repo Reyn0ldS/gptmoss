@@ -146,7 +146,7 @@ class FilesystemCapability:
             "Replace one paragraph selected by a unique normalized prefix. Use occurrence=2 "
             "to remove the second copy of a duplicated paragraph. New content may be empty "
             "only when removing a duplicate; headings and surrounding paragraphs are preserved. "
-            "A Markdown list item may also be targeted by the exact prefix of that item."
+            "A Markdown heading or list item may also be targeted by its exact prefix."
         ),
     )
     def replace_paragraph(
@@ -195,13 +195,15 @@ class FilesystemCapability:
             # itself, so support a bounded single-line replacement rather than
             # forcing a rewrite of the whole list or document.
             source_lines = original.splitlines(keepends=True)
-            list_matches = [
+            markdown_line_matches = [
                 index for index, line in enumerate(source_lines)
-                if re.match(r"^\s*(?:[-*+]\s+|\d+[.)]\s+)", line)
+                if re.match(
+                    r"^\s*(?:#{1,6}\s+|[-*+]\s+|\d+[.)]\s+)", line
+                )
                 and self._paragraph_key(line).startswith(prefix)
             ]
-            if len(list_matches) >= requested_occurrence:
-                line_index = list_matches[requested_occurrence - 1]
+            if len(markdown_line_matches) >= requested_occurrence:
+                line_index = markdown_line_matches[requested_occurrence - 1]
                 old_line = source_lines[line_index]
                 newline_match = re.search(r"(\r?\n)$", old_line)
                 newline = newline_match.group(1) if newline_match else ""
@@ -212,7 +214,7 @@ class FilesystemCapability:
                     return "Error: replacement would not change the file."
                 write_text_atomic(resolved, updated)
                 return (
-                    f"List item occurrence {requested_occurrence} replaced successfully in {path}"
+                    f"Markdown line occurrence {requested_occurrence} replaced successfully in {path}"
                 )
         if len(matches) < requested_occurrence:
             return (

@@ -252,10 +252,15 @@ def validate_document(path: Path, constraints: Dict[str, Any]) -> ValidationRepo
     paragraphs = _paragraphs(text)
     evidence_text = _without_markdown_code(text)
     all_reference_count = len(list(_LOCAL_REFERENCE.finditer(text)))
-    references = [
-        {"source": match.group(1).strip(), "locator": match.group(2).strip()}
-        for match in _LOCAL_REFERENCE.finditer(evidence_text)
-    ]
+    references = []
+    for match in _LOCAL_REFERENCE.finditer(evidence_text):
+        line_number = evidence_text.count("\n", 0, match.start())
+        original_line = lines[line_number] if line_number < len(lines) else ""
+        references.append({
+            "source": match.group(1).strip(),
+            "locator": match.group(2).strip(),
+            "paragraph_prefix": " ".join(original_line.strip().split())[:180],
+        })
     code_reference_count = max(0, all_reference_count - len(references))
     external_links = _EXTERNAL_LINK.findall(text)
     required_headings = _strings(constraints.get("required_headings"), "required_headings")
@@ -442,16 +447,27 @@ def validate_document(path: Path, constraints: Dict[str, Any]) -> ValidationRepo
     for reference in references:
         source = reference["source"]
         if not _is_safe_local_source(source):
-            invalid_references.append(f"unsafe or non-local source {source!r}")
+            prefix = reference.get("paragraph_prefix") or ""
+            invalid_references.append(
+                f"unsafe or non-local source {source!r}"
+                + (f"; paragraph prefix: {prefix}" if prefix else "")
+            )
             continue
         if allowed_sources and _normalize_source(source) not in allowed_sources:
-            invalid_references.append(f"undeclared local source {source!r}")
+            prefix = reference.get("paragraph_prefix") or ""
+            invalid_references.append(
+                f"undeclared local source {source!r}"
+                + (f"; paragraph prefix: {prefix}" if prefix else "")
+            )
             continue
         locator_failure = _validate_reference_locator(
             source, reference["locator"], inventory, require_bounds
         )
         if locator_failure:
-            invalid_references.append(locator_failure)
+            prefix = reference.get("paragraph_prefix") or ""
+            invalid_references.append(
+                locator_failure + (f"; paragraph prefix: {prefix}" if prefix else "")
+            )
     if invalid_references:
         _failure(report, "invalid local reference(s): " + "; ".join(invalid_references[:10]))
     missing_sources = [

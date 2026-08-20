@@ -192,6 +192,10 @@ def test_document_validator_rejects_out_of_range_local_locator(tmp_path):
         "invalid blocks range 2-30; expected 1-12" in failure
         for failure in report["failures"]
     )
+    assert any(
+        "paragraph prefix:" in failure and "requirements.docx" in failure
+        for failure in report["failures"]
+    )
 
 
 def test_document_validator_reports_inverted_locator_range_unambiguously(tmp_path):
