@@ -602,7 +602,14 @@ def validate_document(path: Path, constraints: Dict[str, Any]) -> ValidationRepo
             0,
         )
         list_items: List[Tuple[str, str]] = []
-        for line in evidence_text.splitlines():
+        in_fence = False
+        for line in lines:
+            stripped = line.lstrip()
+            if stripped.startswith("```") or stripped.startswith("~~~"):
+                in_fence = not in_fence
+                continue
+            if in_fence:
+                continue
             match = re.match(r"^\s*[-*+]\s+(.+?)\s*$", line)
             if not match or len(_words(match.group(1))) < duplicate_min_words:
                 continue

@@ -221,7 +221,7 @@ def test_document_policy_rejects_a_second_numbered_section_series(tmp_path):
 def test_document_policy_rejects_duplicate_list_items(tmp_path):
     document = tmp_path / "architecture.md"
     repeated = (
-        "- **Access control**: The supervisor requires an ephemeral token for every "
+        "- **Access control**: `server_supervisor.py` requires an ephemeral token for every "
         "state-changing request. [architecture.md > Security > blocks 1-2]"
     )
     document.write_text(
@@ -238,6 +238,7 @@ def test_document_policy_rejects_duplicate_list_items(tmp_path):
     assert not report["valid"]
     assert report["metrics"]["duplicate_list_items"] == 1
     assert "- **Access control**" in "\n".join(report["failures"])
+    assert "server_supervisor.py" in "\n".join(report["failures"])
 
 
 def test_document_policy_allows_nested_numbering_to_restart(tmp_path):
