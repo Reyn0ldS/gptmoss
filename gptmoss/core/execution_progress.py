@@ -196,7 +196,32 @@ class ExecutionProgressMixin:
         covered: Dict[str, set[int]] = {
             artifact_id: set() for artifact_id in document_ids
         }
-        history = state.variables.get("tool_call_history", [])
+        history = list(state.variables.get("tool_call_history", []))
+        parent_id = state.variables.get("parent_execution_id")
+        plan_step_id = state.variables.get("plan_step_id")
+        project_id = state.variables.get("project_id")
+        # A manual pause or process restart creates a fresh specialist while
+        # retaining durable workspace edits. Reuse only successful local read
+        # evidence from an earlier specialist assigned to the exact same
+        # parent step, project and attachment set. Artifact IDs bind the proof
+        # to the same immutable uploaded content; unrelated siblings cannot
+        # satisfy this execution's coverage gate.
+        if parent_id is not None and plan_step_id is not None:
+            for sibling in self.state_engine.executions.values():
+                if sibling.execution_id == execution_id:
+                    continue
+                sibling_variables = sibling.variables
+                if (
+                    sibling_variables.get("parent_execution_id") != parent_id
+                    or sibling_variables.get("plan_step_id") != plan_step_id
+                    or sibling_variables.get("project_id") != project_id
+                    or {
+                        str(item) for item in sibling_variables.get("attachment_ids", [])
+                        if item
+                    } != attached
+                ):
+                    continue
+                history.extend(sibling_variables.get("tool_call_history", []))
         for item in history:
             if item.get("capability") != "documents" or item.get("action") != "read":
                 continue

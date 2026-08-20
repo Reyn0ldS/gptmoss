@@ -1117,6 +1117,55 @@ def test_exhaustive_inventory_gate_requires_every_normalized_block_read(tmp_path
     assert engine._document_coverage_issues("coverage-gate", step) == []
 
 
+def test_resumed_specialist_reuses_only_same_assignment_document_reads(tmp_path):
+    engine, state = _engine(tmp_path, MockLLMProvider())
+    store = ArtifactStore(str(tmp_path / "resume-artifacts"))
+    uploaded = store.save_base64(
+        "evidence.txt",
+        base64.b64encode(b"first\n\nsecond\n\nthird").decode("ascii"),
+        "text/plain",
+    )
+    engine.artifact_store = store
+    document = store.document(uploaded["id"])
+    step = {
+        "description": "Inventory every explicit attachment and record complete coverage.",
+        "acceptance_criteria": ["All normalized blocks were read."],
+    }
+    previous = state.get_execution("previous-specialist")
+    previous.variables.update({
+        "parent_execution_id": "parent",
+        "plan_step_id": 0,
+        "project_id": "project-a",
+        "attachment_ids": [uploaded["id"]],
+    })
+    payload = {
+        "artifact_id": uploaded["id"],
+        "total_blocks": len(document.blocks),
+        "blocks": [block.to_dict() for block in document.blocks],
+    }
+    engine._record_tool_result(
+        "previous-specialist", "documents", "read", {}, json.dumps(payload)
+    )
+
+    resumed = state.get_execution("resumed-specialist")
+    resumed.variables.update({
+        "parent_execution_id": "parent",
+        "plan_step_id": 0,
+        "project_id": "project-a",
+        "attachment_ids": [uploaded["id"]],
+    })
+    unrelated = state.get_execution("unrelated-specialist")
+    unrelated.variables.update({
+        "parent_execution_id": "parent",
+        "plan_step_id": 1,
+        "project_id": "project-a",
+        "attachment_ids": [uploaded["id"]],
+    })
+
+    assert engine._document_coverage_issues("resumed-specialist", step) == []
+    assert engine._document_coverage_issues("unrelated-specialist", step)
+
+
 def test_exhaustive_inventory_gate_requires_each_attached_image_presented(tmp_path):
     engine, state = _engine(tmp_path, MockLLMProvider())
     engine.llm_provider.supports_vision = True
