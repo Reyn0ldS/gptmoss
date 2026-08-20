@@ -212,8 +212,15 @@ def apply_professional_profile(
             str(owner.get("description") or ""),
             path,
         )).casefold()
-        if "decision" in owner_blob or "adr" in owner_blob:
-            constraints["record_section_policy"] = {
+        # Semantic record schemas must be selected from stable ownership
+        # metadata, never incidental words in a free-form task description.
+        # For example, a corpus inventory may be asked to search "decision
+        # topics" without being a decision register itself.
+        owner_identity = " ".join((
+            str(owner.get("specialist") or ""),
+            path,
+        )).casefold()
+        decision_record_policy = {
                 "heading_pattern": r"\b(?:DEC|ADR)-\d{3}\b",
                 "minimum_records": 1,
                 "required_fields": {
@@ -229,6 +236,12 @@ def apply_professional_profile(
                     ],
                 },
             }
+        if "decision" in owner_identity or "adr" in owner_identity:
+            constraints["record_section_policy"] = decision_record_policy
+        elif constraints.get("record_section_policy") == decision_record_policy:
+            # Remove a profile-generated policy persisted by an older,
+            # overly broad classifier while preserving custom policies.
+            constraints.pop("record_section_policy", None)
         if requested_diagrams and any(
             marker in owner_blob
             for marker in ("application", "integration", "data architect")

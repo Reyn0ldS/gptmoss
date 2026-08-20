@@ -27,6 +27,28 @@ class ExecutionProgressMixin:
         must not bypass those new gates: reopen the invalid producer and every
         transitive consumer while preserving their durable files for repair.
         """
+        profile_retry_prefix = (
+            "A deterministic profile upgrade invalidated this persisted artifact. "
+        )
+        # A pause can leave a reopened step pending. Recompute its repair brief
+        # after every profile upgrade so removed or narrowed gates cannot keep
+        # sending a replacement child after obsolete defects.
+        for step in steps:
+            retry_context = str(step.get("retry_context") or "")
+            if step.get("status") != "pending" or not retry_context.startswith(
+                profile_retry_prefix
+            ):
+                continue
+            current_issues = self._step_artifact_validation_issues(execution_id, step)
+            if current_issues:
+                step["retry_context"] = (
+                    profile_retry_prefix
+                    + "Preserve valid content and repair these machine-observed defects:\n"
+                    + "; ".join(current_issues)
+                )[:12_000]
+            else:
+                step.pop("retry_context", None)
+
         invalid: Dict[str, List[str]] = {}
         for step in steps:
             if step.get("status") != "completed":
@@ -63,8 +85,8 @@ class ExecutionProgressMixin:
             step.pop("validation_passed", None)
             if own_issues:
                 step["retry_context"] = (
-                    "A deterministic profile upgrade invalidated this persisted artifact. "
-                    "Preserve valid content and repair these machine-observed defects:\n"
+                    profile_retry_prefix
+                    + "Preserve valid content and repair these machine-observed defects:\n"
                     + "; ".join(own_issues)
                 )[:12_000]
             else:
