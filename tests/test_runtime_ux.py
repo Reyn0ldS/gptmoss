@@ -1598,6 +1598,66 @@ def test_missing_source_gate_precedes_code_example_rewrite(tmp_path):
     assert required == "filesystem__append"
 
 
+def test_upstream_reopen_requires_current_artifact_reads_before_completion(tmp_path):
+    engine, state = _engine(tmp_path)
+    execution = state.get_execution("refresh-dependent-artifacts")
+    execution.variables["role_key"] = "architect"
+    execution.variables["delegated_step"] = {
+        "retry_context": (
+            "A completed upstream artifact was reopened by stronger deterministic "
+            "quality gates. Reuse its corrected result."
+        ),
+        "refresh_required_artifacts": ["analysis/decisions.md", "analysis/inventory.md"],
+    }
+    execution.current_plan = {"steps": [{
+        "id": 0, "role": "architect", "specialist": "Decision analyst",
+        "required_artifacts": ["analysis/decisions.md"],
+    }]}
+    project = tmp_path / "projects" / "proj-default" / "analysis"
+    project.mkdir(parents=True)
+    (project / "decisions.md").write_text("# Decisions\n", encoding="utf-8")
+    (project / "inventory.md").write_text("# Inventory\n", encoding="utf-8")
+    response = json.dumps({
+        "summary": "refreshed", "artifacts": ["analysis/decisions.md"],
+        "evidence": [], "risks": [], "next_action": "",
+    })
+
+    issues = engine._step_completion_issues(
+        "refresh-dependent-artifacts", execution.current_plan["steps"][0], response,
+    )
+    assert issues[-2:] == [
+        "reread refreshed artifact before accepting dependent conclusions: analysis/decisions.md",
+        "reread refreshed artifact before accepting dependent conclusions: analysis/inventory.md",
+    ]
+    tool, nudge = engine._quality_repair_directive(
+        "refresh-dependent-artifacts", "architect",
+        execution.current_plan["steps"][0], issues,
+    )
+    assert tool == "filesystem__read"
+    assert "analysis/decisions.md" in nudge
+
+    conversation = state.get_conversation("refresh-dependent-artifacts")
+    for index, path in enumerate(("analysis/decisions.md", "analysis/inventory.md"), 1):
+        call_id = f"read-{index}"
+        conversation.messages.extend([
+            {
+                "role": "assistant", "tool_calls": [{
+                    "id": call_id, "type": "function",
+                    "function": {
+                        "name": "filesystem__read",
+                        "arguments": {"path": path, "offset": 0, "limit": 12000},
+                    },
+                }],
+            },
+            {"role": "tool", "tool_call_id": call_id, "content": "current content"},
+        ])
+
+    refreshed_issues = engine._step_completion_issues(
+        "refresh-dependent-artifacts", execution.current_plan["steps"][0], response,
+    )
+    assert not any(item.startswith("reread refreshed artifact") for item in refreshed_issues)
+
+
 @pytest.mark.asyncio
 async def test_kernel_stores_planning_mode_and_title():
     state = StateEngine()

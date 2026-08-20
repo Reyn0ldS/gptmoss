@@ -969,6 +969,19 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
         issues: List[str],
     ) -> tuple[str, str]:
         """Choose one safe repair, always gathering missing evidence before mutation."""
+        refresh_issue = next((
+            str(issue) for issue in issues
+            if str(issue).startswith("reread refreshed artifact before accepting dependent conclusions: ")
+        ), "")
+        if refresh_issue:
+            target = refresh_issue.split(": ", 1)[1].strip()
+            return (
+                "filesystem__read",
+                " Do not claim completion yet. Your next response must be exactly one valid "
+                f"filesystem__read tool call targeting '{target}' with offset=0 and limit=12000. "
+                "Use the current durable artifact to refresh the dependent conclusions; do not "
+                "substitute list_dir, an old handoff summary, or an Internet source.",
+            )
         coverage_tool = self._document_coverage_repair_tool(issues)
         if coverage_tool:
             return coverage_tool, self._document_coverage_repair_nudge(issues)
@@ -1057,6 +1070,42 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
             issues.append("create non-empty required artifacts: " + ", ".join(missing))
         issues.extend(self._document_coverage_issues(execution_id, step))
         issues.extend(self._step_artifact_validation_issues(execution_id, step))
+
+        delegated = execution_state.variables.get("delegated_step")
+        retry_context = str(
+            delegated.get("retry_context") if isinstance(delegated, dict) else ""
+        )
+        if retry_context.startswith(
+            "A completed upstream artifact was reopened by stronger deterministic quality gates."
+        ):
+            required_refreshes = [
+                str(path).replace("\\", "/")
+                for path in delegated.get("refresh_required_artifacts", [])
+                if str(path).strip() and self._artifact_exists(execution_id, str(path))
+            ]
+            conversation = self.state_engine.get_conversation(execution_id)
+            successful_tool_ids = {
+                str(message.get("tool_call_id") or "")
+                for message in conversation.messages
+                if message.get("role") == "tool"
+                and not str(message.get("content") or "").lstrip().startswith("Error:")
+            }
+            refreshed_paths = set()
+            for message in conversation.messages:
+                for call in message.get("tool_calls") or []:
+                    function = call.get("function", {})
+                    if (
+                        str(call.get("id") or "") in successful_tool_ids
+                        and function.get("name") == "filesystem__read"
+                    ):
+                        refreshed_paths.add(
+                            str(function.get("arguments", {}).get("path") or "").replace("\\", "/")
+                        )
+            for path in dict.fromkeys(required_refreshes):
+                if path not in refreshed_paths:
+                    issues.append(
+                        "reread refreshed artifact before accepting dependent conclusions: " + path
+                    )
 
         if role_key in {"qa", "debugger", "coordinator"}:
             fake_packages = self._fake_dependency_packages(execution_id)
@@ -2108,10 +2157,26 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
                         *step.get("autonomous_skill_names", []),
                     ] if isinstance(item, str)
                 })
-                sub_exec.variables["delegated_step"] = {
+                delegated_payload = {
                     key: value for key, value in step.items()
                     if key not in {"id", "dependencies", "status", "assigned_execution_id", "delivery", "result", "error"}
                 }
+                if str(step.get("retry_context") or "").startswith(
+                    "A completed upstream artifact was reopened by stronger deterministic quality gates."
+                ):
+                    refresh_artifacts = list(step.get("required_artifacts", []))
+                    for dependency_id in step.get("dependencies", []):
+                        dependency_step = next(
+                            item for item in steps if item.get("id") == dependency_id
+                        )
+                        refresh_artifacts.extend(
+                            dependency_step.get("required_artifacts", [])
+                        )
+                    delegated_payload["refresh_required_artifacts"] = list(dict.fromkeys(
+                        str(path).replace("\\", "/")
+                        for path in refresh_artifacts if str(path).strip()
+                    ))
+                sub_exec.variables["delegated_step"] = delegated_payload
                 sub_exec.variables["attachment_ids"] = partition_attachment_ids(
                     state.variables.get("attachment_ids", []),
                     step.get("source_partition"),
