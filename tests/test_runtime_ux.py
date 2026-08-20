@@ -856,6 +856,45 @@ def test_bootstrap_runtime_serves_health_readiness_and_gui(tmp_path):
     assert "corpus_auto_workflow" in page.text
 
 
+def test_bootstrap_runtime_honors_first_run_tls_environment(tmp_path, monkeypatch):
+    """The documented .env TLS controls must configure a new workspace."""
+    import json
+
+    from main import bootstrap_runtime
+
+    monkeypatch.setenv("SSL_VERIFY", "False")
+    monkeypatch.setenv("SSL_CERT_PATH", "internal-ca.pem")
+
+    _, engine, _, _ = bootstrap_runtime(str(tmp_path))
+
+    assert engine.llm_provider.ssl_verify is False
+    assert engine.llm_provider.ssl_cert_path == "internal-ca.pem"
+    persisted = json.loads((tmp_path / "config.json").read_text(encoding="utf-8"))
+    assert persisted["ssl_verify"] is False
+    assert persisted["ssl_cert_path"] == "internal-ca.pem"
+
+
+def test_bootstrap_runtime_keeps_persisted_tls_settings_over_environment(
+    tmp_path, monkeypatch,
+):
+    """A saved GUI choice remains authoritative after a restart."""
+    import json
+
+    from main import bootstrap_runtime
+
+    (tmp_path / "config.json").write_text(
+        json.dumps({"ssl_verify": True, "ssl_cert_path": ""}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("SSL_VERIFY", "False")
+    monkeypatch.setenv("SSL_CERT_PATH", "environment-ca.pem")
+
+    _, engine, _, _ = bootstrap_runtime(str(tmp_path))
+
+    assert engine.llm_provider.ssl_verify is True
+    assert engine.llm_provider.ssl_cert_path == ""
+
+
 def test_main_py_process_reaches_readiness(tmp_path):
     """Start the same process as start.bat: python main.py."""
     import socket
