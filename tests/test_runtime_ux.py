@@ -930,6 +930,39 @@ async def test_retry_child_can_rewrite_code_wrapped_citations_reported_by_gate(
     )
 
 
+@pytest.mark.asyncio
+async def test_gate_authorized_rewrite_cannot_discard_most_of_a_long_document(tmp_path):
+    engine, state = _engine(tmp_path)
+    execution = state.get_execution("lossy-document-retry")
+    execution.variables["role_key"] = "writer"
+    execution.current_plan = {
+        "steps": [{
+            "id": 0, "role": "writer",
+            "required_artifacts": ["dossier.md"], "owned_paths": ["dossier.md"],
+        }],
+        "artifact_validations": [{
+            "path": "dossier.md", "validator": "document", "constraints": {},
+        }],
+    }
+    execution.current_step = 0
+    execution.variables["step_runtime"] = {
+        "0": {"required_next_tool": "filesystem__write"},
+    }
+    project = tmp_path / "projects" / "proj-default"
+    project.mkdir(parents=True)
+    target = project / "dossier.md"
+    original = "# Dossier\n\n" + ("Contenu validé et sourcé. " * 400)
+    target.write_text(original, encoding="utf-8")
+
+    blocked = await engine._call_tool(
+        "lossy-document-retry", "filesystem", "write",
+        {"path": "dossier.md", "content": "# Dossier\n\nRésumé tronqué."},
+    )
+
+    assert "Lossy global rewrite blocked" in blocked
+    assert target.read_text(encoding="utf-8") == original
+
+
 def test_profile_upgrade_reopens_invalid_completed_producer_and_consumers(tmp_path):
     engine, state = _engine(tmp_path)
     execution = state.get_execution("resume-revalidation")
@@ -1596,6 +1629,35 @@ def test_missing_source_gate_precedes_code_example_rewrite(tmp_path):
     )
 
     assert required == "filesystem__append"
+
+
+def test_heading_number_restart_requires_bounded_heading_repair(tmp_path):
+    engine, state = _engine(tmp_path)
+    state.get_execution("writer-heading-restart")
+    project = tmp_path / "projects" / "proj-default"
+    project.mkdir(parents=True)
+    (project / "dossier.md").write_text(
+        "# Dossier\n\n## 1. Base\n\nTexte.\n\n## 4. Appended\n\nSuite.\n",
+        encoding="utf-8",
+    )
+    step = {"role": "writer", "required_artifacts": ["dossier.md"]}
+    issues = [
+        "dossier.md: document contains 1 heading numbering restart(s), suggesting "
+        "an appended duplicate section series: ## 4. Appended (number 4 after 9)",
+    ]
+
+    required = engine._writer_incremental_repair_tool(
+        "writer-heading-restart", "writer", step, issues,
+    )
+    nudge = engine._writer_incremental_repair_nudge(
+        "writer-heading-restart", "writer", step, issues,
+    )
+
+    assert required == "filesystem__replace_paragraph"
+    assert "## 4. Appended" not in nudge  # The gate supplies the exact selector.
+    assert "restarted Markdown heading selector" in nudge
+    assert "occurrence=1" in nudge
+    assert "empty string" in nudge
 
 
 def test_upstream_reopen_requires_current_artifact_reads_before_completion(tmp_path):

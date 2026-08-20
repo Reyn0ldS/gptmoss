@@ -16,6 +16,7 @@ from gptmoss.core.execution import (
     requirement_validation_commands,
     requirements_for_delegation,
 )
+from gptmoss.core.professional_delivery import apply_professional_profile
 
 
 def _plan():
@@ -259,6 +260,54 @@ def test_independent_evidence_is_required_for_delivery(tmp_path):
     }]
     passed = evaluate_delivery(tmp_path, contract, plan["steps"], history)
     assert passed["passed"], json.dumps(passed, indent=2)
+
+
+def test_final_assurance_revalidates_latest_quality_gates_on_upstream_and_downstream_docs(
+    tmp_path,
+):
+    plan = normalize_plan({
+        "delivery_profile": "professional-local",
+        "primary_artifact": "dossier.md",
+        "steps": [
+            {
+                "id": 0, "role": "writer", "dependencies": [],
+                "description": "Rédiger le dossier professionnel",
+                "required_artifacts": ["dossier.md"],
+            },
+            {
+                "id": 1, "role": "qa", "dependencies": [0],
+                "description": "Contrôler le dossier et consigner la qualité",
+                "required_artifacts": ["quality-report.md"],
+            },
+        ],
+        "artifact_validations": [],
+    })
+    apply_professional_profile(plan)
+    repeated = (
+        "- Cette ligne de contrôle professionnelle contient suffisamment de mots "
+        "pour être détectée comme un élément de liste dupliqué."
+    )
+    for name in ("dossier.md", "quality-report.md"):
+        minimum = 700 if name == "dossier.md" else 150
+        filler = " ".join(f"preuve{index}" for index in range(minimum))
+        (tmp_path / name).write_text(
+            f"# Rapport\n\n{filler}\n\n{repeated}\n\n{repeated}\n",
+            encoding="utf-8",
+        )
+
+    contract = build_delivery_contract(plan, "Produire un dossier professionnel")
+    report = evaluate_delivery(tmp_path, contract, plan["steps"], [])
+    artifact_check = next(
+        check for check in report["checks"]
+        if check["name"] == "artifact_structure_and_constraints"
+    )
+    invalid = {
+        item["artifact"] for item in artifact_check["reports"]
+        if not item["valid"] and item["metrics"]["duplicate_list_items"] == 1
+    }
+
+    assert invalid == {"dossier.md", "quality-report.md"}
+    assert not report["passed"]
 
 
 def test_declared_interface_is_checked_against_actual_ast(tmp_path):

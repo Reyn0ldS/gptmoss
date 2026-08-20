@@ -30,6 +30,7 @@ RENDER_TARGETED_MARKERS = (
     "duplicate paragraph",
     "duplicate list item",
     "duplicate heading",
+    "heading numbering restart",
     "lack a local reference",
 )
 RENDER_SECTION_MARKERS = (
@@ -42,7 +43,6 @@ RENDER_REWRITE_MARKERS = (
     "external link",
     "placeholder marker",
     "reasoning tag",
-    "heading numbering restart",
 )
 RENDER_APPEND_MARKERS = (
     "words=",

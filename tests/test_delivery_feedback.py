@@ -51,6 +51,15 @@ def test_classify_duplicate_paragraph_targets_writer_paragraph_tool():
     assert select_reopen_step(_plan(), target)["role"] == "writer"
 
 
+def test_classify_heading_number_restart_targets_bounded_heading_removal():
+    target = classify_issue_texts([
+        "document contains 1 heading numbering restart(s), suggesting an appended "
+        "duplicate section series: ## 4. Architecture (number 4 after 9)",
+    ])
+    assert target.obligation == DOCUMENT_RENDER
+    assert target.required_tool == "filesystem__replace_paragraph"
+
+
 def test_classify_code_wrapped_citations_authorizes_document_rewrite():
     target = classify_issue_texts([
         "48 citation-like pattern(s) inside Markdown code do not count as evidence; "

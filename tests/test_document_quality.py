@@ -258,6 +258,26 @@ def test_document_policy_allows_nested_numbering_to_restart(tmp_path):
     assert report["metrics"]["heading_number_restarts"] == 0
 
 
+def test_document_policy_does_not_treat_timeline_milestones_as_sections(tmp_path):
+    document = tmp_path / "roadmap.md"
+    document.write_text(
+        "# Roadmap\n\n## 1. Architecture\n\nBase.\n\n"
+        "## 30 jours : Consolidation\n\nPhase A.\n\n"
+        "## 60 jours : Industrialisation\n\nPhase B.\n\n"
+        "## 90 jours : Exploitation\n\nPhase C.\n\n"
+        "## 4. Risques\n\nSuite normale.\n",
+        encoding="utf-8",
+    )
+
+    report = validate_artifact(
+        document, validator="document",
+        constraints={"reject_heading_number_restarts": True},
+    )
+
+    assert report["valid"]
+    assert report["metrics"]["heading_number_restarts"] == 0
+
+
 def test_professional_document_rejects_incorrect_integer_sum_with_repair_prefix(tmp_path):
     document = tmp_path / "inventory.md"
     document.write_text(

@@ -412,7 +412,10 @@ def validate_document(path: Path, constraints: Dict[str, Any]) -> ValidationRepo
     if constraints.get("reject_heading_number_restarts"):
         numbered_headings = []
         for _, level, title in headings:
-            number_match = re.match(r"^\s*(\d+)\s*[.)-]?\s+", title)
+            # A document-wide section number must have an explicit delimiter.
+            # Bare numeric headings such as ``30 jours`` / ``90 days`` are
+            # timeline milestones, not members of the chapter series.
+            number_match = re.match(r"^\s*(\d+)\s*[.)-]\s+", title)
             if not number_match:
                 continue
             numbered_headings.append((level, title, int(number_match.group(1))))

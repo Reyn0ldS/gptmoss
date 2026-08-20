@@ -714,12 +714,11 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
         targeted_markers = (
             "arithmetic sum mismatch", "source inventory total mismatch",
             "duplicate paragraph", "duplicate list item", "duplicate heading", "invalid local reference",
-            "lack a local reference",
+            "heading numbering restart", "lack a local reference",
         )
         replacement_markers = (
             "citation-like pattern",
             "external link", "placeholder marker", "reasoning tag",
-            "heading numbering restart",
         )
         section_markers = ("record section", "invalid diagram")
         append_markers = (
@@ -772,6 +771,14 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
         artifacts = [str(path).strip() for path in step.get("required_artifacts", []) if str(path).strip()]
         target = artifacts[0]
         if action == "filesystem__replace_paragraph":
+            if any("heading numbering restart" in str(issue).casefold() for issue in issues):
+                return (
+                    f" Do not answer with a plan. Your next response must be exactly one valid "
+                    f"{action} tool call targeting '{target}'. Copy the exact restarted Markdown "
+                    "heading selector (including its # markers) reported by the gate, set "
+                    "occurrence=1, and set content to an empty string. Remove exactly that "
+                    "appended heading line; never rewrite or delete the whole document."
+                )
             if any("duplicate heading" in str(issue).casefold() for issue in issues):
                 return (
                     f" Do not answer with a plan. Your next response must be exactly one valid "
@@ -3101,7 +3108,7 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
                     "For long documents, work section-by-section from the declared section contracts: meet each target "
                     "word count, cite bounded local evidence near factual claims, preserve terminology and requirement IDs, "
                     "and avoid repeating prerequisite sections. Treat the checkpoint and previous-section memory as the "
-                    "canonical source of continuity. Build an oversized owned artifact with one filesystem.write call for "
+                    "canonical source of continuity. Build a large owned artifact incrementally, using one filesystem.write call for "
                     "its first bounded section followed by filesystem.append calls for later sections; do not create undeclared "
                     "temporary part files. When a quality gate reports the normalized prefix of one duplicate or unsupported "
                     "paragraph, repair only that occurrence with filesystem.replace_paragraph instead of rebuilding the artifact. "
@@ -3807,6 +3814,38 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
                     "selector from the latest gate failure."
                 )
         normalized_path = self._normalized_workspace_path(path)
+        gate_authorized_rewrite_shrinks_document = False
+        if (
+            capability.lower() == "filesystem"
+            and action.lower() == "write"
+            and normalized_path in protected_document_artifacts
+            and self._artifact_exists(execution_id, path)
+            and required_repair_tool == "filesystem__write"
+        ):
+            filesystem = self.get_capability("filesystem")
+            try:
+                resolved = filesystem._resolve_path(path, execution_id)
+                existing_length = len(Path(resolved).read_text(encoding="utf-8"))
+            except (AttributeError, OSError, UnicodeError, ValueError):
+                existing_length = 0
+            replacement_length = len(str(arguments.get("content") or ""))
+            gate_authorized_rewrite_shrinks_document = bool(
+                existing_length >= 2_000
+                and replacement_length < math.ceil(existing_length * 0.8)
+            )
+        if gate_authorized_rewrite_shrinks_document:
+            self.telemetry.record(
+                "lossy_required_document_rewrite_blocked", execution_id,
+                path=path, existing_characters=existing_length,
+                replacement_characters=replacement_length,
+            )
+            return (
+                "Error: Lossy global rewrite blocked for existing required document "
+                f"'{path}': the replacement contains {replacement_length} characters "
+                f"but the current artifact contains {existing_length}. Preserve prior "
+                "validated work and use filesystem.replace_paragraph, "
+                "filesystem.replace_section, or bounded filesystem.append calls."
+            )
         overwrites_existing_document = (
             capability.lower() == "filesystem"
             and action.lower() == "write"
