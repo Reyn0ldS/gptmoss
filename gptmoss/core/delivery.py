@@ -66,17 +66,44 @@ def extract_requirements(task: str, limit: int = 0) -> List[Dict[str, Any]]:
     if not clauses:
         clauses = [re.sub(r"\s+", " ", text)]
     selected = clauses[:limit] if limit and limit > 0 else clauses
-    requirements = []
-    seen = set()
+    explicit_pattern = re.compile(
+        r"^(?P<id>[A-Z][A-Z0-9]{1,15}(?:-[A-Z0-9]{1,15})+)"
+        r"\s*(?:[:\N{EM DASH}\N{EN DASH}-])\s*(?P<statement>.+)$",
+        flags=re.IGNORECASE,
+    )
+    parsed = []
+    reserved_identifiers = set()
     for clause in selected:
         clause = re.sub(r"\s+", " ", clause).strip()
-        digest = hashlib.sha256(clause.lower().encode("utf-8")).hexdigest()[:12]
-        if digest in seen:
+        match = explicit_pattern.match(clause)
+        identifier = match.group("id").upper() if match else ""
+        statement = match.group("statement").strip() if match else clause
+        if identifier:
+            reserved_identifiers.add(identifier)
+        parsed.append((identifier, statement))
+
+    requirements = []
+    seen = set()
+    used_identifiers = set()
+    automatic_index = 1
+    for explicit_identifier, statement in parsed:
+        digest = hashlib.sha256(statement.lower().encode("utf-8")).hexdigest()[:12]
+        deduplication_key = explicit_identifier or digest
+        if deduplication_key in seen:
             continue
-        seen.add(digest)
+        seen.add(deduplication_key)
+        identifier = explicit_identifier
+        if not identifier:
+            while True:
+                candidate = f"REQ-{automatic_index:03d}"
+                automatic_index += 1
+                if candidate not in reserved_identifiers and candidate not in used_identifiers:
+                    identifier = candidate
+                    break
+        used_identifiers.add(identifier)
         requirements.append({
-            "id": f"REQ-{len(requirements) + 1:03d}",
-            "statement": clause,
+            "id": identifier,
+            "statement": statement,
             "priority": "must",
             "mandatory": True,
             "source": "user",
@@ -605,6 +632,12 @@ def build_delivery_contract(
         ],
         "corpus_policy": corpus_policy,
     }
+    frozen_scope = json.dumps(
+        scope_changes, sort_keys=True, ensure_ascii=False, separators=(",", ":")
+    )
+    contract["scope_changes_sha256"] = hashlib.sha256(
+        frozen_scope.encode("utf-8")
+    ).hexdigest()
     frozen = json.dumps(contract, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
     contract["contract_sha256"] = hashlib.sha256(frozen.encode("utf-8")).hexdigest()
     return contract

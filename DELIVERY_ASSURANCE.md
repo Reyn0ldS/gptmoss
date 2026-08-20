@@ -64,6 +64,8 @@ Une modification de contenu ne renouvelle plus indéfiniment le budget d'une
 - un artefact obligatoire enfin créé ;
 - une nouvelle commande de vérification réussie ;
 - une diminution du nombre d'échecs observés ;
+- une diminution monotone des défauts documentaires mesurés (références, sources,
+  répétitions de paragraphes ou titres, fiches sémantiques, diagrammes, sections) ;
 - au maximum deux modifications préparatoires par fichier sans autre progrès.
 
 Après stagnation, un nouveau spécialiste reçoit les erreurs machines et reprend
@@ -76,6 +78,12 @@ le runtime de l'étape défaillante. Elle conserve le plan, les artefacts, les p
 et les étapes terminées. Les pauses d'approbation et les réductions de périmètre
 restent soumises à `/approve` ou `/reject` et ne peuvent pas être contournées par
 `/resume`.
+
+Le profil professionnel est recalculé avant chaque reprise. Si une règle
+déterministe renforcée invalide alors un artefact marqué `completed`, le moteur
+rouvre son étape productrice puis tous ses consommateurs transitifs. Les fichiers
+durables sont conservés comme base de réparation, mais aucun résultat dépendant
+de l'ancienne version n'est encore considéré comme validé.
 
 ## Audit indépendant final
 

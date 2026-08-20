@@ -63,9 +63,41 @@ def estimate_document_work(task: str, analysis: dict[str, Any] | None = None) ->
     match = re.search(r"(?i)\b(?:minimums?\s+)?words\s*=\s*(\d[\d _]*)", text)
     if match:
         requested_words = int(match.group(1).replace(" ", "").replace("_", ""))
+    page_match = re.search(
+        r"(?i)\b(\d{1,4})\s*(?:a|à|to|[-–—])\s*(\d{1,4})\s+pages?\b",
+        text,
+    )
+    if page_match:
+        lower, upper = int(page_match.group(1)), int(page_match.group(2))
+        if 1 <= lower <= upper:
+            requested_words = max(requested_words, lower * 250)
+    else:
+        page_match = re.search(
+            r"(?i)\b(?:au\s+moins|minimum(?:\s+de)?|at\s+least)\s+"
+            r"(\d{1,4})\s+pages?\b",
+            text,
+        )
+        if page_match:
+            requested_words = max(requested_words, int(page_match.group(1)) * 250)
+        else:
+            page_match = re.search(
+                r"(?i)\b(?:environ\s+|about\s+|approximately\s+)?(\d{1,4})\s+pages?\b",
+                text,
+            )
+            if page_match:
+                requested_words = max(requested_words, int(page_match.group(1)) * 250)
+            elif re.search(
+                r"(?i)\b(?:une\s+quarantaine\s+de|about\s+forty)\s+pages?\b", text
+            ):
+                requested_words = max(requested_words, 40 * 250)
     has_diagrams = any(marker in lowered for marker in ("diagram", "mermaid", "schéma", "schema", "uml", "architecture view"))
     score = len(set(item.casefold() for item in sources)) * 2 + len(set(item.casefold() for item in outputs))
-    score += 3 if requested_words >= 3000 else 2 if requested_words >= 1200 else 0
+    score += (
+        11 if requested_words >= 8000
+        else 4 if requested_words >= 3000
+        else 2 if requested_words >= 1200
+        else 0
+    )
     score += 2 if len(text) >= 2500 else 1 if len(text) >= 900 else 0
     if has_diagrams:
         score += 2
@@ -99,15 +131,50 @@ def estimate_document_work(task: str, analysis: dict[str, Any] | None = None) ->
     )
 
 
-def _renumber(steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _renumber(
+    steps: list[dict[str, Any]],
+    source_steps: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """Renumber a selected DAG while preserving transitive real dependencies.
+
+    Optional stages may be removed by adaptive planning. A dependency on a
+    removed stage is replaced by that stage's nearest surviving ancestors;
+    it is never replaced by the previous list item, which fabricated a
+    sequential chain and disabled otherwise safe parallel waves.
+    """
     mapping = {str(step["id"]): index for index, step in enumerate(steps)}
+    original_by_id = {
+        str(step["id"]): step for step in (source_steps or steps)
+    }
+
+    def surviving_dependencies(identifier: Any, seen: set[str]) -> list[str]:
+        key = str(identifier)
+        if key in mapping:
+            return [key]
+        if key in seen:
+            return []
+        removed = original_by_id.get(key)
+        if removed is None:
+            return []
+        return [
+            ancestor
+            for dependency in removed.get("dependencies", [])
+            for ancestor in surviving_dependencies(dependency, {*seen, key})
+        ]
+
     result = []
     for index, original in enumerate(steps):
         step = dict(original)
         step["id"] = index
-        dependencies = [mapping[str(item)] for item in original.get("dependencies", []) if str(item) in mapping]
-        if index and not dependencies:
-            dependencies = [index - 1]
+        dependency_keys = [
+            ancestor
+            for item in original.get("dependencies", [])
+            for ancestor in surviving_dependencies(item, set())
+        ]
+        dependencies = list(dict.fromkeys(
+            mapping[item] for item in dependency_keys
+            if item in mapping and mapping[item] != index
+        ))
         step["dependencies"] = dependencies
         result.append(step)
     return result
@@ -176,14 +243,80 @@ def adapt_document_steps(
     if coordinator:
         wanted.append(coordinator)
 
-    selected = []
-    seen = set()
-    for name in wanted:
-        step = by_name.get(name)
-        if step is not None and name not in seen:
-            selected.append(step)
-            seen.add(name)
+    # Adaptation may remove optional ceremony, never an explicitly named
+    # output. Preserve the original owner of every artifact literal requested
+    # by the user, regardless of the aggregate complexity score.
+    lowered_task = str(task or "").casefold().replace("\\", "/")
+    for name, step in by_name.items():
+        if any(
+            str(path).casefold().replace("\\", "/") in lowered_task
+            for path in (step.get("required_artifacts") or [])
+            if path
+        ):
+            wanted.append(name)
+
+    selected_names = set(wanted)
+    selected = [
+        step for name, step in by_name.items() if name in selected_names
+    ]
     if len(selected) < 4:
         selected = [steps[0], steps[1], steps[7], steps[8], steps[9], steps[12]]
-    selected = _renumber(selected)
+    selected = _renumber(selected, steps)
     return selected, replace(estimate, stage_budget=len(selected))
+
+
+def optimize_professional_document_dag(plan: dict[str, Any]) -> dict[str, Any]:
+    """Upgrade the known professional-document workstreams to parallel waves.
+
+    Arbitrary planner DAGs remain untouched. The deterministic professional
+    fallback has stable specialist contracts, allowing decision analysis and
+    application/data design to share the validated source/requirements wave;
+    security and platform analysis can then run together before synthesis.
+    """
+    if plan.get("delivery_profile") != "professional-local":
+        return plan
+    steps = [step for step in plan.get("steps", []) if isinstance(step, dict)]
+
+    def find(*markers: str) -> dict[str, Any] | None:
+        return next((
+            step for step in steps
+            if all(
+                marker in str(step.get("specialist") or "").casefold()
+                for marker in markers
+            )
+        ), None)
+
+    inventory = find("local corpus")
+    requirements = find("requirements", "traceability")
+    decisions = find("architecture decision")
+    application = find("application", "data architect")
+    security = find("security", "privacy")
+    platform = find("platform", "sre")
+    migration = find("migration", "operating model")
+    writer = find("professional", "editor")
+    if not all((inventory, requirements, decisions, application, writer)):
+        return plan
+
+    def identifiers(*items: dict[str, Any] | None) -> list[Any]:
+        return list(dict.fromkeys(
+            item["id"] for item in items if isinstance(item, dict)
+        ))
+
+    base = identifiers(inventory, requirements)
+    decisions["dependencies"] = list(base)
+    application["dependencies"] = list(base)
+    analysis_wave = identifiers(decisions, application)
+    if security:
+        security["dependencies"] = list(dict.fromkeys([*base, *analysis_wave]))
+    if platform:
+        platform["dependencies"] = list(dict.fromkeys([*base, *analysis_wave]))
+    if migration:
+        migration["dependencies"] = list(dict.fromkeys([
+            *base, *analysis_wave, *identifiers(security, platform),
+        ]))
+    writer["dependencies"] = list(dict.fromkeys([
+        *base,
+        *analysis_wave,
+        *identifiers(security, platform, migration),
+    ]))
+    return plan

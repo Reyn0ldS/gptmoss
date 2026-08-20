@@ -57,7 +57,7 @@ GPT-Moss utilise un moteur d'ordonnancement par graphe orienté acyclique (DAG).
 
 Pour garantir l'efficacité de la plateforme, les sous-agents (spécialistes) subissent une restriction de capacités par rapport au coordinateur :
 * **Délégation Interdite** : Les spécialistes n'ont pas accès aux outils `agent` et `devteam` (ils ne peuvent pas créer d'autres sous-agents ou initier de nouveaux projets).
-* **Focus Métier** : Ils emploient exclusivement les outils de système de fichiers (`filesystem`) et d'exécution shell (`shell`) pour accomplir directement leur tâche.
+* **Focus Métier** : Ils gardent `filesystem`, `shell`, `documents` et `memory`. Les outils `agent` et `devteam` restent retirés, sauf si l'étape porte explicitement `allow_nested_delegation=true` et que l'option runtime l'autorise.
 
 ---
 
@@ -106,13 +106,13 @@ Le bouton **Bibliothèque** ouvre le centre d'administration complet :
 
 ### Corpus documentaires professionnels
 
-La bibliothèque accepte désormais DOCX, PPTX, TXT/Markdown, HTML local, JSON et CSV en plus des images. GPTMOSS extrait localement les titres, paragraphes, listes, tableaux et diapositives, conserve la provenance, met les blocs en cache et les indexe sans télécharger de modèle documentaire. Les scripts et ressources distantes d'un HTML ou d'un fichier Office ne sont jamais chargés.
+La bibliothèque accepte DOCX, PPTX, TXT/Markdown, HTML local, JSON, CSV, PDF texte et les images PNG/JPEG/WebP. GPTMOSS extrait localement les titres, paragraphes, listes, tableaux, diapositives et pages PDF, conserve la provenance, met les blocs en cache et les indexe sans télécharger de modèle documentaire. Les scripts et ressources distantes d'un HTML ou d'un fichier Office ne sont jamais chargés. L'OCR des PDF scannés n'est pas implémenté.
 
 Pour une analyse ou une rédaction longue, joignez explicitement tous les fichiers à la tâche et sélectionnez au besoin les skills `document-analysis`, `documentation` et `project-architecture`. Les agents peuvent inventorier, rechercher puis paginer le corpus ; la simple présence d'un fichier dans la bibliothèque ne donne pas accès à une exécution qui ne l'a pas reçu.
 
 Une politique `document` peut empêcher la fin d'une livraison si une section, une exigence, une ligne de traçabilité ou une source manque, si une référence sort des bornes, ou si le texte contient un lien externe, un placeholder, une répétition interdite ou une variante terminologique. Le mode opératoire complet, les types MIME, les exemples API et la commande de rapport portable se trouvent dans [docs/local-document-workflow.md](docs/local-document-workflow.md).
 
-Dans **Paramètres**, la clé API peut être affichée volontairement pendant 15 secondes, uniquement depuis la machine locale. L'action est auditée mais le secret ne l'est jamais. **Tester la connexion** contacte réellement l'endpoint `/models` du fournisseur après avertissement. Avant toute sauvegarde, la GUI résume les champs modifiés ; les protections affaiblies nécessitent de saisir `CONFIRMER`.
+Dans **Paramètres**, la clé API peut être affichée volontairement pendant 15 secondes, uniquement depuis la machine locale. L'action est auditée mais le secret ne l'est jamais. **Tester la connexion** contacte réellement `/models` puis une complétion minimale `/chat/completions` après avertissement. Avant toute sauvegarde, la GUI résume les champs modifiés ; les protections affaiblies nécessitent de saisir `CONFIRMER`.
 
 Les chemins d'API sont sensibles à la casse : conservez le `/v1` exact annoncé par
 le serveur. Pour un certificat signé par une autorité privée, importez de préférence

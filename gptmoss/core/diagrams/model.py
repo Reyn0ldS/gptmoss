@@ -60,18 +60,96 @@ _EDGE_RE = re.compile(
 
 
 def parse_mermaid(source: str, diagram_id: str = "diagram-1", title: str = "Architecture diagram") -> DiagramSpec:
-    """Parse the intentionally small flowchart subset emitted by GPTMOSS."""
+    """Parse the bounded flowchart, sequence and state subsets emitted by GPTMOSS."""
     direction = "TB"
     nodes: dict[str, DiagramNode] = {}
     edges: list[DiagramEdge] = []
+    kind = "flowchart"
+    start_counter = 0
+    end_counter = 0
+
+    def state_id(raw: str, *, source_side: bool) -> str:
+        nonlocal start_counter, end_counter
+        value = raw.strip()
+        if value != "[*]":
+            return value
+        if source_side:
+            start_counter += 1
+            return f"START_{start_counter}"
+        end_counter += 1
+        return f"END_{end_counter}"
+
     for raw in str(source or "").splitlines():
         line = raw.strip()
-        if not line or line.startswith("%%"):
+        if not line:
+            continue
+        title_match = re.match(r"(?i)^%%\s*title\s*:\s*(.+)$", line)
+        if title_match:
+            title = title_match.group(1).strip() or title
+            continue
+        if line.startswith("%%"):
             continue
         header = re.match(r"(?i)^(?:graph|flowchart)\s+(TB|TD|LR|RL|BT)\b", line)
         if header:
+            kind = "flowchart"
             direction = "TB" if header.group(1).upper() == "TD" else header.group(1).upper()
             continue
+        if re.match(r"(?i)^sequenceDiagram\b", line):
+            kind = "sequence"
+            direction = "LR"
+            continue
+        if re.match(r"(?i)^stateDiagram(?:-v2)?\b", line):
+            kind = "state"
+            direction = "TB"
+            continue
+        if kind == "sequence":
+            participant = re.match(
+                r"(?i)^(?:participant|actor)\s+([A-Za-z0-9_-]+)(?:\s+as\s+(.+))?$",
+                line,
+            )
+            if participant:
+                node_id = participant.group(1)
+                nodes[node_id] = DiagramNode(
+                    node_id, (participant.group(2) or node_id).strip(), kind="participant"
+                )
+                continue
+            message = re.match(
+                r"^([A-Za-z0-9_][A-Za-z0-9_-]*?)\s*"
+                r"(?:-->>|->>|-->|->|--x|-x|--\)|-\))\s*"
+                r"([A-Za-z0-9_][A-Za-z0-9_-]*)\s*:\s*(.+)$",
+                line,
+            )
+            if message:
+                source_id, target_id, label = message.groups()
+                nodes.setdefault(source_id, DiagramNode(source_id, source_id, kind="participant"))
+                nodes.setdefault(target_id, DiagramNode(target_id, target_id, kind="participant"))
+                edges.append(DiagramEdge(source_id, target_id, label.strip(), relation="message"))
+                continue
+        if kind == "state":
+            declaration = re.match(
+                r'(?i)^state\s+(?:"([^"]+)"\s+as\s+)?([A-Za-z0-9_-]+)$', line
+            )
+            if declaration:
+                label, node_id = declaration.groups()
+                nodes[node_id] = DiagramNode(node_id, (label or node_id).strip(), kind="state")
+                continue
+            transition = re.match(
+                r"^(\[\*\]|[A-Za-z0-9_-]+)\s*--+>\s*"
+                r"(\[\*\]|[A-Za-z0-9_-]+)(?:\s*:\s*(.+))?$",
+                line,
+            )
+            if transition:
+                raw_source, raw_target, label = transition.groups()
+                source_id = state_id(raw_source, source_side=True)
+                target_id = state_id(raw_target, source_side=False)
+                nodes.setdefault(source_id, DiagramNode(source_id, "Start", kind="state"))
+                nodes.setdefault(target_id, DiagramNode(target_id, "End", kind="state"))
+                if raw_source != "[*]":
+                    nodes[source_id] = DiagramNode(source_id, source_id, kind="state")
+                if raw_target != "[*]":
+                    nodes[target_id] = DiagramNode(target_id, target_id, kind="state")
+                edges.append(DiagramEdge(source_id, target_id, (label or "").strip(), relation="transition"))
+                continue
         edge = _EDGE_RE.match(line)
         if edge:
             data = edge.groupdict()

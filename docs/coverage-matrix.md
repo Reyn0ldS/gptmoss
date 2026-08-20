@@ -18,7 +18,7 @@ modules et tests est dans `application-map.json` ; le présent document apporte 
 | Mémoire | JSON store, context, memory cap | bibliothèque `/memory` | scope projet implicite | `test_memory_v2` |
 | Skills/évolution | skills, evolution | bibliothèque, profils, évolution | skills par défaut, création/amélioration | `test_autonomous_evolution`, `test_skills_and_artifacts` |
 | Fournisseur LLM | qwen, politique de fenêtre, reprise execution | test de connexion, diagnostics | URL, clé, modèle, TLS, vision, fenêtre/réserve de contexte | `test_generic_planning_and_context`, `test_provider_integration`, `test_api` |
-| Qualité documentaire | corpus, document_quality | résultats d'exécution | profil professionnel | `test_document_quality`, `test_quality_benchmarks`, `test_corpus` |
+| Qualité documentaire | corpus, document_quality, `long_document_engine`, `document_model`, `document_planning`, `core/diagrams/*` | résultats, panneau Document long, `GET /executions/{id}/document` | profil professionnel, checkpoints, diagrammes | `test_document_quality`, `test_quality_benchmarks`, `test_corpus`, `test_long_document_engine`, `test_diagrams_and_docx` |
 | Assurance logiciel | `core/delivery.py`, `core/delivery_feedback.py`, `core/evidence_graph.py`, artifact_validation | plan, métriques, feed, `GET /executions/{id}/evidence-graph` | contrat produit par plan, arêtes typées, reprise ciblée | `test_delivery_assurance`, `test_delivery_benchmarks`, `test_delivery_feedback`, `test_evidence_graph`, `test_plan_graph` |
 | Paquet professionnel | professional_delivery, delivery_package | bouton Télécharger | profil professionnel | `test_professional_delivery` |
 | État/événements | state, event_bus, observability | WebSockets, flux LLM, diagnostics, audit | index + sidecars du workspace | `test_event_bus`, `test_lifecycle_chronology`, `test_state_durability`, `test_runtime_ux` |
@@ -35,8 +35,9 @@ modules et tests est dans `application-map.json` ; le présent document apporte 
 | Délégation | `allow_nested_delegation`, `max_delegation_depth` | Schémas d'outils, lignée et contrôles du noyau. |
 | Évolution | `autonomous_specialization`, création/amélioration, seuil/cap | Registres de profils et cycle de vie des skills. |
 | Workspace | chemin, restriction, sous-dossiers, projets | Filesystem, shell, artifacts et résolveur par exécution. |
-| Documents | `max_upload_bytes`, `max_attachment_text_chars`, `max_context_chars` | Dépôt, normalisation, recherche bornée et compilation contextuelle ; la fenêtre fournisseur reste le plafond final. |
-| Shell | `safe_shell_mode`, timeout, sortie maximale | Validation de commande, processus et rendu de résultat. |
+| Documents | `max_upload_bytes`, `max_attachment_text_chars`, `max_context_chars`, `document_engine_enabled`, `document_checkpoint_enabled`, `document_target_section_words`, `diagram_rendering`, `docx_embed_diagrams` | Dépôt, recherche, moteur de sections, checkpoints et diagrammes ; la fenêtre fournisseur reste le plafond final. |
+| Persistance | `max_transitions_per_execution` | Historique de transitions par exécution (`≥ 100`, défaut 2000). |
+| Shell | `safe_shell_mode`, timeout, sortie maximale (`≥ 1`) | Validation de commande, processus et rendu de résultat. |
 | Skills | `strict_skill_capabilities`, `default_skills` | Sélection procédurale ; restriction des outils seulement en mode strict. |
 
 Le validateur exige une correspondance exacte entre les clés du template et celles de la
@@ -48,9 +49,9 @@ nouvelle clé ne doit pas être considérée couverte par la seule présence JSO
 | Surface GUI | Services indispensables | Retour attendu dans la GUI |
 |---|---|---|
 | Compositeur | projets, artefacts, skills, création exécution | tâche créée, sélection conservée, erreurs explicites |
-| Suivi | liste/détail, feed unifié, WebSocket, onglets Liste/Graphe | statut, plan, topologie `plan.edges`, étapes, outils, approbations en temps réel |
+| Suivi | liste/détail, feed unifié, WebSocket, onglets Liste/Graphe, panneau Document long | statut, plan (`plan.edges`), étapes, outils, approbations, avancement des sections |
 | Contrôles d'exécution | pause, reprise, annulation, suppression | boutons activés selon l'état réel et retour serveur |
-| Livraison | endpoint delivery, `GET /executions/{id}/evidence-graph` | bouton visible uniquement si manifeste/ZIP disponibles ; graphe de preuves consultable par API |
+| Livraison | endpoint delivery, `GET /executions/{id}/evidence-graph` | bouton visible uniquement si manifeste/ZIP disponibles. Le Graphe GUI dessine `plan.edges` ; le graphe de preuves est une vue API distincte. |
 | Bibliothèque | artefacts, recherche, mémoire, skills, diagnostics, audit | inventaire actualisé après chaque mutation |
 | Réglages | lecture, écriture, révélation, test fournisseur | secret masqué, confirmation sensible, diagnostic précis |
 | Serveur | découverte du superviseur et actions de contrôle | état `starting/running/stopped/error`, port et erreur actualisés |
@@ -63,7 +64,7 @@ exécuter en test d'intégration lorsqu'un navigateur ou un vrai fournisseur est
 
 | Famille | Détection | Unité de provenance | Limites/risques couverts |
 |---|---|---|---|
-| Texte, Markdown, CSV, JSON, XML | signature/contenu et suffixe supporté | lignes/blocs | encodage, texte vide, contexte borné |
+| Texte, Markdown, CSV, JSON | signature/contenu et suffixe supporté | lignes/blocs | encodage, texte vide, contexte borné |
 | HTML | parseur local | titres, paragraphes, listes, tables | aucune ressource externe exécutée |
 | DOCX | signature ZIP + membres OOXML | paragraphes/tables | archive chiffrée, taille, ratio, traversée |
 | PPTX | signature ZIP + membres OOXML | diapositives/blocs | mêmes frontières d'archive |

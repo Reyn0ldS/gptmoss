@@ -128,6 +128,46 @@ def test_resume_failed_delegated_execution_is_rejected():
     assert response.status_code == 400
     assert child.status == "failed"
 
+
+def test_resume_reopens_cancelled_inflight_plan_step_after_restart():
+    event_bus = EventBus()
+    state_engine = StateEngine()
+    llm = MockLLMProvider()
+    engine = ExecutionEngine(
+        event_bus, state_engine,
+        ContextEngine(state_engine, RAMMemoryProvider()), llm,
+        SimplePlanner(llm), SimplePolicyProvider(),
+    )
+    engine.execute_task = AsyncMock()
+    kernel = RuntimeKernel(event_bus, state_engine, engine)
+    init_app(kernel, engine, state_engine, event_bus)
+    client = ASGIClient(app)
+    root = state_engine.get_execution("restart-root")
+    root.status = "paused"
+    root.variables["task"] = "Resume durable document repair"
+    root.variables["step_runtime"] = {
+        "3": {"iterations": 44, "stagnant_iterations": 12},
+    }
+    root.current_plan = {"steps": [{
+        "id": 3, "status": "cancelled",
+        "assigned_execution_id": "cancelled-child",
+        "retry_context": "Preserve this exact machine diagnosis",
+    }]}
+    child = state_engine.get_execution("cancelled-child")
+    child.status = "cancelled"
+    child.variables["parent_execution_id"] = "restart-root"
+
+    response = client.post("/executions/restart-root/resume")
+
+    assert response.status_code == 200
+    assert root.status == "running"
+    step = root.current_plan["steps"][0]
+    assert step["status"] == "pending"
+    assert "assigned_execution_id" not in step
+    assert step["manual_retry_count"] == 1
+    assert step["retry_context"] == "Preserve this exact machine diagnosis"
+    assert "3" not in root.variables["step_runtime"]
+
 def test_api_submit_and_query_flow():
     # Setup test dependencies
     event_bus = EventBus()
@@ -598,6 +638,7 @@ def test_api_settings_preserve_secret_and_context_budget(tmp_path):
         "context_output_reserve_tokens": 16384,
         "max_upload_bytes": 100000,
         "max_attachment_text_chars": 5000,
+        "max_transitions_per_execution": 1500,
         "safe_shell_mode": False,
         "shell_timeout_seconds": 45,
         "shell_max_output_chars": 20000,
@@ -620,6 +661,7 @@ def test_api_settings_preserve_secret_and_context_budget(tmp_path):
     assert public_settings["max_parallel_plan_steps"] == 6
     assert public_settings["max_upload_bytes"] == 100000
     assert public_settings["max_attachment_text_chars"] == 5000
+    assert public_settings["max_transitions_per_execution"] == 1500
     assert public_settings["document_checkpoint_enabled"] is False
     assert public_settings["document_target_section_words"] == 900
     assert public_settings["diagram_rendering"] is False
@@ -641,7 +683,7 @@ def test_api_settings_preserve_secret_and_context_budget(tmp_path):
     assert exec_engine.context_engine.max_history_chars == 24000
     assert exec_engine.artifact_store.max_bytes == 100000
     assert exec_engine.artifact_store.max_text_chars == 5000
-    assert state_engine.max_transitions_per_execution == 2000
+    assert state_engine.max_transitions_per_execution == 1500
     assert exec_engine.autonomous_specialization is False
     assert exec_engine.skill_lifecycle.creation_enabled is True
     assert exec_engine.skill_lifecycle.improvement_enabled is False
@@ -1151,6 +1193,9 @@ def test_gui_contains_complete_management_controls():
         "dataset.executionId", 'id="btn-clear-all"',
         'value="documents"', 'value="memory"',
         "ACTIVE_EXECUTION_STATUSES",
+        'id="settings-max-transitions"',
+        "scrollSettingsSection('settings-documents-section')",
+        "max_transitions_per_execution",
     ):
         assert marker in gui
 

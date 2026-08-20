@@ -21,6 +21,41 @@ def test_filesystem_read_accepts_bounded_model_offsets(tmp_path):
     assert filesystem.read("large.txt", offset=99, limit=3) == ""
 
 
+def test_filesystem_read_caps_large_default_window_and_reports_exact_continuation(tmp_path):
+    path = tmp_path / "large.txt"
+    path.write_text("A" * 20_000, encoding="utf-8")
+    filesystem = FilesystemCapability(str(tmp_path))
+
+    first = filesystem.read("large.txt")
+    assert first.startswith("A" * 12_000)
+    assert "characters=0-11999" in first
+    assert "total=20000" in first
+    assert "next_offset=12000" in first
+    assert filesystem.read("large.txt", offset=12_000) == "A" * 8_000
+
+
+def test_filesystem_replace_section_preserves_heading_and_other_records(tmp_path):
+    path = tmp_path / "decisions.md"
+    path.write_text(
+        "# Decisions\n\n### DEC-001: Storage\n\nOld body.\n\n"
+        "### DEC-002: Runtime\n\nUntouched body.\n",
+        encoding="utf-8",
+    )
+    filesystem = FilesystemCapability(str(tmp_path))
+
+    result = filesystem.replace_section(
+        "decisions.md", "### DEC-001: Storage",
+        "- **Context:** Durable data.\n- **Decision:** Atomic storage.",
+    )
+
+    content = path.read_text(encoding="utf-8")
+    assert "Markdown section replaced successfully" in result
+    assert content.count("### DEC-001: Storage") == 1
+    assert "Old body." not in content
+    assert "Atomic storage." in content
+    assert "### DEC-002: Runtime\n\nUntouched body." in content
+
+
 def test_filesystem_read_opens_resolved_file_without_exists_preflight(tmp_path, monkeypatch):
     path = tmp_path / "analysis" / "report.md"
     path.parent.mkdir()

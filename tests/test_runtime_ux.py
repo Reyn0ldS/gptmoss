@@ -550,6 +550,239 @@ async def test_owned_document_paragraph_can_be_repaired_without_global_rewrite(t
 
 
 @pytest.mark.asyncio
+async def test_owned_markdown_list_item_can_be_repaired_by_reported_prefix(tmp_path):
+    engine, state = _engine(tmp_path)
+    execution = state.get_execution("list-item-repair")
+    execution.variables["delivery_contract"] = {
+        "steps": [{"step_id": 0, "role": "architect", "owned_paths": ["inventory.md"]}]
+    }
+    execution.variables["plan_step_id"] = 0
+    execution.variables["role_key"] = "architect"
+    project = tmp_path / "projects" / "proj-default"
+    project.mkdir(parents=True)
+    target = project / "inventory.md"
+    target.write_text(
+        "# Coverage\n\n- First stable inventory item.\n"
+        "- Total of 751 normalized blocks across all documents.\n"
+        "- Final stable inventory item.\n",
+        encoding="utf-8",
+    )
+
+    result = await engine._call_tool(
+        "list-item-repair", "filesystem", "replace_paragraph",
+        {
+            "path": "inventory.md",
+            "paragraph_prefix": "- Total of 751 normalized blocks across all documents.",
+            "content": "- Total of 811 normalized blocks across all documents.",
+        },
+    )
+
+    content = target.read_text(encoding="utf-8")
+    assert "Markdown line occurrence 1 replaced successfully" in result
+    assert "751" not in content
+    assert "- Total of 811 normalized blocks" in content
+    assert "- First stable inventory item." in content
+    assert "- Final stable inventory item." in content
+
+
+@pytest.mark.asyncio
+async def test_owned_markdown_heading_reference_can_be_repaired_by_reported_prefix(tmp_path):
+    engine, state = _engine(tmp_path)
+    execution = state.get_execution("heading-repair")
+    execution.variables["delivery_contract"] = {
+        "steps": [{"step_id": 0, "role": "architect", "owned_paths": ["inventory.md"]}]
+    }
+    execution.variables["plan_step_id"] = 0
+    execution.variables["role_key"] = "architect"
+    project = tmp_path / "projects" / "proj-default"
+    project.mkdir(parents=True)
+    target = project / "inventory.md"
+    target.write_text(
+        "# Inventory\n\n### 2.1 `qualification/requirements-specification.txt` "
+        "[> (root) > blocks 0-3]\n\n"
+        "Material evidence remains below this heading.\n",
+        encoding="utf-8",
+    )
+
+    result = await engine._call_tool(
+        "heading-repair", "filesystem", "replace_paragraph",
+        {
+            "path": "inventory.md",
+            "paragraph_prefix": (
+                "### 2.1 `qualification/requirements-specification.txt` "
+                "[> (root) > blocks 0-3]"
+            ),
+            "content": (
+                "### 2.1 `qualification/requirements-specification.txt` "
+                "[qualification/requirements-specification.txt > (root) > blocks 1-4]"
+            ),
+        },
+    )
+
+    content = target.read_text(encoding="utf-8")
+    assert "Markdown line occurrence 1 replaced successfully" in result
+    assert "[> (root)" not in content
+    assert "[qualification/requirements-specification.txt > (root) > blocks 1-4]" in content
+    assert "Material evidence remains below this heading." in content
+
+
+@pytest.mark.asyncio
+async def test_short_duplicate_markdown_heading_occurrence_can_be_removed(tmp_path):
+    engine, state = _engine(tmp_path)
+    execution = state.get_execution("duplicate-heading-repair")
+    execution.variables["delivery_contract"] = {
+        "steps": [{"step_id": 0, "role": "architect", "owned_paths": ["inventory.md"]}]
+    }
+    execution.variables["plan_step_id"] = 0
+    execution.variables["role_key"] = "architect"
+    project = tmp_path / "projects" / "proj-default"
+    project.mkdir(parents=True)
+    target = project / "inventory.md"
+    target.write_text(
+        "# Inventory\n\n## Conclusion\n\nFirst body.\n\n"
+        "Conclusion\n\n## Conclusion\n\nSecond body remains.\n",
+        encoding="utf-8",
+    )
+
+    result = await engine._call_tool(
+        "duplicate-heading-repair", "filesystem", "replace_paragraph",
+        {
+            "path": "inventory.md", "paragraph_prefix": "## Conclusion",
+            "content": "", "occurrence": 2,
+        },
+    )
+
+    content = target.read_text(encoding="utf-8")
+    assert "Markdown line occurrence 2 replaced successfully" in result
+    assert content.count("## Conclusion") == 1
+    assert "\nConclusion\n" in content
+    assert "First body." in content
+    assert "Second body remains." in content
+
+
+@pytest.mark.asyncio
+async def test_owned_plain_markdown_line_can_be_repaired_by_reported_prefix(tmp_path):
+    engine, state = _engine(tmp_path)
+    execution = state.get_execution("plain-line-repair")
+    execution.variables["delivery_contract"] = {
+        "steps": [{"step_id": 0, "role": "architect", "owned_paths": ["inventory.md"]}]
+    }
+    execution.variables["plan_step_id"] = 0
+    execution.variables["role_key"] = "architect"
+    project = tmp_path / "projects" / "proj-default"
+    project.mkdir(parents=True)
+    target = project / "inventory.md"
+    target.write_text(
+        "# Coverage\n\n**Evidence Trace:**\n"
+        "The first source remains valid [first.txt > blocks 1-2].\n"
+        "The second source has invalid bounds [second.txt > blocks 0-3].\n"
+        "The final source remains valid [third.txt > block 1].\n",
+        encoding="utf-8",
+    )
+
+    result = await engine._call_tool(
+        "plain-line-repair", "filesystem", "replace_paragraph",
+        {
+            "path": "inventory.md",
+            "paragraph_prefix": (
+                "The second source has invalid bounds [second.txt > blocks 0-3]."
+            ),
+            "content": (
+                "The second source has valid bounds [second.txt > blocks 1-4]."
+            ),
+        },
+    )
+
+    content = target.read_text(encoding="utf-8")
+    assert "Markdown line occurrence 1 replaced successfully" in result
+    assert "second.txt > blocks 0-3" not in content
+    assert "second.txt > blocks 1-4" in content
+    assert "The first source remains valid" in content
+    assert "The final source remains valid" in content
+
+
+@pytest.mark.asyncio
+async def test_reference_led_markdown_line_uses_literal_selector_fallback(tmp_path):
+    engine, state = _engine(tmp_path)
+    execution = state.get_execution("reference-line-repair")
+    execution.variables["delivery_contract"] = {
+        "steps": [{"step_id": 0, "role": "architect", "owned_paths": ["inventory.md"]}]
+    }
+    execution.variables["plan_step_id"] = 0
+    execution.variables["role_key"] = "architect"
+    project = tmp_path / "projects" / "proj-default"
+    project.mkdir(parents=True)
+    target = project / "inventory.md"
+    target.write_text(
+        "# Coverage\n\n"
+        "- [qualification/acceptance-criteria.txt > blocks 0-3]: Fully covered.\n"
+        "- [qualification/architecture-reference.docx > blocks 1-97]: Fully covered.\n",
+        encoding="utf-8",
+    )
+
+    result = await engine._call_tool(
+        "reference-line-repair", "filesystem", "replace_paragraph",
+        {
+            "path": "inventory.md",
+            "paragraph_prefix": (
+                "- [qualification/acceptance-criteria.txt > blocks 0-3]: Fully covered."
+            ),
+            "content": (
+                "- [qualification/acceptance-criteria.txt > blocks 1-4]: Fully covered."
+            ),
+        },
+    )
+
+    content = target.read_text(encoding="utf-8")
+    assert "Markdown line occurrence 1 replaced successfully" in result
+    assert "acceptance-criteria.txt > blocks 0-3" not in content
+    assert "acceptance-criteria.txt > blocks 1-4" in content
+    assert "architecture-reference.docx > blocks 1-97" in content
+    assert content.count("Fully covered.") == 2
+
+
+@pytest.mark.asyncio
+async def test_citation_selector_disambiguates_repeated_table_label(tmp_path):
+    engine, state = _engine(tmp_path)
+    execution = state.get_execution("citation-disambiguation")
+    execution.variables["delivery_contract"] = {
+        "steps": [{"step_id": 0, "role": "architect", "owned_paths": ["inventory.md"]}]
+    }
+    execution.variables["plan_step_id"] = 0
+    execution.variables["role_key"] = "architect"
+    project = tmp_path / "projects" / "proj-default"
+    project.mkdir(parents=True)
+    target = project / "inventory.md"
+    target.write_text(
+        "# First matrix\n\n"
+        "| DEC-003 | Deterministic validators | [quality.py > blocks 1-44] | Complete |\n\n"
+        "# Second matrix\n\n"
+        "| DEC-003 | Deterministic validators | [quality.py > blocks 0-18] | Complete |\n",
+        encoding="utf-8",
+    )
+
+    result = await engine._call_tool(
+        "citation-disambiguation", "filesystem", "replace_paragraph",
+        {
+            "path": "inventory.md",
+            "paragraph_prefix": (
+                "| DEC-003 | Deterministic validators | "
+                "[quality.py > blocks 0-18] | Complete |"
+            ),
+            "content": (
+                "| DEC-003 | Deterministic validators | "
+                "[quality.py > blocks 1-44] | Complete |"
+            ),
+        },
+    )
+
+    content = target.read_text(encoding="utf-8")
+    assert "Markdown line occurrence 1 replaced successfully" in result
+    assert "blocks 0-18" not in content
+    assert content.count("[quality.py > blocks 1-44]") == 2
+
+
+@pytest.mark.asyncio
 async def test_paragraph_repair_rejects_ambiguous_short_prefix(tmp_path):
     engine, state = _engine(tmp_path)
     state.get_execution("short-prefix")
@@ -604,15 +837,18 @@ async def test_active_required_artifact_cannot_be_deleted_by_its_writer(tmp_path
     assert target.read_text(encoding="utf-8") == "validated draft"
 
 
+@pytest.mark.parametrize("role", ["writer", "architect"])
 @pytest.mark.asyncio
-async def test_writer_cannot_globally_overwrite_existing_document_without_gate(tmp_path):
+async def test_specialist_cannot_globally_overwrite_existing_document_without_gate(
+    tmp_path, role,
+):
     engine, state = _engine(tmp_path)
     execution = state.get_execution("guarded-document")
-    execution.variables["role_key"] = "writer"
+    execution.variables["role_key"] = role
     execution.current_plan = {
         "steps": [{
             "id": 0,
-            "role": "writer",
+            "role": role,
             "required_artifacts": ["dossier.md"],
             "owned_paths": ["dossier.md"],
         }],
@@ -644,6 +880,561 @@ async def test_writer_cannot_globally_overwrite_existing_document_without_gate(t
     )
     assert "written successfully" in allowed
     assert target.read_text(encoding="utf-8") == "gate-authorized replacement"
+
+
+@pytest.mark.asyncio
+async def test_retry_child_can_rewrite_code_wrapped_citations_reported_by_gate(
+    tmp_path,
+):
+    engine, state = _engine(tmp_path)
+    execution = state.get_execution("citation-retry")
+    execution.variables["role_key"] = "architect"
+    execution.variables["delegated_step"] = {
+        "retry_context": (
+            "Current machine gate failures: dossier.md: 48 citation-like pattern(s) "
+            "inside Markdown code do not count as evidence; write actual citations "
+            "without backticks or code fences"
+        ),
+    }
+    execution.current_plan = {
+        "steps": [{
+            "id": 0,
+            "role": "architect",
+            "required_artifacts": ["dossier.md"],
+            "owned_paths": ["dossier.md"],
+        }],
+        "artifact_validations": [{
+            "path": "dossier.md",
+            "validator": "document",
+            "constraints": {"require_local_references": True},
+        }],
+    }
+    execution.current_step = 0
+    project = tmp_path / "projects" / "proj-default"
+    project.mkdir(parents=True)
+    target = project / "dossier.md"
+    target.write_text(
+        "Evidence: `[source.md > Scope > blocks 1-2]`", encoding="utf-8",
+    )
+
+    allowed = await engine._call_tool(
+        "citation-retry", "filesystem", "write",
+        {
+            "path": "dossier.md",
+            "content": "Evidence: [source.md > Scope > blocks 1-2]",
+        },
+    )
+
+    assert "written successfully" in allowed
+    assert target.read_text(encoding="utf-8") == (
+        "Evidence: [source.md > Scope > blocks 1-2]"
+    )
+
+
+@pytest.mark.asyncio
+async def test_gate_authorized_rewrite_cannot_discard_most_of_a_long_document(tmp_path):
+    engine, state = _engine(tmp_path)
+    execution = state.get_execution("lossy-document-retry")
+    execution.variables["role_key"] = "writer"
+    execution.current_plan = {
+        "steps": [{
+            "id": 0, "role": "writer",
+            "required_artifacts": ["dossier.md"], "owned_paths": ["dossier.md"],
+        }],
+        "artifact_validations": [{
+            "path": "dossier.md", "validator": "document", "constraints": {},
+        }],
+    }
+    execution.current_step = 0
+    execution.variables["step_runtime"] = {
+        "0": {"required_next_tool": "filesystem__write"},
+    }
+    project = tmp_path / "projects" / "proj-default"
+    project.mkdir(parents=True)
+    target = project / "dossier.md"
+    original = "# Dossier\n\n" + ("Contenu validé et sourcé. " * 400)
+    target.write_text(original, encoding="utf-8")
+
+    blocked = await engine._call_tool(
+        "lossy-document-retry", "filesystem", "write",
+        {"path": "dossier.md", "content": "# Dossier\n\nRésumé tronqué."},
+    )
+
+    assert "Lossy global rewrite blocked" in blocked
+    assert target.read_text(encoding="utf-8") == original
+
+
+def test_profile_upgrade_reopens_invalid_completed_producer_and_consumers(tmp_path):
+    engine, state = _engine(tmp_path)
+    execution = state.get_execution("resume-revalidation")
+    execution.current_plan = {
+        "steps": [
+            {
+                "id": 0, "status": "completed", "dependencies": [],
+                "required_artifacts": ["analysis/decisions.md"],
+                "assigned_execution_id": "old-producer",
+            },
+            {
+                "id": 1, "status": "completed", "dependencies": [0],
+                "required_artifacts": ["dossier.md"],
+                "assigned_execution_id": "old-consumer",
+            },
+        ],
+        "artifact_validations": [{
+            "path": "analysis/decisions.md", "validator": "document",
+            "constraints": {"required_headings": ["Validated decisions"]},
+        }],
+    }
+    execution.results["steps"] = {"0": {"old": True}, "1": {"old": True}}
+    project = tmp_path / "projects" / "proj-default"
+    (project / "analysis").mkdir(parents=True)
+    (project / "analysis" / "decisions.md").write_text(
+        "# Incomplete decisions\n\nNo validated section.\n", encoding="utf-8",
+    )
+    (project / "dossier.md").write_text("# Stale dossier\n", encoding="utf-8")
+
+    reopened = engine._reopen_invalid_completed_steps(
+        "resume-revalidation", execution, execution.current_plan["steps"],
+    )
+
+    assert [step["id"] for step in reopened] == [0, 1]
+    assert all(step["status"] == "pending" for step in reopened)
+    assert all("assigned_execution_id" not in step for step in reopened)
+    assert "deterministic profile upgrade" in reopened[0]["retry_context"]
+    assert "upstream artifact was reopened" in reopened[1]["retry_context"]
+    assert execution.results["steps"] == {}
+
+
+def test_profile_upgrade_refreshes_obsolete_pending_retry_context(tmp_path):
+    engine, state = _engine(tmp_path)
+    execution = state.get_execution("resume-pending-revalidation")
+    execution.current_plan = {
+        "steps": [{
+            "id": 0, "status": "pending", "dependencies": [],
+            "required_artifacts": ["analysis/inventory.md"],
+            "retry_context": (
+                "A deterministic profile upgrade invalidated this persisted artifact. "
+                "Preserve valid content and repair these machine-observed defects:\n"
+                "obsolete semantic record defect"
+            ),
+        }],
+        "artifact_validations": [{
+            "path": "analysis/inventory.md", "validator": "document",
+            "constraints": {"required_headings": ["Coverage"]},
+        }],
+    }
+    project = tmp_path / "projects" / "proj-default" / "analysis"
+    project.mkdir(parents=True)
+    (project / "inventory.md").write_text("# Inventory\n", encoding="utf-8")
+
+    reopened = engine._reopen_invalid_completed_steps(
+        "resume-pending-revalidation", execution, execution.current_plan["steps"],
+    )
+
+    assert reopened == []
+    retry_context = execution.current_plan["steps"][0]["retry_context"]
+    assert "missing required heading(s): Coverage" in retry_context
+    assert "obsolete semantic record defect" not in retry_context
+
+
+def test_profile_upgrade_replaces_vague_upstream_retry_with_current_defects(tmp_path):
+    engine, state = _engine(tmp_path)
+    execution = state.get_execution("resume-upstream-revalidation")
+    execution.current_plan = {
+        "steps": [{
+            "id": 0, "status": "pending", "dependencies": [],
+            "required_artifacts": ["analysis/architecture.md"],
+            "retry_context": (
+                "A completed upstream artifact was reopened by stronger deterministic "
+                "quality gates. Reuse its corrected result and refresh this dependent "
+                "artifact without trusting stale conclusions."
+            ),
+        }],
+        "artifact_validations": [{
+            "path": "analysis/architecture.md", "validator": "document",
+            "constraints": {"required_headings": ["Validated architecture"]},
+        }],
+    }
+    project = tmp_path / "projects" / "proj-default" / "analysis"
+    project.mkdir(parents=True)
+    (project / "architecture.md").write_text("# Draft\n", encoding="utf-8")
+
+    reopened = engine._reopen_invalid_completed_steps(
+        "resume-upstream-revalidation", execution, execution.current_plan["steps"],
+    )
+
+    assert reopened == []
+    retry_context = execution.current_plan["steps"][0]["retry_context"]
+    assert retry_context.startswith("A deterministic profile upgrade invalidated")
+    assert "missing required heading(s): Validated architecture" in retry_context
+    assert "without trusting stale conclusions" not in retry_context
+
+
+def test_resume_refreshes_stale_failed_attempt_gates_and_tool_constraint(tmp_path):
+    engine, state = _engine(tmp_path)
+    execution = state.get_execution("resume-failed-writer")
+    execution.current_plan = {
+        "steps": [{
+            "id": 0, "status": "pending", "dependencies": [],
+            "required_artifacts": ["dossier.md"],
+            "retry_context": (
+                "Previous attempt failed. Current machine gate failures: "
+                "obsolete duplicate heading defect"
+            ),
+        }],
+        "artifact_validations": [{
+            "path": "dossier.md", "validator": "document",
+            "constraints": {
+                "required_headings": ["Registre des risques"],
+                "min_section_words": 20,
+            },
+        }],
+    }
+    execution.variables["step_runtime"] = {"0": {
+        "required_next_tool": "filesystem__replace_paragraph",
+        "required_repair_issues": ["obsolete duplicate heading defect"],
+    }}
+    project = tmp_path / "projects" / "proj-default"
+    project.mkdir(parents=True)
+    (project / "dossier.md").write_text(
+        "# Dossier\n\n## Registre des risques\n\nCourt.\n",
+        encoding="utf-8",
+    )
+
+    engine._reopen_invalid_completed_steps(
+        "resume-failed-writer", execution, execution.current_plan["steps"],
+    )
+
+    refreshed = execution.current_plan["steps"][0]["retry_context"]
+    assert refreshed.startswith("A resumed specialist retry was refreshed")
+    assert "exact Markdown heading selector(s): ## Registre des risques" in refreshed
+    assert "obsolete duplicate heading defect" not in refreshed
+    assert "required_next_tool" not in execution.variables["step_runtime"]["0"]
+    assert "required_repair_issues" not in execution.variables["step_runtime"]["0"]
+
+
+@pytest.mark.asyncio
+async def test_empty_section_repair_rejects_heading_reported_for_another_defect(tmp_path):
+    engine, state = _engine(tmp_path)
+    execution = state.get_execution("guarded-empty-section")
+    execution.variables["role_key"] = "writer"
+    execution.current_plan = {
+        "steps": [{
+            "id": 0, "role": "writer", "required_artifacts": ["dossier.md"],
+            "owned_paths": ["dossier.md"],
+        }],
+        "artifact_validations": [{
+            "path": "dossier.md", "validator": "document", "constraints": {},
+        }],
+    }
+    execution.current_step = 0
+    execution.variables["step_runtime"] = {"0": {
+        "required_next_tool": "filesystem__replace_section",
+        "required_repair_issues": [
+            "empty required section(s): Registre des risques; exact Markdown "
+            "heading selector(s): # Registre des risques",
+            "duplicate heading selector(s): ### 7.1. Analyse détaillée des risques",
+        ],
+    }}
+    project = tmp_path / "projects" / "proj-default"
+    project.mkdir(parents=True)
+    target = project / "dossier.md"
+    original = (
+        "# Registre des risques\n\nCourt.\n\n"
+        "### 7.1. Analyse détaillée des risques\n\nStable.\n"
+    )
+    target.write_text(original, encoding="utf-8")
+
+    blocked = await engine._call_tool(
+        "guarded-empty-section", "filesystem", "replace_section",
+        {
+            "path": "dossier.md",
+            "heading_selector": "### 7.1. Analyse détaillée des risques",
+            "content": "Mauvaise cible.",
+        },
+    )
+
+    assert "use only a selector listed after" in blocked
+    assert target.read_text(encoding="utf-8") == original
+
+
+def test_profile_upgrade_freezes_all_existing_record_ids_before_repair(tmp_path):
+    engine, state = _engine(tmp_path)
+    execution = state.get_execution("resume-record-preservation")
+    policy = {
+        "heading_pattern": r"\bDEC-\d{3}\b",
+        "minimum_records": 1,
+        "preserve_existing_record_ids": True,
+        "required_fields": {"context": ["context"], "decision": ["decision"]},
+    }
+    execution.current_plan = {
+        "steps": [{
+            "id": 0, "status": "completed", "dependencies": [],
+            "required_artifacts": ["analysis/decisions.md"],
+        }],
+        "artifact_validations": [{
+            "path": "analysis/decisions.md", "validator": "document",
+            "constraints": {"record_section_policy": policy},
+        }],
+    }
+    project = tmp_path / "projects" / "proj-default" / "analysis"
+    project.mkdir(parents=True)
+    (project / "decisions.md").write_text(
+        "# Decisions\n\n### DEC-001: Storage\n\n- **Context:** A\n\n"
+        "### DEC-002: Runtime\n\n- **Context:** B\n",
+        encoding="utf-8",
+    )
+
+    reopened = engine._reopen_invalid_completed_steps(
+        "resume-record-preservation", execution, execution.current_plan["steps"],
+    )
+
+    frozen = execution.current_plan["artifact_validations"][0]["constraints"][
+        "record_section_policy"
+    ]
+    assert [step["id"] for step in reopened] == [0]
+    assert frozen["required_record_ids"] == ["DEC-001", "DEC-002"]
+    assert frozen["minimum_records"] == 2
+    assert "### DEC-001: Storage" in reopened[0]["retry_context"]
+    assert "### DEC-002: Runtime" in reopened[0]["retry_context"]
+
+
+@pytest.mark.asyncio
+async def test_section_repair_requires_a_machine_reported_heading(tmp_path):
+    engine, state = _engine(tmp_path)
+    execution = state.get_execution("guarded-section-repair")
+    execution.variables["role_key"] = "architect"
+    execution.current_plan = {
+        "steps": [{
+            "id": 0, "role": "architect",
+            "required_artifacts": ["decisions.md"], "owned_paths": ["decisions.md"],
+        }],
+        "artifact_validations": [{
+            "path": "decisions.md", "validator": "document", "constraints": {},
+        }],
+    }
+    execution.variables["step_runtime"] = {"0": {
+        "required_next_tool": "filesystem__replace_section",
+        "required_repair_issues": [
+            "decisions.md: '### DEC-001: Storage' missing alternatives, risks"
+        ],
+    }}
+    project = tmp_path / "projects" / "proj-default"
+    project.mkdir(parents=True)
+    target = project / "decisions.md"
+    target.write_text(
+        "### DEC-001: Storage\n\nOld.\n\n### DEC-002: Runtime\n\nStable.\n",
+        encoding="utf-8",
+    )
+
+    blocked = await engine._call_tool(
+        "guarded-section-repair", "filesystem", "replace_section",
+        {"path": "decisions.md", "heading_selector": "### DEC-002: Runtime", "content": "Wrong."},
+    )
+    allowed = await engine._call_tool(
+        "guarded-section-repair", "filesystem", "replace_section",
+        {
+            "path": "decisions.md", "heading_selector": "### DEC-001: Storage",
+            "content": "- **Alternatives:** A\n- **Risks:** B",
+        },
+    )
+
+    assert "Section repair blocked" in blocked
+    assert "Markdown section replaced successfully" in allowed
+    assert "### DEC-002: Runtime\n\nStable." in target.read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_targeted_repair_must_use_a_machine_reported_prefix(tmp_path):
+    engine, state = _engine(tmp_path)
+    execution = state.get_execution("guarded-targeted-repair")
+    execution.variables["role_key"] = "architect"
+    execution.current_plan = {
+        "steps": [{
+            "id": 0,
+            "role": "architect",
+            "required_artifacts": ["inventory.md"],
+            "owned_paths": ["inventory.md"],
+        }],
+        "artifact_validations": [{
+            "path": "inventory.md", "validator": "document", "constraints": {},
+        }],
+    }
+    execution.variables["step_runtime"] = {"0": {
+        "required_next_tool": "filesystem__replace_paragraph",
+        "required_repair_issues": [
+            "inventory.md: invalid local reference; paragraph prefix: "
+            "The machine-reported evidence line has invalid blocks 0-3."
+        ],
+    }}
+    project = tmp_path / "projects" / "proj-default"
+    project.mkdir(parents=True)
+    target = project / "inventory.md"
+    target.write_text(
+        "The unrelated introduction must remain unchanged.\n\n"
+        "The machine-reported evidence line has invalid blocks 0-3.\n",
+        encoding="utf-8",
+    )
+
+    blocked = await engine._call_tool(
+        "guarded-targeted-repair", "filesystem", "replace_paragraph",
+        {
+            "path": "inventory.md",
+            "paragraph_prefix": "The unrelated introduction must remain unchanged.",
+            "content": "An unrequested rewrite.",
+        },
+    )
+    allowed = await engine._call_tool(
+        "guarded-targeted-repair", "filesystem", "replace_paragraph",
+        {
+            "path": "inventory.md",
+            "paragraph_prefix": (
+                "The machine-reported evidence line has invalid blocks 0-3."
+            ),
+            "content": "The machine-reported evidence line has valid blocks 1-4.",
+        },
+    )
+
+    content = target.read_text(encoding="utf-8")
+    assert "Targeted repair blocked" in blocked
+    assert "replaced successfully" in allowed
+    assert "unrelated introduction must remain unchanged" in content
+    assert "valid blocks 1-4" in content
+
+
+@pytest.mark.asyncio
+async def test_targeted_repair_accepts_gate_normalized_prefix_with_terminal_punctuation(tmp_path):
+    engine, state = _engine(tmp_path)
+    execution = state.get_execution("normalized-prefix-repair")
+    execution.variables["role_key"] = "architect"
+    execution.current_plan = {
+        "steps": [{
+            "id": 0, "role": "architect", "required_artifacts": ["inventory.md"],
+            "owned_paths": ["inventory.md"],
+        }],
+        "artifact_validations": [{
+            "path": "inventory.md", "validator": "document", "constraints": {},
+        }],
+    }
+    execution.variables["step_runtime"] = {"0": {
+        "required_next_tool": "filesystem__replace_paragraph",
+        "required_repair_issues": [
+            "inventory.md: repeated paragraph prefix(es): cette matrice trace "
+            "chaque exigence vers les preuves locales correspondantes"
+        ],
+    }}
+    project = tmp_path / "projects" / "proj-default"
+    project.mkdir(parents=True)
+    target = project / "inventory.md"
+    paragraph = "Cette matrice trace chaque exigence vers les preuves locales correspondantes."
+    target.write_text(f"{paragraph}\n\n{paragraph}\n", encoding="utf-8")
+
+    result = await engine._call_tool(
+        "normalized-prefix-repair", "filesystem", "replace_paragraph",
+        {
+            "path": "inventory.md", "paragraph_prefix": paragraph,
+            "content": "", "occurrence": 2,
+        },
+    )
+
+    assert "occurrence 2 replaced successfully" in result
+
+
+@pytest.mark.asyncio
+async def test_source_coverage_append_rejects_repeated_document_structure(tmp_path):
+    engine, state = _engine(tmp_path)
+    execution = state.get_execution("guarded-source-append")
+    execution.variables["role_key"] = "architect"
+    execution.current_plan = {
+        "steps": [{
+            "id": 0, "role": "architect", "required_artifacts": ["inventory.md"],
+            "owned_paths": ["inventory.md"],
+        }],
+        "artifact_validations": [{
+            "path": "inventory.md", "validator": "document", "constraints": {},
+        }],
+    }
+    execution.variables["step_runtime"] = {"0": {
+        "required_next_tool": "filesystem__append",
+        "required_repair_issues": [
+            "inventory.md: uncited required source file(s): architecture.md"
+        ],
+    }}
+    project = tmp_path / "projects" / "proj-default"
+    project.mkdir(parents=True)
+    target = project / "inventory.md"
+    target.write_text("# Inventory\n\nExisting evidence.\n", encoding="utf-8")
+
+    blocked = await engine._call_tool(
+        "guarded-source-append", "filesystem", "append",
+        {"path": "inventory.md", "content": "## Repeated section\n\n| A | B |"},
+    )
+    allowed = await engine._call_tool(
+        "guarded-source-append", "filesystem", "append",
+        {
+            "path": "inventory.md",
+            "content": (
+                "La source complète l'analyse locale. "
+                "[architecture.md > Architecture > blocks 1-2]"
+            ),
+        },
+    )
+
+    assert "Source-coverage append must be one concise prose paragraph" in blocked
+    assert "Content appended successfully" in allowed
+    assert "Repeated section" not in target.read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_duplicate_heading_repair_cannot_insert_a_truncated_replacement(tmp_path):
+    engine, state = _engine(tmp_path)
+    execution = state.get_execution("guarded-duplicate-heading")
+    execution.variables["role_key"] = "architect"
+    execution.current_plan = {
+        "steps": [{
+            "id": 0, "role": "architect",
+            "required_artifacts": ["architecture.md"], "owned_paths": ["architecture.md"],
+        }],
+        "artifact_validations": [{
+            "path": "architecture.md", "validator": "document", "constraints": {},
+        }],
+    }
+    execution.variables["step_runtime"] = {"0": {
+        "required_next_tool": "filesystem__replace_paragraph",
+        "required_repair_issues": [
+            "architecture.md: duplicate heading occurrence(s); repeated Markdown "
+            "heading selector(s): ### Diagram 2"
+        ],
+    }}
+    project = tmp_path / "projects" / "proj-default"
+    project.mkdir(parents=True)
+    target = project / "architecture.md"
+    target.write_text(
+        "### Diagram 2\n\nFirst body.\n\n### Diagram 2\n\nSecond body.\n",
+        encoding="utf-8",
+    )
+
+    blocked = await engine._call_tool(
+        "guarded-duplicate-heading", "filesystem", "replace_paragraph",
+        {
+            "path": "architecture.md", "paragraph_prefix": "### Diagram 2",
+            "content": "## 4. Truncated", "occurrence": 2,
+        },
+    )
+    allowed = await engine._call_tool(
+        "guarded-duplicate-heading", "filesystem", "replace_paragraph",
+        {
+            "path": "architecture.md", "paragraph_prefix": "### Diagram 2",
+            "content": "", "occurrence": 2,
+        },
+    )
+
+    content = target.read_text(encoding="utf-8")
+    assert "Duplicate-heading repair must" in blocked
+    assert "Markdown line occurrence 2 replaced successfully" in allowed
+    assert "Truncated" not in content
+    assert content.count("### Diagram 2") == 1
+    assert "First body." in content and "Second body." in content
 
 
 @pytest.mark.asyncio
@@ -792,6 +1583,137 @@ def test_writer_duplicate_gate_requires_one_targeted_paragraph_repair(tmp_path):
     assert "never rewrite or delete the whole document" in nudge
 
 
+def test_writer_duplicate_heading_gate_requires_exact_second_heading(tmp_path):
+    engine, state = _engine(tmp_path)
+    state.get_execution("writer-heading-repair")
+    project = tmp_path / "projects" / "proj-default"
+    project.mkdir(parents=True)
+    (project / "dossier.md").write_text("# Repeated\n", encoding="utf-8")
+    step = {"role": "writer", "required_artifacts": ["dossier.md"]}
+    issues = [
+        "dossier.md: document contains 2 duplicate heading occurrence(s); "
+        "repeated Markdown heading selector(s): ## Conclusion"
+    ]
+
+    nudge = engine._writer_incremental_repair_nudge(
+        "writer-heading-repair", "writer", step, issues,
+    )
+
+    assert "including its # markers" in nudge
+    assert "occurrence=2" in nudge
+    assert "preserves all section body content" in nudge
+
+
+def test_writer_record_gate_requires_one_reported_section_repair(tmp_path):
+    engine, state = _engine(tmp_path)
+    state.get_execution("writer-record-repair")
+    project = tmp_path / "projects" / "proj-default"
+    project.mkdir(parents=True)
+    (project / "decisions.md").write_text("### DEC-001: Storage\n", encoding="utf-8")
+    step = {"role": "architect", "required_artifacts": ["decisions.md"]}
+    issues = [
+        "decisions.md: 1 record section(s) violate the declared semantic schema: "
+        "'### DEC-001: Storage' missing alternatives, risks"
+    ]
+
+    required = engine._writer_incremental_repair_tool(
+        "writer-record-repair", "architect", step, issues,
+    )
+    nudge = engine._writer_incremental_repair_nudge(
+        "writer-record-repair", "architect", step, issues,
+    )
+
+    assert required == "filesystem__replace_section"
+    assert "including its # markers" in nudge
+    assert "one record per iteration" in nudge
+    assert "every other record and section must remain untouched" in nudge
+
+
+def test_writer_empty_required_section_gate_requires_in_place_section_fill(tmp_path):
+    engine, state = _engine(tmp_path)
+    state.get_execution("writer-empty-section")
+    project = tmp_path / "projects" / "proj-default"
+    project.mkdir(parents=True)
+    (project / "dossier.md").write_text(
+        "# Dossier\n\n## Registre des risques\n\n## Conclusion\n\nStable.\n",
+        encoding="utf-8",
+    )
+    step = {"role": "writer", "required_artifacts": ["dossier.md"]}
+    issues = [
+        "dossier.md: empty required section(s): Registre des risques; "
+        "exact Markdown heading selector(s): ## Registre des risques",
+    ]
+
+    required = engine._writer_incremental_repair_tool(
+        "writer-empty-section", "writer", step, issues,
+    )
+    nudge = engine._writer_incremental_repair_nudge(
+        "writer-empty-section", "writer", step, issues,
+    )
+
+    assert required == "filesystem__replace_section"
+    assert "empty or underdeveloped body" in nudge
+    assert "do not modify any other section" in nudge
+
+
+@pytest.mark.asyncio
+async def test_word_count_append_cannot_recreate_existing_section_headings(tmp_path):
+    engine, state = _engine(tmp_path)
+    execution = state.get_execution("writer-word-count-append")
+    execution.variables["role_key"] = "writer"
+    execution.current_plan = {
+        "steps": [{
+            "id": 0, "role": "writer", "required_artifacts": ["dossier.md"],
+            "owned_paths": ["dossier.md"],
+        }],
+        "artifact_validations": [{
+            "path": "dossier.md", "validator": "document", "constraints": {},
+        }],
+    }
+    execution.current_step = 0
+    execution.variables["step_runtime"] = {"0": {
+        "required_next_tool": "filesystem__append",
+        "required_repair_issues": ["dossier.md: words=3000 is below required minimum 8750"],
+    }}
+    project = tmp_path / "projects" / "proj-default"
+    project.mkdir(parents=True)
+    target = project / "dossier.md"
+    target.write_text("# Dossier\n\nContenu stable.\n", encoding="utf-8")
+
+    blocked = await engine._call_tool(
+        "writer-word-count-append", "filesystem", "append",
+        {"path": "dossier.md", "content": "\n## Registre des risques\n\nAjout."},
+    )
+
+    assert "without adding Markdown headings" in blocked
+    assert target.read_text(encoding="utf-8") == "# Dossier\n\nContenu stable.\n"
+
+
+def test_writer_invalid_diagram_gate_requires_its_reported_section(tmp_path):
+    engine, state = _engine(tmp_path)
+    state.get_execution("writer-diagram-repair")
+    project = tmp_path / "projects" / "proj-default"
+    project.mkdir(parents=True)
+    (project / "architecture.md").write_text("### Runtime flow\n", encoding="utf-8")
+    step = {"role": "architect", "required_artifacts": ["architecture.md"]}
+    issues = [
+        "architecture.md: document contains 1 invalid diagram(s): line 20 under "
+        "section selector '### Runtime flow': self-loop is not allowed: A"
+    ]
+
+    required = engine._writer_incremental_repair_tool(
+        "writer-diagram-repair", "architect", step, issues,
+    )
+    nudge = engine._writer_incremental_repair_nudge(
+        "writer-diagram-repair", "architect", step, issues,
+    )
+
+    assert required == "filesystem__replace_section"
+    assert "one complete, syntactically valid Mermaid diagram" in nudge
+    assert "including self-loops" in nudge
+    assert "preserving all other sections" in nudge
+
+
 def test_writer_unsupported_claim_gate_requires_cited_paragraph_repair(tmp_path):
     engine, state = _engine(tmp_path)
     state.get_execution("writer-citation-repair")
@@ -811,6 +1733,140 @@ def test_writer_unsupported_claim_gate_requires_cited_paragraph_repair(tmp_path)
     assert required == "filesystem__replace_paragraph"
     assert "corrected, evidence-grounded paragraph" in nudge
     assert "valid nearby bounded local citation" in nudge
+
+
+def test_missing_source_gate_requires_one_bounded_append(tmp_path):
+    engine, state = _engine(tmp_path)
+    state.get_execution("writer-source-append")
+    project = tmp_path / "projects" / "proj-default"
+    project.mkdir(parents=True)
+    (project / "dossier.md").write_text("existing evidence", encoding="utf-8")
+    step = {"role": "architect", "required_artifacts": ["dossier.md"]}
+    issues = [
+        "dossier.md: uncited required source file(s): source-a.docx, source-b.pptx; "
+        "cited_sources=3 is below required minimum 5",
+    ]
+
+    required = engine._writer_incremental_repair_tool(
+        "writer-source-append", "architect", step, issues,
+    )
+    nudge = engine._writer_incremental_repair_nudge(
+        "writer-source-append", "architect", step, issues,
+    )
+
+    assert required == "filesystem__append"
+    assert "currently missing source exactly once" in nudge
+    assert "one-based bounded locator" in nudge
+
+
+def test_missing_source_gate_precedes_code_example_rewrite(tmp_path):
+    engine, state = _engine(tmp_path)
+    state.get_execution("writer-source-code-example")
+    project = tmp_path / "projects" / "proj-default"
+    project.mkdir(parents=True)
+    (project / "dossier.md").write_text("existing evidence", encoding="utf-8")
+    step = {"role": "architect", "required_artifacts": ["dossier.md"]}
+    issues = [
+        "dossier.md: uncited required source file(s): source-a.docx; "
+        "2 citation-like pattern(s) inside Markdown code do not count as evidence; "
+        "write actual citations without backticks or code fences",
+        "dossier.md: cited_sources=3 is below required minimum 4",
+    ]
+
+    required = engine._writer_incremental_repair_tool(
+        "writer-source-code-example", "architect", step, issues,
+    )
+
+    assert required == "filesystem__append"
+
+
+def test_heading_number_restart_requires_bounded_heading_repair(tmp_path):
+    engine, state = _engine(tmp_path)
+    state.get_execution("writer-heading-restart")
+    project = tmp_path / "projects" / "proj-default"
+    project.mkdir(parents=True)
+    (project / "dossier.md").write_text(
+        "# Dossier\n\n## 1. Base\n\nTexte.\n\n## 4. Appended\n\nSuite.\n",
+        encoding="utf-8",
+    )
+    step = {"role": "writer", "required_artifacts": ["dossier.md"]}
+    issues = [
+        "dossier.md: document contains 1 heading numbering restart(s), suggesting "
+        "an appended duplicate section series: ## 4. Appended (number 4 after 9)",
+    ]
+
+    required = engine._writer_incremental_repair_tool(
+        "writer-heading-restart", "writer", step, issues,
+    )
+    nudge = engine._writer_incremental_repair_nudge(
+        "writer-heading-restart", "writer", step, issues,
+    )
+
+    assert required == "filesystem__replace_paragraph"
+    assert "## 4. Appended" not in nudge  # The gate supplies the exact selector.
+    assert "restarted Markdown heading selector" in nudge
+    assert "occurrence=1" in nudge
+    assert "empty string" in nudge
+
+
+def test_upstream_reopen_requires_current_artifact_reads_before_completion(tmp_path):
+    engine, state = _engine(tmp_path)
+    execution = state.get_execution("refresh-dependent-artifacts")
+    execution.variables["role_key"] = "architect"
+    execution.variables["delegated_step"] = {
+        "retry_context": (
+            "A completed upstream artifact was reopened by stronger deterministic "
+            "quality gates. Reuse its corrected result."
+        ),
+        "refresh_required_artifacts": ["analysis/decisions.md", "analysis/inventory.md"],
+    }
+    execution.current_plan = {"steps": [{
+        "id": 0, "role": "architect", "specialist": "Decision analyst",
+        "required_artifacts": ["analysis/decisions.md"],
+    }]}
+    project = tmp_path / "projects" / "proj-default" / "analysis"
+    project.mkdir(parents=True)
+    (project / "decisions.md").write_text("# Decisions\n", encoding="utf-8")
+    (project / "inventory.md").write_text("# Inventory\n", encoding="utf-8")
+    response = json.dumps({
+        "summary": "refreshed", "artifacts": ["analysis/decisions.md"],
+        "evidence": [], "risks": [], "next_action": "",
+    })
+
+    issues = engine._step_completion_issues(
+        "refresh-dependent-artifacts", execution.current_plan["steps"][0], response,
+    )
+    assert issues[-2:] == [
+        "reread refreshed artifact before accepting dependent conclusions: analysis/decisions.md",
+        "reread refreshed artifact before accepting dependent conclusions: analysis/inventory.md",
+    ]
+    tool, nudge = engine._quality_repair_directive(
+        "refresh-dependent-artifacts", "architect",
+        execution.current_plan["steps"][0], issues,
+    )
+    assert tool == "filesystem__read"
+    assert "analysis/decisions.md" in nudge
+
+    conversation = state.get_conversation("refresh-dependent-artifacts")
+    for index, path in enumerate(("analysis/decisions.md", "analysis/inventory.md"), 1):
+        call_id = f"read-{index}"
+        conversation.messages.extend([
+            {
+                "role": "assistant", "tool_calls": [{
+                    "id": call_id, "type": "function",
+                    "function": {
+                        "name": "filesystem__read",
+                        "arguments": {"path": path, "offset": 0, "limit": 12000},
+                    },
+                }],
+            },
+            {"role": "tool", "tool_call_id": call_id, "content": "current content"},
+        ])
+
+    refreshed_issues = engine._step_completion_issues(
+        "refresh-dependent-artifacts", execution.current_plan["steps"][0], response,
+    )
+    assert not any(item.startswith("reread refreshed artifact") for item in refreshed_issues)
 
 
 @pytest.mark.asyncio
@@ -854,6 +1910,45 @@ def test_bootstrap_runtime_serves_health_readiness_and_gui(tmp_path):
     assert page.status_code == 200
     assert 'id="task-planning-mode"' in page.text
     assert "corpus_auto_workflow" in page.text
+
+
+def test_bootstrap_runtime_honors_first_run_tls_environment(tmp_path, monkeypatch):
+    """The documented .env TLS controls must configure a new workspace."""
+    import json
+
+    from main import bootstrap_runtime
+
+    monkeypatch.setenv("SSL_VERIFY", "False")
+    monkeypatch.setenv("SSL_CERT_PATH", "internal-ca.pem")
+
+    _, engine, _, _ = bootstrap_runtime(str(tmp_path))
+
+    assert engine.llm_provider.ssl_verify is False
+    assert engine.llm_provider.ssl_cert_path == "internal-ca.pem"
+    persisted = json.loads((tmp_path / "config.json").read_text(encoding="utf-8"))
+    assert persisted["ssl_verify"] is False
+    assert persisted["ssl_cert_path"] == "internal-ca.pem"
+
+
+def test_bootstrap_runtime_keeps_persisted_tls_settings_over_environment(
+    tmp_path, monkeypatch,
+):
+    """A saved GUI choice remains authoritative after a restart."""
+    import json
+
+    from main import bootstrap_runtime
+
+    (tmp_path / "config.json").write_text(
+        json.dumps({"ssl_verify": True, "ssl_cert_path": ""}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("SSL_VERIFY", "False")
+    monkeypatch.setenv("SSL_CERT_PATH", "environment-ca.pem")
+
+    _, engine, _, _ = bootstrap_runtime(str(tmp_path))
+
+    assert engine.llm_provider.ssl_verify is True
+    assert engine.llm_provider.ssl_cert_path == ""
 
 
 def test_main_py_process_reaches_readiness(tmp_path):

@@ -63,6 +63,67 @@ def test_unconfigured_markdown_validation_remains_format_only(tmp_path):
     assert report["metrics"]["duplicate_paragraphs"] == 1
 
 
+def test_document_policy_counts_only_semantically_valid_diagrams(tmp_path):
+    document = tmp_path / "diagrams.md"
+    document.write_text(
+        """# Dossier
+
+```mermaid
+graph TD
+A[API] --> B[Store]
+```
+
+```mermaid
+sequenceDiagram
+participant U as User
+U->>A: request
+A-->>U: response
+```
+
+## Isolated diagram
+
+```mermaid
+graph TD
+ONLY[Isolated]
+```
+""",
+        encoding="utf-8",
+    )
+
+    report = validate_artifact(
+        document,
+        validator="document",
+        constraints={
+            "reject_invalid_diagrams": True,
+            "minimums": {"valid_diagrams": 3},
+        },
+    )
+
+    assert not report["valid"]
+    assert report["metrics"]["diagrams"] == 3
+    assert report["metrics"]["valid_diagrams"] == 2
+    assert report["metrics"]["invalid_diagrams"] == 1
+    assert "section selector '## Isolated diagram'" in "\n".join(report["failures"])
+
+
+def test_json_validator_requires_declared_semantic_keys(tmp_path):
+    report_path = tmp_path / "quality-report.json"
+    report_path.write_text('{"valid": true}', encoding="utf-8")
+
+    report = validate_artifact(
+        report_path,
+        validator="json",
+        constraints={
+            "top_level_type": "dict",
+            "required_keys": ["valid", "metrics", "failures"],
+        },
+    )
+
+    assert not report["valid"]
+    assert report["metrics"]["required_keys_covered"] == 1
+    assert "metrics, failures" in report["failures"][0]
+
+
 def test_duplicate_failure_exposes_machine_actionable_paragraph_prefix(tmp_path):
     document = tmp_path / "duplicate.md"
     paragraph = (
@@ -86,6 +147,186 @@ def test_duplicate_failure_exposes_machine_actionable_paragraph_prefix(tmp_path)
     assert "this repeated architectural decision paragraph" in failure
 
 
+def test_document_policy_rejects_duplicate_headings_and_incomplete_record_sections(
+    tmp_path,
+):
+    document = tmp_path / "decisions.md"
+    document.write_text(
+        """# Decision register
+
+## Repeated
+
+First section.
+
+## Repeated
+
+Second section.
+
+### DEC-001: Storage
+
+- **Context:** Local durability is required.
+- **Decision:** Use an atomic local store.
+""",
+        encoding="utf-8",
+    )
+
+    report = validate_artifact(
+        document,
+        validator="document",
+        constraints={
+            "max_duplicate_headings": 0,
+            "record_section_policy": {
+                "heading_pattern": r"\bDEC-\d{3}\b",
+                "minimum_records": 1,
+                "required_fields": {
+                    "context": ["context"],
+                    "decision": ["decision"],
+                    "alternatives": ["alternative"],
+                    "risks": ["risk"],
+                },
+            },
+        },
+    )
+
+    assert not report["valid"]
+    assert report["metrics"]["duplicate_headings"] == 1
+    assert report["metrics"]["record_sections"] == 1
+    assert report["metrics"]["invalid_record_sections"] == 1
+    failures = "\n".join(report["failures"])
+    assert "duplicate heading occurrence" in failures
+    assert "repeated Markdown heading selector(s): ## Repeated" in failures
+    assert "record section(s) violate the declared semantic schema" in failures
+    assert "'### DEC-001: Storage' missing alternatives, risks" in failures
+    assert "alternatives, risks" in failures
+
+
+def test_document_policy_rejects_a_second_numbered_section_series(tmp_path):
+    document = tmp_path / "architecture.md"
+    document.write_text(
+        "# Architecture\n\n## 1. Context\n\nA.\n\n## 2. Data\n\nB.\n\n"
+        "## 3. Runtime\n\nC.\n\n## 2. Interfaces bis\n\nAppended duplicate series.\n",
+        encoding="utf-8",
+    )
+
+    report = validate_artifact(
+        document, validator="document",
+        constraints={"reject_heading_number_restarts": True},
+    )
+
+    assert not report["valid"]
+    assert report["metrics"]["heading_number_restarts"] == 1
+    assert "## 2. Interfaces bis (number 2 after 3)" in "\n".join(report["failures"])
+
+
+def test_document_policy_rejects_duplicate_list_items(tmp_path):
+    document = tmp_path / "architecture.md"
+    repeated = (
+        "- **Access control**: `server_supervisor.py` requires an ephemeral token for every "
+        "state-changing request. [architecture.md > Security > blocks 1-2]"
+    )
+    document.write_text(
+        f"# Architecture\n\n{repeated}\n\n## Review\n\n{repeated}\n",
+        encoding="utf-8",
+    )
+
+    report = validate_artifact(
+        document,
+        validator="document",
+        constraints={"max_duplicate_list_items": 0, "duplicate_min_words": 8},
+    )
+
+    assert not report["valid"]
+    assert report["metrics"]["duplicate_list_items"] == 1
+    assert "- **Access control**" in "\n".join(report["failures"])
+    assert "server_supervisor.py" in "\n".join(report["failures"])
+
+
+def test_document_policy_allows_nested_numbering_to_restart(tmp_path):
+    document = tmp_path / "architecture.md"
+    document.write_text(
+        "# Architecture\n\n## 1. Context\n\n### 1. Scope\n\n### 2. Actors\n\n"
+        "## 2. Data\n\n### 1. Sources\n\n### 2. Flows\n",
+        encoding="utf-8",
+    )
+
+    report = validate_artifact(
+        document, validator="document",
+        constraints={"reject_heading_number_restarts": True},
+    )
+
+    assert report["valid"]
+    assert report["metrics"]["heading_number_restarts"] == 0
+
+
+def test_document_policy_does_not_treat_timeline_milestones_as_sections(tmp_path):
+    document = tmp_path / "roadmap.md"
+    document.write_text(
+        "# Roadmap\n\n## 1. Architecture\n\nBase.\n\n"
+        "## 30 jours : Consolidation\n\nPhase A.\n\n"
+        "## 60 jours : Industrialisation\n\nPhase B.\n\n"
+        "## 90 jours : Exploitation\n\nPhase C.\n\n"
+        "## 4. Risques\n\nSuite normale.\n",
+        encoding="utf-8",
+    )
+
+    report = validate_artifact(
+        document, validator="document",
+        constraints={"reject_heading_number_restarts": True},
+    )
+
+    assert report["valid"]
+    assert report["metrics"]["heading_number_restarts"] == 0
+
+
+def test_professional_document_rejects_incorrect_integer_sum_with_repair_prefix(tmp_path):
+    document = tmp_path / "inventory.md"
+    document.write_text(
+        "# Coverage\n\n- **Blocks read**: 4 + 10 + 97 + 16 = **117 blocks**.\n",
+        encoding="utf-8",
+    )
+
+    report = validate_artifact(
+        document,
+        validator="document",
+        constraints={"validate_arithmetic": True},
+    )
+
+    assert not report["valid"]
+    assert report["metrics"]["arithmetic_mismatches"] == 1
+    failure = next(item for item in report["failures"] if "arithmetic sum" in item)
+    assert "equals 127, not 117" in failure
+    assert "paragraph prefix: - **Blocks read**" in failure
+
+
+def test_professional_document_checks_normalized_total_against_source_inventory(tmp_path):
+    document = tmp_path / "inventory.md"
+    document.write_text(
+        "# Coverage\n\n**Total**: 2 documents; 9 normalized blocks.\n\n"
+        "- **Blocks read**: 4 + 6 = **10 blocks** of 9 expected.\n\n"
+        "- The PPTX contains 2 slides and 6 normalized blocks; the total corpus "
+        "comprises 10 normalized blocks.\n",
+        encoding="utf-8",
+    )
+
+    report = validate_artifact(
+        document,
+        validator="document",
+        constraints={
+            "validate_arithmetic": True,
+            "source_inventory": {
+                "requirements.txt": {"blocks": 4},
+                "roadmap.pptx": {"slides": 2, "normalized_blocks": 6},
+            },
+        },
+    )
+
+    assert not report["valid"]
+    assert report["metrics"]["inventory_total_mismatches"] == 2
+    failures = "\n".join(report["failures"])
+    assert "expected 10 normalized blocks, not 9" in failures
+    assert "paragraph prefix: **Total**" in failures
+
+
 def test_document_validator_accepts_complete_local_traceable_content(tmp_path):
     document = tmp_path / "architecture.md"
     document.write_text(VALID_DOCUMENT, encoding="utf-8")
@@ -97,6 +338,33 @@ def test_document_validator_accepts_complete_local_traceable_content(tmp_path):
     assert report["metrics"]["traceability_ids_covered"] == 2
     assert report["metrics"]["required_sources_cited"] == 2
     assert "Document quality report — PASS" in format_quality_report(report)
+
+
+def test_document_validator_accepts_tool_provenance_colon_locators(tmp_path):
+    document = tmp_path / "tool-provenance.md"
+    document.write_text(
+        "# Evidence\n\n"
+        "The normalized source is bounded. [requirements.docx > block:2]\n\n"
+        "The presentation evidence is bounded. [vision.pptx > slide:3]\n",
+        encoding="utf-8",
+    )
+
+    report = validate_artifact(
+        document,
+        validator="document",
+        constraints={
+            "required_source_files": ["requirements.docx", "vision.pptx"],
+            "source_inventory": {
+                "requirements.docx": {"blocks": 12},
+                "vision.pptx": {"slides": 4},
+            },
+            "require_local_references": True,
+            "require_bounded_references": True,
+        },
+    )
+
+    assert report["valid"], json.dumps(report, indent=2)
+    assert report["metrics"]["invalid_local_references"] == 0
 
 
 def test_document_validator_reports_content_and_provenance_defects(tmp_path):
@@ -119,6 +387,7 @@ def test_document_validator_reports_content_and_provenance_defects(tmp_path):
     failures = "\n".join(report["failures"])
     assert "missing required heading" in failures
     assert "empty required section" in failures
+    assert "exact Markdown heading selector(s): ## Executive Summary" in failures
     assert "missing requirement ID" in failures
     assert "traceability" in failures
     assert "placeholder" in failures
@@ -128,6 +397,34 @@ def test_document_validator_reports_content_and_provenance_defects(tmp_path):
     assert "uncited required source" in failures
     assert "lack a local reference" in failures
     assert "inconsistent terminology" in failures
+
+
+def test_identifier_wildcards_are_not_treated_as_xxx_placeholders(tmp_path):
+    document = tmp_path / "identifier-patterns.md"
+    document.write_text(
+        "# Identifier conventions\n\nREQ-xxx and DEC-xxx describe identifier families.\n",
+        encoding="utf-8",
+    )
+
+    accepted = validate_artifact(
+        document,
+        validator="document",
+        constraints={"forbid_placeholders": True},
+    )
+    document.write_text(
+        document.read_text(encoding="utf-8") + "\nXXX\n",
+        encoding="utf-8",
+    )
+    rejected = validate_artifact(
+        document,
+        validator="document",
+        constraints={"forbid_placeholders": True},
+    )
+
+    assert accepted["valid"]
+    assert accepted["metrics"]["placeholder_markers"] == 0
+    assert not rejected["valid"]
+    assert rejected["metrics"]["placeholder_markers"] == 1
 
 
 def test_document_validator_rejects_out_of_range_local_locator(tmp_path):
@@ -141,6 +438,10 @@ def test_document_validator_rejects_out_of_range_local_locator(tmp_path):
     assert not report["valid"]
     assert any(
         "invalid blocks range 2-30; expected 1-12" in failure
+        for failure in report["failures"]
+    )
+    assert any(
+        "paragraph prefix:" in failure and "requirements.docx" in failure
         for failure in report["failures"]
     )
 

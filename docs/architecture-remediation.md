@@ -1,5 +1,8 @@
 # Remédiation architecturale et garanties
 
+Document **historique accepté** : les sept constats ci-dessous sont déjà livrés
+dans `main`. La carte vivante est [architecture.md](architecture.md).
+
 Ce document relie les sept constats de la cartographie aux composants, tests et critères
 de validation maintenant versionnés. Les méthodes publiques historiques restent des
 façades afin de préserver l'API Python, les fichiers persistés et le paquet offline.

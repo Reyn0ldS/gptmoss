@@ -1,5 +1,9 @@
 # Étude d'Architecture : Coordination d'Agents en Parallèle & Framework de Skills
 
+> **Historique.** Étude comparative Hermes / OpenClaw. Le DAG, les skills, la
+> persistance v3 et les six capacités sont déjà dans `main`. La carte vivante est
+> [docs/architecture.md](docs/architecture.md).
+
 Cette étude compare le modèle de coordination multi-agents actuel de **GPTMOSS** avec les paradigmes établis de **Hermes** et **OpenClaw**. Elle identifie les défis liés à la concurrence et propose une feuille de route technique pour intégrer des concepts avancés (skills packagés, verrous d'espace de travail, et exécution de graphes acycliques dirigés).
 
 ---

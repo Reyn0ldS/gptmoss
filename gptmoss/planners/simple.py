@@ -181,7 +181,7 @@ class SimplePlanner(PlannerProvider):
             _step(
                 3, "architect", "Application, Integration & Data Architect",
                 "Design consistent context, logical component, interface, data ownership, lifecycle, ingestion, indexing, retrieval, and generation views grounded in local evidence.",
-                [1, 2], ["application architecture", "integration", "data architecture"],
+                [0, 1], ["application architecture", "integration", "data architecture"],
                 ["analysis/application-data-architecture.md"],
                 ["Components, flows, contracts, failure behavior, provenance, and data lifecycle are implementable and mutually consistent."],
             ),
@@ -195,7 +195,7 @@ class SimplePlanner(PlannerProvider):
             _step(
                 5, "architect", "Platform, Capacity & SRE Architect",
                 "Design deployment, capacity, scaling, observability, backup, recovery, failover, support, and continuity; reconcile conflicting service targets with measurable tiers.",
-                [1, 2, 3, 4], ["platform engineering", "capacity", "SRE", "continuity"],
+                [0, 1, 2, 3], ["platform engineering", "capacity", "SRE", "continuity"],
                 ["analysis/platform-sre-architecture.md"],
                 ["Capacity and resilience decisions use sourced volumes, concurrency, RPO/RTO, tests, and operational ownership."],
             ),

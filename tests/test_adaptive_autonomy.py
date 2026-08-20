@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from gptmoss.capabilities.filesystem import FilesystemCapability
+from gptmoss.capabilities.documents import DocumentCapability
 from gptmoss.capabilities.shell import ShellCapability
 from gptmoss.core.context import ContextEngine
 from gptmoss.core.adaptive import tool_call_fingerprint
@@ -103,6 +104,7 @@ async def test_scope_reduction_requires_a_hashed_decision_before_resume(tmp_path
     execution.variables["task"] = "Build the complete application"
     execution.variables["pending_scope_approval"] = {
         "contract_sha256": "abc123",
+        "scope_changes_sha256": "scope123",
         "changes": [{"id": "SCOPE-001", "statement": "Defer the UI"}],
     }
     engine.execute_task = AsyncMock()
@@ -112,6 +114,7 @@ async def test_scope_reduction_requires_a_hashed_decision_before_resume(tmp_path
 
     assert execution.status == "running"
     assert execution.variables["approved_scope_contract_sha256"] == "abc123"
+    assert execution.variables["approved_scope_changes_sha256"] == "scope123"
     assert execution.variables["scope_decisions"][0]["reason"] == "accepted prototype"
     engine.execute_task.assert_awaited_once()
 
@@ -1116,8 +1119,72 @@ def test_exhaustive_inventory_gate_requires_every_normalized_block_read(tmp_path
     assert engine._document_coverage_issues("coverage-gate", step) == []
 
 
+def test_resumed_specialist_reuses_only_same_assignment_document_reads(tmp_path):
+    engine, state = _engine(tmp_path, MockLLMProvider())
+    store = ArtifactStore(str(tmp_path / "resume-artifacts"))
+    uploaded = store.save_base64(
+        "evidence.txt",
+        base64.b64encode(b"first\n\nsecond\n\nthird").decode("ascii"),
+        "text/plain",
+    )
+    engine.artifact_store = store
+    document = store.document(uploaded["id"])
+    step = {
+        "description": "Inventory every explicit attachment and record complete coverage.",
+        "acceptance_criteria": ["All normalized blocks were read."],
+    }
+    previous = state.get_execution("previous-specialist")
+    previous.variables.update({
+        "parent_execution_id": "parent",
+        "plan_step_id": 0,
+        "project_id": "project-a",
+        "attachment_ids": [uploaded["id"]],
+    })
+    payload = {
+        "artifact_id": uploaded["id"],
+        "total_blocks": len(document.blocks),
+        "blocks": [block.to_dict() for block in document.blocks],
+    }
+    engine._record_tool_result(
+        "previous-specialist", "documents", "read", {}, json.dumps(payload)
+    )
+
+    resumed = state.get_execution("resumed-specialist")
+    resumed.variables.update({
+        "parent_execution_id": "parent",
+        "plan_step_id": 0,
+        "project_id": "project-a",
+        "attachment_ids": [uploaded["id"]],
+    })
+    unrelated = state.get_execution("unrelated-specialist")
+    unrelated.variables.update({
+        "parent_execution_id": "parent",
+        "plan_step_id": 1,
+        "project_id": "project-a",
+        "attachment_ids": [uploaded["id"]],
+    })
+
+    assert engine._document_coverage_issues("resumed-specialist", step) == []
+    assert engine._document_coverage_issues("unrelated-specialist", step)
+    assert engine._inherits_complete_document_coverage("resumed-specialist", step)
+    assert not engine._inherits_complete_document_coverage("unrelated-specialist", step)
+
+    schemas = [
+        {"function": {"name": "documents__inventory"}},
+        {"function": {"name": "documents__read"}},
+        {"function": {"name": "documents__read_chunk"}},
+        {"function": {"name": "documents__search"}},
+        {"function": {"name": "filesystem__read"}},
+    ]
+    filtered = engine._schemas_for_inherited_document_coverage(schemas)
+    assert [item["function"]["name"] for item in filtered] == [
+        "documents__search", "filesystem__read",
+    ]
+
+
 def test_exhaustive_inventory_gate_requires_each_attached_image_presented(tmp_path):
     engine, state = _engine(tmp_path, MockLLMProvider())
+    engine.llm_provider.supports_vision = True
     store = ArtifactStore(str(tmp_path / "image-artifacts"))
     image = store.save_bytes(
         "evidence.png", b"\x89PNG\r\n\x1a\nevidence", "image/png"
@@ -1144,6 +1211,209 @@ def test_exhaustive_inventory_gate_requires_each_attached_image_presented(tmp_pa
     )[0]
     execution.variables["visualized_artifact_ids"] = [image["id"]]
     assert engine._document_coverage_issues("image-coverage-gate", step) == []
+
+
+def test_exhaustive_inventory_gate_defers_images_to_declared_vision_gap(tmp_path):
+    engine, state = _engine(tmp_path, MockLLMProvider())
+    engine.llm_provider.supports_vision = False
+    store = ArtifactStore(str(tmp_path / "no-vision-artifacts"))
+    image = store.save_bytes(
+        "evidence.png", b"\x89PNG\r\n\x1a\nevidence", "image/png"
+    )
+    engine.artifact_store = store
+    execution = state.get_execution("no-vision-coverage-gate")
+    execution.variables["attachment_ids"] = [image["id"]]
+    step = {
+        "description": "Inventory every explicit attachment and record complete coverage.",
+        "acceptance_criteria": ["All supported contents were analyzed."],
+    }
+
+    assert engine._capability_gaps(execution)[0]["capability"] == "vision"
+    assert engine._document_coverage_issues(
+        "no-vision-coverage-gate", step,
+    ) == []
+
+
+@pytest.mark.asyncio
+async def test_document_coverage_gate_forces_real_read_after_prose_promise(tmp_path):
+    class CapturingProvider(MockLLMProvider):
+        def __init__(self):
+            super().__init__()
+            self.requests = []
+
+        async def completion(self, messages, **kwargs):
+            self.requests.append({
+                "messages": [dict(message) for message in messages],
+                "tools": list(kwargs.get("tools") or []),
+                "tool_choice": kwargs.get("tool_choice"),
+            })
+            return await super().completion(messages, **kwargs)
+
+    delivery = json.dumps({
+        "summary": "complete", "artifacts": [], "evidence": ["local corpus"],
+        "risks": [], "next_action": "handoff",
+    })
+    llm = CapturingProvider()
+    llm.add_response(content=(
+        "I will now read evidence.txt from start block 0. " + delivery
+    ))
+    llm.add_response(tool_calls=[{
+        "id": "read-1", "type": "function",
+        "function": {
+            "name": "documents__read",
+            "arguments": {
+                "artifact_id": "evidence.txt", "start_block": 0,
+                "block_count": 200,
+            },
+        },
+    }])
+    llm.add_response(content=delivery)
+    engine, state = _engine(tmp_path, llm, max_iterations=8)
+    store = ArtifactStore(str(tmp_path / "forced-read-artifacts"))
+    uploaded = store.save_base64(
+        "evidence.txt", base64.b64encode(b"local evidence").decode("ascii"),
+        "text/plain",
+    )
+    engine.artifact_store = store
+    engine.register_capability("documents", DocumentCapability(store))
+    execution = state.get_execution("forced-document-read")
+    execution.variables.update({
+        "parent_execution_id": "parent", "role_key": "architect",
+        "role_name": "Local Corpus Evidence Analyst",
+        "specialist": "Local Corpus Evidence Analyst",
+        "attachment_ids": [uploaded["id"]],
+    })
+    execution.current_plan = {"steps": [{
+        "id": 0, "role": "architect",
+        "specialist": "Local Corpus Evidence Analyst",
+        "description": "Inventory every explicit attachment and record complete coverage.",
+        "operation": "inventory", "dependencies": [], "expertise": [],
+        "required_artifacts": [],
+        "acceptance_criteria": ["All normalized blocks were read."],
+        "verification_commands": [],
+    }]}
+
+    await engine.execute_task(
+        "forced-document-read", "Inventory every explicit attachment",
+    )
+
+    assert execution.status == "completed", execution.results
+    assert llm.requests[1]["tool_choice"] == "required"
+    assert [
+        item["function"]["name"] for item in llm.requests[1]["tools"]
+    ] == ["documents__read"]
+    history = execution.variables["tool_call_history"]
+    assert [(item["capability"], item["action"]) for item in history] == [
+        ("documents", "read")
+    ]
+
+
+def test_arithmetic_quality_failure_forces_targeted_repair_for_any_specialist(tmp_path):
+    engine, state = _engine(tmp_path, MockLLMProvider())
+    state.get_execution("arithmetic-repair")
+    project = tmp_path / "projects" / "proj-default" / "analysis"
+    project.mkdir(parents=True)
+    (project / "inventory.md").write_text(
+        "# Coverage\n\n- **Blocks read**: 4 + 10 + 97 = **101 blocks**.\n",
+        encoding="utf-8",
+    )
+    step = {"required_artifacts": ["analysis/inventory.md"]}
+    issues = [
+        "analysis/inventory.md: arithmetic sum mismatch(es): 4 + 10 + 97 "
+        "equals 111, not 101; paragraph prefix: - **Blocks read**: 4 + 10 + 97"
+    ]
+
+    assert engine._writer_incremental_repair_tool(
+        "arithmetic-repair", "architect", step, issues,
+    ) == "filesystem__replace_paragraph"
+    assert "calculated value reported by the gate" in engine._writer_incremental_repair_nudge(
+        "arithmetic-repair", "architect", step, issues,
+    )
+
+
+def test_missing_document_coverage_precedes_artifact_mutation(tmp_path):
+    engine, state = _engine(tmp_path, MockLLMProvider())
+    state.get_execution("repair-order")
+    step = {"required_artifacts": ["analysis/inventory.md"]}
+    issues = [
+        "read every normalized block of requirements.txt; missing 1-based block(s): 3",
+        "analysis/inventory.md: invalid local reference(s): undeclared local source 'legacy.txt'",
+    ]
+
+    tool, nudge = engine._quality_repair_directive(
+        "repair-order", "architect", step, issues,
+    )
+
+    assert tool == "documents__read"
+    assert "start_block=2" in nudge
+    assert "filesystem" not in nudge
+
+
+@pytest.mark.asyncio
+async def test_missing_specialist_artifact_forces_bounded_write_after_malformed_json(tmp_path):
+    class CapturingProvider(MockLLMProvider):
+        def __init__(self):
+            super().__init__()
+            self.requests = []
+
+        async def completion(self, messages, **kwargs):
+            self.requests.append({
+                "messages": [dict(message) for message in messages],
+                "tools": list(kwargs.get("tools") or []),
+                "tool_choice": kwargs.get("tool_choice"),
+            })
+            return await super().completion(messages, **kwargs)
+
+    delivery = json.dumps({
+        "summary": "created", "artifacts": ["analysis/inventory.md"],
+        "evidence": ["local sources"], "risks": [], "next_action": "handoff",
+    })
+    llm = CapturingProvider()
+    llm.add_response(content=(
+        '```json\n{"tool_call":{"name":"filesystem__write","arguments":'
+        '{"path":"analysis/inventory.md","content":"oversized and truncated\n```'
+    ))
+    llm.add_response(tool_calls=[{
+        "id": "write-1", "type": "function",
+        "function": {
+            "name": "filesystem__write",
+            "arguments": {
+                "path": "analysis/inventory.md",
+                "content": "# Inventory\n\nA bounded, durable local inventory section.",
+            },
+        },
+    }])
+    llm.add_response(content=delivery)
+    engine, state = _engine(tmp_path, llm, max_iterations=8)
+    execution = state.get_execution("forced-specialist-write")
+    execution.variables.update({
+        "parent_execution_id": "parent", "role_key": "architect",
+        "role_name": "Evidence Analyst", "specialist": "Evidence Analyst",
+    })
+    execution.current_plan = {"steps": [{
+        "id": 0, "role": "architect", "specialist": "Evidence Analyst",
+        "description": "Create the required local evidence inventory.",
+        "dependencies": [], "expertise": [],
+        "required_artifacts": ["analysis/inventory.md"],
+        "acceptance_criteria": ["Inventory exists"],
+        "verification_commands": [],
+    }]}
+
+    await engine.execute_task(
+        "forced-specialist-write", "Create the local evidence inventory",
+    )
+
+    assert execution.status == "completed", execution.results
+    assert llm.requests[1]["tool_choice"] == "required"
+    assert [
+        item["function"]["name"] for item in llm.requests[1]["tools"]
+    ] == ["filesystem__write"]
+    repair_prompt = next(
+        item["content"] for item in llm.requests[1]["messages"]
+        if item.get("role") == "system"
+        and "exactly one valid filesystem__write" in str(item.get("content"))
+    )
+    assert "Later turns can append" in repair_prompt
 
 
 def test_rescue_strips_prefixed_fence_and_rejects_mock_random_tests():
@@ -1392,11 +1662,14 @@ async def test_specialist_prompt_delegates_artifact_validation_to_runtime(tmp_pa
     assert execution.status == "completed"
 
 
+@pytest.mark.parametrize("tool_name", ["shell__execute", "documents__read"])
 @pytest.mark.asyncio
-async def test_repeated_malformed_text_tool_calls_trip_safe_retry_circuit(tmp_path):
+async def test_repeated_malformed_text_tool_calls_trip_safe_retry_circuit(
+    tmp_path, tool_name,
+):
     llm = MockLLMProvider()
     malformed = (
-        '```json\n{"tool_call":{"name":"shell__execute","arguments":'
+        f'```json\n{{"tool_call":{{"name":"{tool_name}","arguments":'
         '{"command": python -m pytest -q\n```'
     )
     for _ in range(5):
@@ -1509,3 +1782,190 @@ async def test_malformed_writer_call_preserves_targeted_repair_constraint(tmp_pa
     )
     assert "Never overwrite an existing long document" in system_text
     assert "exactly one valid filesystem__replace_paragraph" in system_text
+
+
+@pytest.mark.asyncio
+async def test_successful_required_mutation_immediately_routes_next_machine_defect(tmp_path):
+    class CapturingProvider(MockLLMProvider):
+        def __init__(self):
+            super().__init__()
+            self.requests = []
+
+        async def completion(self, messages, **kwargs):
+            self.requests.append({
+                "messages": [dict(message) for message in messages],
+                "tools": kwargs.get("tools"),
+                "tool_choice": kwargs.get("tool_choice"),
+            })
+            return await super().completion(messages, **kwargs)
+
+    repeated = (
+        "This duplicated architecture paragraph is deliberately long enough for "
+        "the deterministic quality gate and safe occurrence repair."
+    )
+    delivery = json.dumps({
+        "summary": "repaired", "artifacts": ["report.md"],
+        "evidence": ["deterministic gate"], "risks": [], "next_action": "",
+    })
+    llm = CapturingProvider()
+    llm.add_response(content=delivery)
+    llm.add_response(tool_calls=[{
+        "id": "dedupe", "type": "function",
+        "function": {
+            "name": "filesystem__replace_paragraph",
+            "arguments": {
+                "path": "report.md", "paragraph_prefix": repeated,
+                "content": "", "occurrence": 2,
+            },
+        },
+    }])
+    llm.add_response(tool_calls=[{
+        "id": "cite", "type": "function",
+        "function": {
+                "name": "filesystem__append",
+                "arguments": {
+                    "path": "report.md",
+                    "content": "\n\nEvidence coverage. [source.md > blocks 1-1]\n",
+                },
+        },
+    }])
+    llm.add_response(content=delivery)
+    engine, state = _engine(tmp_path, llm, max_iterations=10)
+    execution = state.get_execution("chained-document-repair")
+    execution.variables.update({
+        "role_key": "writer", "role_name": "Writer", "specialist": "Writer",
+    })
+    execution.current_plan = {
+        "steps": [{
+            "id": 0, "role": "writer", "specialist": "Writer",
+            "description": "Repair a professional report", "dependencies": [],
+            "expertise": [], "required_artifacts": ["report.md"],
+            "acceptance_criteria": ["No duplicates and all sources cited"],
+            "verification_commands": [], "owned_paths": ["report.md"],
+        }],
+        "artifact_validations": [{
+            "path": "report.md", "validator": "document", "required": True,
+            "constraints": {
+                "max_duplicate_paragraphs": 0, "duplicate_min_words": 8,
+                "required_source_files": ["source.md"],
+            },
+        }],
+    }
+    project = tmp_path / "projects" / "proj-default"
+    project.mkdir(parents=True)
+    target = project / "report.md"
+    target.write_text(
+        f"# Review\n\n{repeated}\n\n{repeated}\n", encoding="utf-8",
+    )
+
+    await engine.execute_task("chained-document-repair", "Repair the report")
+
+    assert execution.status == "completed"
+    assert target.read_text(encoding="utf-8").count(repeated) == 1
+    second_repair_request = llm.requests[2]
+    assert [
+        tool["function"]["name"] for tool in second_repair_request["tools"]
+    ] == ["filesystem__append"]
+    assert second_repair_request["tool_choice"] == "required"
+    system_text = "\n".join(
+        str(message.get("content") or "")
+        for message in second_repair_request["messages"]
+        if message.get("role") == "system"
+    )
+    assert "gates were re-run immediately" in system_text
+    assert "uncited required source file(s): source.md" in system_text
+
+
+@pytest.mark.asyncio
+async def test_delegated_retry_mutation_also_enters_immediate_revalidation(tmp_path):
+    class CapturingProvider(MockLLMProvider):
+        def __init__(self):
+            super().__init__()
+            self.requests = []
+
+        async def completion(self, messages, **kwargs):
+            self.requests.append({
+                "messages": [dict(message) for message in messages],
+                "tools": kwargs.get("tools"), "tool_choice": kwargs.get("tool_choice"),
+            })
+            return await super().completion(messages, **kwargs)
+
+    repeated = (
+        "This delegated retry paragraph is deliberately duplicated and long enough "
+        "for one deterministic occurrence repair."
+    )
+    delivery = json.dumps({
+        "summary": "repaired", "artifacts": ["report.md"],
+        "evidence": ["deterministic gate"], "risks": [], "next_action": "",
+    })
+    llm = CapturingProvider()
+    llm.add_response(tool_calls=[{
+        "id": "delegated-dedupe", "type": "function",
+        "function": {
+            "name": "filesystem__replace_paragraph",
+            "arguments": {
+                "path": "report.md", "paragraph_prefix": repeated,
+                "content": "", "occurrence": 2,
+            },
+        },
+    }])
+    llm.add_response(tool_calls=[{
+        "id": "delegated-cite", "type": "function",
+        "function": {
+                "name": "filesystem__append",
+                "arguments": {
+                    "path": "report.md",
+                    "content": "\n\nEvidence coverage. [source.md > blocks 1-1]\n",
+                },
+        },
+    }])
+    llm.add_response(content=delivery)
+    engine, state = _engine(tmp_path, llm, max_iterations=8)
+    execution = state.get_execution("delegated-chained-repair")
+    execution.variables.update({
+        "parent_execution_id": "parent", "role_key": "writer",
+        "role_name": "Writer", "specialist": "Writer",
+        "delegated_step": {
+            "retry_context": (
+                "report.md: document contains 1 duplicate paragraph occurrence(s); "
+                "repeated paragraph prefix(es): " + repeated.casefold()
+            ),
+        },
+    })
+    execution.current_plan = {
+        "steps": [{
+            "id": 0, "role": "writer", "specialist": "Writer",
+            "description": "Repair a delegated report", "dependencies": [],
+            "expertise": [], "required_artifacts": ["report.md"],
+            "acceptance_criteria": ["No duplicates and all sources cited"],
+            "verification_commands": [], "owned_paths": ["report.md"],
+        }],
+        "artifact_validations": [{
+            "path": "report.md", "validator": "document", "required": True,
+            "constraints": {
+                "max_duplicate_paragraphs": 0, "duplicate_min_words": 8,
+                "required_source_files": ["source.md"],
+            },
+        }],
+    }
+    project = tmp_path / "projects" / "proj-default"
+    project.mkdir(parents=True)
+    target = project / "report.md"
+    target.write_text(
+        f"# Review\n\n{repeated}\n\n{repeated}\n", encoding="utf-8",
+    )
+
+    await engine.execute_task("delegated-chained-repair", "Repair the report")
+
+    assert execution.status == "completed"
+    assert target.read_text(encoding="utf-8").count(repeated) == 1
+    assert [
+        tool["function"]["name"] for tool in llm.requests[1]["tools"]
+    ] == ["filesystem__append"]
+    assert llm.requests[1]["tool_choice"] == "required"
+    system_text = "\n".join(
+        str(message.get("content") or "")
+        for message in llm.requests[1]["messages"]
+        if message.get("role") == "system"
+    )
+    assert "gates were re-run immediately" in system_text

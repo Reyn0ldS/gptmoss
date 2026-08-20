@@ -28,17 +28,28 @@ INVENTORY_MARKERS = (
 )
 RENDER_TARGETED_MARKERS = (
     "duplicate paragraph",
+    "duplicate list item",
+    "duplicate heading",
+    "heading numbering restart",
     "lack a local reference",
+)
+RENDER_SECTION_MARKERS = (
+    "record section",
+    "invalid diagram",
+    "empty required section",
 )
 RENDER_REWRITE_MARKERS = (
     "invalid local reference",
+    "citation-like pattern",
     "external link",
     "placeholder marker",
     "reasoning tag",
 )
 RENDER_APPEND_MARKERS = (
     "words=",
-    "empty required section",
+    "uncited required source",
+    "cited_sources=",
+    "local_references=",
 )
 SOFTWARE_MARKERS = (
     "static integration",
@@ -79,15 +90,20 @@ def classify_issue_texts(texts: Iterable[Any]) -> FeedbackTarget:
             DOCUMENT_RENDER, "writer", "filesystem__replace_paragraph",
             "paragraph repair", ("coordinator",),
         )
-    if any(marker in blob for marker in RENDER_REWRITE_MARKERS):
+    if any(marker in blob for marker in RENDER_SECTION_MARKERS):
         return FeedbackTarget(
-            DOCUMENT_RENDER, "writer", "filesystem__write",
-            "document rewrite", ("coordinator",),
+            DOCUMENT_RENDER, "writer", "filesystem__replace_section",
+            "record section repair", ("coordinator",),
         )
     if any(marker in blob for marker in RENDER_APPEND_MARKERS):
         return FeedbackTarget(
             DOCUMENT_RENDER, "writer", "filesystem__append",
             "document append", ("coordinator",),
+        )
+    if any(marker in blob for marker in RENDER_REWRITE_MARKERS):
+        return FeedbackTarget(
+            DOCUMENT_RENDER, "writer", "filesystem__write",
+            "document rewrite", ("coordinator",),
         )
     if any(marker in blob for marker in SOFTWARE_MARKERS):
         return FeedbackTarget(

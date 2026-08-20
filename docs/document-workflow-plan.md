@@ -1,5 +1,10 @@
 # Workflow documentaire local de GPTMOSS
 
+> **Historique.** Journal d'intégration de la branche `agent/local-document-workflow`.
+> Le contrat vivant est [local-document-workflow.md](local-document-workflow.md).
+> Le texte PDF via `pypdf`, le moteur de sections longues et les diagrammes SVG
+> sont livrés ; ce fichier n'est plus le tracker.
+
 ## 1. Objectif et contraintes
 
 Ce chantier ajoute à GPTMOSS un workflow documentaire professionnel capable de lire, analyser, rechercher et synthétiser des corpus locaux volumineux, puis de produire des dossiers longs et cohérents.

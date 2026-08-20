@@ -19,11 +19,11 @@ Bundled general skills cover secure Python, local document analysis, architectur
 
 ## Files, documents, and images
 
-Upload TXT, Markdown, JSON, CSV, local HTML, DOCX, PPTX, PNG, JPEG, or WebP through `POST /artifacts` with `filename`, `content_type`, and base64 `content_base64`. The response contains an artifact id. Pass it in `attachment_ids` to `POST /executions`.
+Upload TXT, Markdown, JSON, CSV, local HTML, DOCX, PPTX, PDF text, PNG, JPEG, or WebP through `POST /artifacts` with `filename`, `content_type`, and base64 `content_base64`. The response contains an artifact id. Pass it in `attachment_ids` to `POST /executions`.
 
-Upload size is strictly bounded by `max_upload_bytes` (100 MiB by default), and normalized text by `max_attachment_text_chars`. Files are normalized to a safe filename, content/signatures are checked, data is stored under the workspace `uploads/` directory, and every source is traced by SHA-256. Documents are normalized into structured blocks, cached, chunked, and indexed locally. The `documents` capability can access only explicit attachment IDs and exposes `inventory`, `search`, `read`, and `read_chunk`. Images are passed to models whose configured vision mode allows them; other models receive an explicit attachment notice.
+Upload size is strictly bounded by `max_upload_bytes` (100 MiB by default, integer `>= 1`), and normalized text by `max_attachment_text_chars`. Files are normalized to a safe filename, content/signatures are checked, data is stored under the workspace `uploads/` directory, and every source is traced by SHA-256. Documents are normalized into structured blocks, cached, chunked, and indexed locally. The `documents` capability can access only explicit attachment IDs and exposes `inventory`, `search`, `read`, `read_chunk`, `read_image`, and `read_images`. Images are passed to models whose configured vision mode allows them; other models receive an explicit attachment notice.
 
-HTML parsing never executes scripts or loads linked resources. DOCX and PPTX parsing uses the standard library and rejects unsafe OOXML archives. PDF, OCR, legacy `.doc`/`.ppt`, Office rendering, macros, and presenter notes remain outside the current contract. See [docs/local-document-workflow.md](docs/local-document-workflow.md) for MIME types, API examples, provenance syntax, quality policies, portable validation, and troubleshooting.
+HTML parsing never executes scripts or loads linked resources. DOCX and PPTX parsing uses the standard library and rejects unsafe OOXML archives. PDF text is extracted locally with `pypdf`. OCR of scanned pages, legacy `.doc`/`.ppt`, Office rendering, macros, and presenter notes remain outside the current contract. See [docs/local-document-workflow.md](docs/local-document-workflow.md) for MIME types, API examples, provenance syntax, quality policies, portable validation, and troubleshooting.
 
 ## Autonomous specialization
 

@@ -73,7 +73,13 @@ class FilesystemCapability:
                 
         return full_path
 
-    @action(name="read", description="Read the content of a file. Path is relative to the workspace.")
+    @action(
+        name="read",
+        description=(
+            "Read a bounded character window from a workspace file. Large default reads are "
+            "capped and return an exact next_offset marker; pass that offset to continue."
+        ),
+    )
     def read(
         self,
         path: str,
@@ -97,8 +103,19 @@ class FilesystemCapability:
         start = max(0, int(offset or 0))
         if start >= len(content):
             return ""
-        count = max(0, int(limit or 0))
-        return content[start : start + count] if count else content[start:]
+        requested_count = max(0, int(limit or 0))
+        default_window = 12_000
+        maximum_window = 32_000
+        count = min(requested_count, maximum_window) if requested_count else default_window
+        chunk = content[start : start + count]
+        end = start + len(chunk)
+        if not requested_count and end < len(content):
+            return (
+                chunk
+                + f"\n\n[READ_WINDOW characters={start}-{end - 1} total={len(content)} "
+                f"next_offset={end} default_limit={default_window}]"
+            )
+        return chunk
 
     @action(name="write", description="Create or overwrite a file with contents. Path is relative to the workspace.")
     def write(self, path: str, content: str, context: Optional[Dict[str, Any]] = None) -> str:
@@ -140,12 +157,24 @@ class FilesystemCapability:
         ).casefold()
         return " ".join(re.findall(r"[^\W_]+", folded, flags=re.UNICODE))
 
+    @staticmethod
+    def _literal_line_key(value: str) -> str:
+        """Normalize a selector while retaining citation text for reference-led lines."""
+        decomposed = unicodedata.normalize("NFKD", str(value or ""))
+        folded = "".join(
+            character for character in decomposed
+            if not unicodedata.combining(character)
+        ).casefold()
+        return " ".join(re.findall(r"[^\W_]+", folded, flags=re.UNICODE))
+
     @action(
         name="replace_paragraph",
         description=(
             "Replace one paragraph selected by a unique normalized prefix. Use occurrence=2 "
             "to remove the second copy of a duplicated paragraph. New content may be empty "
-            "only when removing a duplicate; headings and surrounding paragraphs are preserved."
+            "only when removing a duplicate; headings and surrounding paragraphs are preserved. "
+            "A single Markdown line grouped with adjacent content may also be targeted by its "
+            "exact prefix."
         ),
     )
     def replace_paragraph(
@@ -159,8 +188,33 @@ class FilesystemCapability:
         """Atomically replace one blank-line-delimited Markdown paragraph."""
         execution_id = context.get("execution_id") if context else None
         resolved = self._resolve_path(path, execution_id)
-        prefix = self._paragraph_key(paragraph_prefix)
-        if len(prefix) < 24:
+        key_function = self._paragraph_key
+        literal_line_selector = False
+        markdown_heading_selector = bool(re.match(
+            r"^\s*#{1,6}\s+\S", str(paragraph_prefix or "")
+        ))
+        has_local_reference = bool(re.search(
+            r"\[[^\[\]\n]+?\s+>\s+[^\[\]\n]+?\]",
+            str(paragraph_prefix or ""),
+        ))
+        if has_local_reference or markdown_heading_selector:
+            # The same table label or prose can legitimately occur with two
+            # different citations. Keep the reported defective citation in
+            # the selector so an already-correct occurrence is never chosen.
+            # Markdown headings are line selectors too; unlike prose, a short
+            # heading is safely addressable by its exact marker and occurrence.
+            key_function = self._literal_line_key
+            literal_line_selector = True
+        prefix = key_function(paragraph_prefix)
+        if len(prefix) < 24 and not literal_line_selector:
+            # A quality-gate selector may be a short label wrapped around a
+            # long bounded citation. Retain that exact citation for safe,
+            # unique selection instead of rejecting an otherwise precise line.
+            key_function = self._literal_line_key
+            literal_line_selector = True
+            prefix = key_function(paragraph_prefix)
+        minimum_prefix_length = 3 if markdown_heading_selector else 24
+        if len(prefix) < minimum_prefix_length:
             return "Error: paragraph_prefix must contain at least 24 normalized characters."
         try:
             requested_occurrence = int(occurrence)
@@ -186,8 +240,53 @@ class FilesystemCapability:
             ):
                 body_start += 1
             body = " ".join(line.strip() for line in lines[body_start:] if line.strip())
-            if self._paragraph_key(body).startswith(prefix):
+            if not literal_line_selector and key_function(body).startswith(prefix):
                 matches.append((index, lines[:body_start]))
+        if not matches:
+            # Blank-line paragraph segmentation can group adjacent Markdown
+            # lines into one segment. Quality gates report the exact defective
+            # line, so support a bounded single-line replacement rather than
+            # forcing a rewrite of the whole segment or document.
+            source_lines = original.splitlines(keepends=True)
+            if markdown_heading_selector:
+                selector_match = re.match(
+                    r"^\s*(#{1,6})\s+(.+?)\s*#*\s*$", str(paragraph_prefix)
+                )
+                expected_level = len(selector_match.group(1)) if selector_match else 0
+                expected_title = self._literal_line_key(
+                    selector_match.group(2) if selector_match else ""
+                )
+                line_matches = []
+                for index, line in enumerate(source_lines):
+                    heading_match = re.match(
+                        r"^\s*(#{1,6})\s+(.+?)\s*#*\s*(?:\r?\n)?$", line
+                    )
+                    if not heading_match:
+                        continue
+                    if (
+                        len(heading_match.group(1)) == expected_level
+                        and self._literal_line_key(heading_match.group(2)) == expected_title
+                    ):
+                        line_matches.append(index)
+            else:
+                line_matches = [
+                    index for index, line in enumerate(source_lines)
+                    if key_function(line).startswith(prefix)
+                ]
+            if len(line_matches) >= requested_occurrence:
+                line_index = line_matches[requested_occurrence - 1]
+                old_line = source_lines[line_index]
+                newline_match = re.search(r"(\r?\n)$", old_line)
+                newline = newline_match.group(1) if newline_match else ""
+                replacement = str(content or "").strip()
+                source_lines[line_index] = replacement + (newline if replacement else "")
+                updated = "".join(source_lines)
+                if updated == original:
+                    return "Error: replacement would not change the file."
+                write_text_atomic(resolved, updated)
+                return (
+                    f"Markdown line occurrence {requested_occurrence} replaced successfully in {path}"
+                )
         if len(matches) < requested_occurrence:
             return (
                 f"Error: paragraph prefix matched {len(matches)} occurrence(s), "
@@ -207,6 +306,79 @@ class FilesystemCapability:
         return (
             f"Paragraph occurrence {requested_occurrence} replaced successfully in {path}"
         )
+
+    @action(
+        name="replace_section",
+        description=(
+            "Replace the body of one Markdown section selected by its exact reported heading. "
+            "The heading and every other section are preserved. Use this for bounded semantic "
+            "repairs of a decision, requirement, risk, or other named record."
+        ),
+    )
+    def replace_section(
+        self,
+        path: str,
+        heading_selector: str,
+        content: str,
+        occurrence: int = 1,
+        context: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        """Atomically replace one Markdown section body without rewriting the file."""
+        execution_id = context.get("execution_id") if context else None
+        resolved = self._resolve_path(path, execution_id)
+        selector = str(heading_selector or "").strip()
+        selector_match = re.match(r"^(#{1,6})\s+(.+?)\s*#*$", selector)
+        if not selector_match:
+            return "Error: heading_selector must be one exact Markdown heading including # markers."
+        try:
+            requested_occurrence = int(occurrence)
+        except (TypeError, ValueError):
+            return "Error: occurrence must be an integer greater than or equal to 1."
+        if requested_occurrence < 1:
+            return "Error: occurrence must be an integer greater than or equal to 1."
+        if not os.path.isfile(resolved):
+            return f"Error: File not found at {path}"
+        with open(resolved, "r", encoding="utf-8") as handle:
+            original = handle.read()
+        source_lines = original.splitlines(keepends=True)
+        expected_level = len(selector_match.group(1))
+        expected_title = self._literal_line_key(selector_match.group(2))
+        matches = []
+        parsed_headings = []
+        for index, line in enumerate(source_lines):
+            match = re.match(r"^\s*(#{1,6})\s+(.+?)\s*#*\s*(?:\r?\n)?$", line)
+            if not match:
+                continue
+            level = len(match.group(1))
+            title = self._literal_line_key(match.group(2))
+            parsed_headings.append((index, level))
+            if level == expected_level and title == expected_title:
+                matches.append(index)
+        if len(matches) < requested_occurrence:
+            return (
+                f"Error: heading selector matched {len(matches)} occurrence(s), "
+                f"cannot replace occurrence {requested_occurrence}."
+            )
+        start = matches[requested_occurrence - 1]
+        end = len(source_lines)
+        for heading_index, level in parsed_headings:
+            if heading_index > start and level <= expected_level:
+                end = heading_index
+                break
+        newline_match = re.search(r"(\r?\n)$", source_lines[start])
+        newline = newline_match.group(1) if newline_match else "\n"
+        body = str(content or "").strip()
+        if body and self._literal_line_key(body.splitlines()[0]) == self._literal_line_key(selector):
+            return "Error: content must contain the section body only; the selected heading is preserved."
+        replacement = source_lines[start].rstrip("\r\n") + newline
+        if body:
+            replacement += newline + body + newline
+        source_lines[start:end] = [replacement]
+        updated = "".join(source_lines)
+        if updated == original:
+            return "Error: replacement would not change the file."
+        write_text_atomic(resolved, updated)
+        return f"Markdown section replaced successfully in {path}: {selector}"
 
     @action(name="list_dir", description="List files and directories in a path relative to the workspace.")
     def list_dir(self, path: str = ".", context: Optional[Dict[str, Any]] = None) -> str:

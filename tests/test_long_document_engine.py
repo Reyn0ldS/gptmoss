@@ -1,12 +1,18 @@
 from pathlib import Path
 import asyncio
 import json
+from types import SimpleNamespace
 
 import httpx
 
 from gptmoss.api.server import app, app_state
 from gptmoss.core.document_model import DocumentModel, DocumentModelStore, EvidenceReference
-from gptmoss.core.document_planning import adapt_document_steps, estimate_document_work
+from gptmoss.core.document_planning import (
+    adapt_document_steps,
+    estimate_document_work,
+    optimize_professional_document_dag,
+)
+from gptmoss.core.execution import ExecutionEngine
 from gptmoss.core.long_document_engine import LongDocumentEngine
 from gptmoss.core.state import StateEngine
 from gptmoss.planners.simple import SimplePlanner, analyze_task_complexity
@@ -107,6 +113,98 @@ def test_document_work_is_adaptive_for_small_requests():
         not step["dependencies"] or max(step["dependencies"]) < step["id"]
         for step in plan["steps"]
     )
+
+
+def test_document_analysis_tracks_form_a_real_parallel_wave():
+    task = (
+        "Analyse source-a.docx, source-b.docx et source-c.docx, puis produis "
+        "un dossier architecture.md avec diagrammes et une matrice de traçabilité."
+    )
+    analysis = analyze_task_complexity(task)
+    plan = SimplePlanner._document_fallback(task, analysis)
+    by_specialist = {step["specialist"]: step for step in plan["steps"]}
+    decisions = by_specialist["Architecture Decision Analyst"]
+    application = by_specialist["Application, Integration & Data Architect"]
+
+    assert decisions["dependencies"] == application["dependencies"]
+    assert len(decisions["dependencies"]) >= 1
+    assert decisions["id"] not in application["dependencies"]
+    assert application["id"] not in decisions["dependencies"]
+
+
+def test_persisted_professional_chain_is_upgraded_to_parallel_analysis_wave():
+    plan = {
+        "delivery_profile": "professional-local",
+        "steps": [
+            {"id": 0, "specialist": "Local Corpus Evidence Analyst", "dependencies": []},
+            {"id": 1, "specialist": "Requirements & Traceability Architect", "dependencies": [0]},
+            {"id": 2, "specialist": "Architecture Decision Analyst", "dependencies": [0, 1]},
+            {"id": 3, "specialist": "Application, Integration & Data Architect", "dependencies": [1, 2]},
+            {"id": 4, "specialist": "Professional Architecture Dossier Editor", "dependencies": [1, 2, 3]},
+        ],
+    }
+
+    optimize_professional_document_dag(plan)
+
+    assert plan["steps"][2]["dependencies"] == [0, 1]
+    assert plan["steps"][3]["dependencies"] == [0, 1]
+    assert plan["steps"][4]["dependencies"] == [0, 1, 2, 3]
+
+
+def test_page_range_contributes_a_real_long_form_word_budget():
+    estimate = estimate_document_work(
+        "Produis un dossier professionnel autonome de 35 à 45 pages avec trois diagrammes."
+    )
+
+    assert estimate.requested_words == 8750
+    assert estimate.has_diagrams is True
+    assert estimate.complexity in {"high", "very_high"}
+    assert estimate_document_work(
+        "Rédige une quarantaine de pages."
+    ).requested_words == 10000
+
+
+def test_resume_recalibrates_empty_long_document_checkpoint_to_stricter_policy(tmp_path):
+    runtime = object.__new__(ExecutionEngine)
+    runtime.document_engine_enabled = True
+    runtime.document_checkpoint_enabled = True
+    runtime.document_target_section_words = 450
+    runtime._delivery_workspace = lambda execution_id: str(tmp_path)
+    state = SimpleNamespace(variables={"corpus_policy": {"professional_delivery": True}})
+    requirements = [{"id": f"REQ-{index:03d}"} for index in range(1, 5)]
+    initial = {
+        "primary_artifact": "dossier.md",
+        "requirements": requirements,
+        "steps": [{"role": "writer", "specialist": "Writer"}],
+        "artifact_validations": [{
+            "path": "dossier.md", "constraints": {"minimums": {"words": 600}},
+        }],
+    }
+    runtime._initialize_document_state("resume-long", "Rédige un dossier", initial, state)
+
+    strengthened = {
+        **initial,
+        "artifact_validations": [{
+            "path": "dossier.md",
+            "constraints": {
+                "required_headings": ["Synthèse", "Architecture", "Risques", "Roadmap"],
+                "minimums": {"words": 8750},
+            },
+        }],
+    }
+    runtime._initialize_document_state("resume-long", "Rédige un dossier", strengthened, state)
+    model = LongDocumentEngine(tmp_path / ".gptmoss" / "document-state").resume("resume-long")
+
+    assert model is not None
+    assert [section.contract.heading for section in model.sections] == [
+        "Synthèse", "Architecture", "Risques", "Roadmap",
+    ]
+    assert all(section.contract.target_words == 2188 for section in model.sections)
+    assert sorted(
+        requirement_id
+        for section in model.sections
+        for requirement_id in section.contract.requirement_ids
+    ) == ["REQ-001", "REQ-002", "REQ-003", "REQ-004"]
 
 
 def test_document_progress_api_exposes_only_workspace_checkpoint(tmp_path: Path, monkeypatch):

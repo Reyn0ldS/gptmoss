@@ -51,6 +51,70 @@ def test_classify_duplicate_paragraph_targets_writer_paragraph_tool():
     assert select_reopen_step(_plan(), target)["role"] == "writer"
 
 
+def test_classify_heading_number_restart_targets_bounded_heading_removal():
+    target = classify_issue_texts([
+        "document contains 1 heading numbering restart(s), suggesting an appended "
+        "duplicate section series: ## 4. Architecture (number 4 after 9)",
+    ])
+    assert target.obligation == DOCUMENT_RENDER
+    assert target.required_tool == "filesystem__replace_paragraph"
+
+
+def test_classify_code_wrapped_citations_authorizes_document_rewrite():
+    target = classify_issue_texts([
+        "48 citation-like pattern(s) inside Markdown code do not count as evidence; "
+        "write actual citations without backticks or code fences",
+    ])
+    assert target.obligation == DOCUMENT_RENDER
+    assert target.required_tool == "filesystem__write"
+    assert select_reopen_step(_plan(), target)["role"] == "writer"
+
+
+def test_classify_missing_source_coverage_requires_append_not_ungated_edits():
+    target = classify_issue_texts([
+        "uncited required source file(s): source-a.docx, source-b.pptx; "
+        "cited_sources=3 is below required minimum 5",
+    ])
+    assert target.obligation == DOCUMENT_RENDER
+    assert target.required_tool == "filesystem__append"
+
+
+def test_classify_missing_source_precedes_code_example_rewrite():
+    target = classify_issue_texts([
+        "uncited required source file(s): source-a.docx; "
+        "2 citation-like pattern(s) inside Markdown code do not count as evidence; "
+        "write actual citations without backticks or code fences",
+    ])
+    assert target.obligation == DOCUMENT_RENDER
+    assert target.required_tool == "filesystem__append"
+
+
+def test_classify_semantically_incomplete_records_requires_section_repair():
+    target = classify_issue_texts([
+        "4 record section(s) violate the declared semantic schema",
+    ])
+    assert target.obligation == DOCUMENT_RENDER
+    assert target.required_tool == "filesystem__replace_section"
+
+
+def test_classify_invalid_diagram_requires_section_repair():
+    target = classify_issue_texts([
+        "document contains 1 invalid diagram(s): line 20 under section selector "
+        "'### Runtime flow': self-loop is not allowed",
+    ])
+    assert target.obligation == DOCUMENT_RENDER
+    assert target.required_tool == "filesystem__replace_section"
+
+
+def test_classify_empty_required_section_requires_in_place_section_repair():
+    target = classify_issue_texts([
+        "empty required section(s): Registre des risques; exact Markdown "
+        "heading selector(s): ## Registre des risques",
+    ])
+    assert target.obligation == DOCUMENT_RENDER
+    assert target.required_tool == "filesystem__replace_section"
+
+
 def test_classify_cli_smoke_keeps_debugger_fallback():
     target = classify_assurance_report({
         "passed": False, "checks": [], "failures": ["CLI smoke failed"],

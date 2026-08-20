@@ -11,7 +11,8 @@ from gptmoss.core.document_planning import adapt_document_steps, estimate_docume
 from gptmoss.planners.complexity import analyze_task_complexity
 
 _ARTIFACT_NAME = re.compile(
-    r"(?<![\w./-])([A-Za-z0-9][A-Za-z0-9_.-]*\.(?:md|json|txt|html|docx|pptx))(?![\w.-])",
+    r"(?<![\w./-])([A-Za-z0-9][A-Za-z0-9_.-]*\.(?:md|json|txt|html|docx|pptx))"
+    r"(?![\w-]|\.[A-Za-z0-9])",
     flags=re.IGNORECASE,
 )
 
@@ -60,6 +61,15 @@ def _requested_output_artifacts(task: str) -> List[str]:
         r"[^\r\n]{0,100}?" + _ARTIFACT_NAME.pattern
     )
     for match in verb_pattern.finditer(str(task or "")):
+        filename = match.group(1)
+        if filename and filename not in outputs:
+            outputs.append(filename)
+    naming_pattern = re.compile(
+        r"(?i)\b(?:s['\N{RIGHT SINGLE QUOTATION MARK}]appelle|"
+        r"s['\N{RIGHT SINGLE QUOTATION MARK}]appeler|named|called|nomm[\N{LATIN SMALL LETTER E WITH ACUTE}e])"
+        r"[^\r\n]{0,40}?" + _ARTIFACT_NAME.pattern
+    )
+    for match in naming_pattern.finditer(str(task or "")):
         filename = match.group(1)
         if filename and filename not in outputs:
             outputs.append(filename)
@@ -285,6 +295,24 @@ def _assign_document_requirements(
     """Map document requirements to surviving specialists, never to frozen step ids."""
     requirements = extract_requirements(task)
     producers = [step for step in steps if step.get("role") in {"architect", "security", "writer"}]
+    writers = [step for step in producers if step.get("role") == "writer"]
+    primary_writers = [
+        step for step in writers
+        if (
+            "professional" in _step_search_blob(step)
+            or any(
+                str(path).casefold().endswith((".md", ".txt", ".html"))
+                and not str(path).replace("\\", "/").casefold().startswith("analysis/")
+                and not any(
+                    marker in str(path).casefold()
+                    for marker in ("quality", "review", "audit")
+                )
+                for path in (step.get("required_artifacts") or [])
+            )
+        )
+        and "quality evidence" not in _step_search_blob(step)
+    ]
+    primary_writer = primary_writers[0] if primary_writers else (writers[0] if writers else None)
     coordinators = [step for step in steps if step.get("role") == "coordinator"]
     final_coordinator = coordinators[-1] if coordinators else steps[-1]
     final_reviewers = [
@@ -365,15 +393,18 @@ def _assign_document_requirements(
         elif named_owners:
             targets = named_owners
         else:
-            writers = [step for step in producers if step.get("role") == "writer"]
-            targets = writers[-1:] if writers else (producers[-1:] if producers else [final_coordinator])
+            targets = [primary_writer] if primary_writer else (
+                producers[-1:] if producers else [final_coordinator]
+            )
         if not targets:
             if any(marker in statement for marker in ("inventor", "documents.inventory", "pièces jointes", "pieces jointes")):
                 targets = _steps_matching(steps, "corpus")[:1] or producers[:1]
             elif any(marker in statement for marker in ("quality", "review", "audit", "rapport")):
                 targets = _steps_matching(steps, "quality evidence", "deterministic")[:1] or producers[-1:]
             else:
-                targets = producers[-1:] if producers else [final_coordinator]
+                targets = [primary_writer] if primary_writer else (
+                    producers[-1:] if producers else [final_coordinator]
+                )
         for target in targets:
             _assign_requirement(target, requirement_id)
         _assign_requirement(final_coordinator, requirement_id)

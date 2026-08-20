@@ -13,7 +13,8 @@ ROOT = Path(__file__).resolve().parents[1]
 MANIFEST = ROOT / "release-source-manifest.json"
 TOP_LEVEL_FILES = {
     ".coveragerc", ".env.template", ".gitattributes", ".gitignore",
-    "LICENSE", "README.md", "SKILLS.md", "config.json.template",
+    "LICENSE", "README.md", "SKILLS.md", "DELIVERY_ASSURANCE.md",
+    "Manuel_utilisation.md", "config.json.template", "pytest.ini",
     "constraints-runtime.txt", "install.bat", "install.sh", "main.py",
     "offline-runtime-manifest.json", "prepare-offline-source.bat",
     "pyproject.toml", "requirements-dev.txt", "requirements-runtime.txt",

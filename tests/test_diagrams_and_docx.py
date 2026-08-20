@@ -42,6 +42,21 @@ def test_mermaid_parser_rejects_missing_or_empty_nodes():
     assert not validate_diagram(parse_mermaid("graph TD"))["valid"]
 
 
+def test_mermaid_parser_supports_useful_sequence_and_state_diagrams():
+    sequence = parse_mermaid(
+        "sequenceDiagram\nparticipant User as Utilisateur\nUser->>API: requête\nAPI-->>User: réponse"
+    )
+    state = parse_mermaid(
+        "stateDiagram-v2\n[*] --> Idle\nIdle --> Running: start\nRunning --> [*]: stop"
+    )
+
+    assert validate_diagram(sequence)["valid"]
+    assert {node.node_id for node in sequence.nodes} == {"User", "API"}
+    assert len(sequence.edges) == 2
+    assert validate_diagram(state)["valid"]
+    assert len(state.edges) == 3
+
+
 def test_docx_contains_real_table_and_embedded_svg():
     markdown = """# Dossier
 

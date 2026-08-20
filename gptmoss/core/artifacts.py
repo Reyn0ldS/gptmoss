@@ -554,9 +554,21 @@ class ArtifactStore:
     @staticmethod
     def _render_context_chunk(chunk: Any) -> str:
         section = " / ".join(chunk.heading_path) or "(root)"
+        slides = sorted({
+            int(item.get("slide_number"))
+            for item in chunk.provenance
+            if isinstance(item, dict) and item.get("slide_number") is not None
+        })
+        citation_locator = (
+            (f"slide {slides[0]}" if len(slides) == 1 else f"slides {slides[0]}-{slides[-1]}")
+            if slides
+            else f"blocks {chunk.start_order + 1}-{chunk.end_order + 1}"
+        )
         return (
             f"[Local source: {chunk.filename} | section: {section} | "
-            f"blocks: {chunk.start_order}-{chunk.end_order} | chunk: {chunk.id}]\n"
+            f"tool offsets: {chunk.start_order}-{chunk.end_order} | "
+            f"citation: [{chunk.filename} > {section} > {citation_locator}] | "
+            f"chunk: {chunk.id}]\n"
             f"{chunk.text}"
         )
 

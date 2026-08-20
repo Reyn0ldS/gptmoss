@@ -1317,6 +1317,22 @@ async def resume_execution(execution_id: str):
     # on resume: a fresh specialist must inherit the durable workspace edits
     # and the current runtime/tool schemas.
     for step in (state.current_plan or {}).get("steps", []):
+        if step.get("status") == "cancelled":
+            # A process restart can persist the coordinator's in-flight plan
+            # step as cancelled after its delegated child is stopped. Resuming
+            # the top-level execution is explicit authorization for a fresh
+            # attempt of that same step, while a cancelled top-level execution
+            # remains non-resumable above.
+            step["status"] = "pending"
+            step.pop("assigned_execution_id", None)
+            step.pop("error", None)
+            step["manual_retry_count"] = int(
+                step.get("manual_retry_count", 0)
+            ) + 1
+            runtimes = state.variables.get("step_runtime")
+            if isinstance(runtimes, dict):
+                runtimes.pop(str(step.get("id")), None)
+            continue
         if step.get("status") != "pending":
             continue
         assigned_id = step.get("assigned_execution_id")
@@ -1542,6 +1558,7 @@ async def get_settings():
         config = _load_runtime_config()
         config.pop("api_key", None)
         config.setdefault("max_step_iterations", 30)
+        config.setdefault("ssl_verify", True)
         config.setdefault("vision_mode", "auto")
         config.setdefault("max_step_retries", 2)
         config.setdefault("max_parallel_plan_steps", 0)
@@ -1613,15 +1630,15 @@ async def get_settings():
         "max_context_chars": getattr(app_state.execution_engine.context_engine, "max_history_chars", 12_000),
         "context_window_tokens": getattr(llm, "context_window_tokens", 0),
         "context_output_reserve_tokens": getattr(llm, "context_output_reserve_tokens", 8_192),
-        "max_upload_bytes": getattr(_artifact_store(), "max_bytes", 0),
-        "max_attachment_text_chars": getattr(_artifact_store(), "max_text_chars", 0),
+        "max_upload_bytes": getattr(_artifact_store(), "max_bytes", DEFAULT_MAX_UPLOAD_BYTES) or DEFAULT_MAX_UPLOAD_BYTES,
+        "max_attachment_text_chars": getattr(_artifact_store(), "max_text_chars", DEFAULT_MAX_ATTACHMENT_TEXT_CHARS) or DEFAULT_MAX_ATTACHMENT_TEXT_CHARS,
         "max_transitions_per_execution": getattr(
             app_state.state_engine, "max_transitions_per_execution",
             DEFAULT_MAX_TRANSITIONS_PER_EXECUTION,
         ),
-        "safe_shell_mode": True,
+        "safe_shell_mode": bool(getattr(app_state.execution_engine.get_capability("shell"), "safe_mode", True)),
         "shell_timeout_seconds": getattr(app_state.execution_engine.get_capability("shell"), "timeout_seconds", 0),
-        "shell_max_output_chars": getattr(app_state.execution_engine.get_capability("shell"), "max_output_chars", 12_000),
+        "shell_max_output_chars": getattr(app_state.execution_engine.get_capability("shell"), "max_output_chars", 12_000) or 12_000,
         "default_skills": []
     }
 

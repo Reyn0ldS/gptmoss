@@ -16,6 +16,7 @@ from gptmoss.core.execution import (
     requirement_validation_commands,
     requirements_for_delegation,
 )
+from gptmoss.core.professional_delivery import apply_professional_profile
 
 
 def _plan():
@@ -74,6 +75,7 @@ def test_contract_freezes_traceability_scope_and_ownership():
     assert row["implementation_steps"] == [0]
     assert row["validation_steps"] == [1]
     assert contract["scope_changes"][0]["statement"] == "Graphical interface is deferred"
+    assert len(contract["scope_changes_sha256"]) == 64
     assert len(contract["contract_sha256"]) == 64
     assert path_is_owned(contract, 0, "developer", "src/sample/cli.py")
     assert not path_is_owned(contract, 0, "developer", "tests/test_cli.py")
@@ -81,6 +83,27 @@ def test_contract_freezes_traceability_scope_and_ownership():
     assert not path_is_owned(contract, 1, "debugger", "tests/test_cli.py")
     assert not path_is_owned(contract, 1, "debugger", ".gptmoss/contract.json")
     assert not path_is_owned(contract, 1, "debugger", "./.gptmoss/contract.json")
+
+
+def test_scope_approval_hash_is_stable_when_only_delivery_gates_change():
+    first_plan = _plan()
+    first_plan["scope_changes"] = [{"statement": "Vision review remains deferred"}]
+    first_plan["artifact_validations"] = [{
+        "path": "report.md", "validator": "document",
+        "constraints": {"minimums": {"words": 600}},
+    }]
+    second_plan = _plan()
+    second_plan["scope_changes"] = [{"statement": "Vision review remains deferred"}]
+    second_plan["artifact_validations"] = [{
+        "path": "report.md", "validator": "document",
+        "constraints": {"minimums": {"words": 8750, "valid_diagrams": 3}},
+    }]
+
+    first = build_delivery_contract(first_plan, "Write the report")
+    second = build_delivery_contract(second_plan, "Write the report")
+
+    assert first["contract_sha256"] != second["contract_sha256"]
+    assert first["scope_changes_sha256"] == second["scope_changes_sha256"]
 
 
 def test_automatic_software_traceability_prefers_developer_and_relevant_qa():
@@ -239,6 +262,54 @@ def test_independent_evidence_is_required_for_delivery(tmp_path):
     assert passed["passed"], json.dumps(passed, indent=2)
 
 
+def test_final_assurance_revalidates_latest_quality_gates_on_upstream_and_downstream_docs(
+    tmp_path,
+):
+    plan = normalize_plan({
+        "delivery_profile": "professional-local",
+        "primary_artifact": "dossier.md",
+        "steps": [
+            {
+                "id": 0, "role": "writer", "dependencies": [],
+                "description": "Rédiger le dossier professionnel",
+                "required_artifacts": ["dossier.md"],
+            },
+            {
+                "id": 1, "role": "qa", "dependencies": [0],
+                "description": "Contrôler le dossier et consigner la qualité",
+                "required_artifacts": ["quality-report.md"],
+            },
+        ],
+        "artifact_validations": [],
+    })
+    apply_professional_profile(plan)
+    repeated = (
+        "- Cette ligne de contrôle professionnelle contient suffisamment de mots "
+        "pour être détectée comme un élément de liste dupliqué."
+    )
+    for name in ("dossier.md", "quality-report.md"):
+        minimum = 700 if name == "dossier.md" else 150
+        filler = " ".join(f"preuve{index}" for index in range(minimum))
+        (tmp_path / name).write_text(
+            f"# Rapport\n\n{filler}\n\n{repeated}\n\n{repeated}\n",
+            encoding="utf-8",
+        )
+
+    contract = build_delivery_contract(plan, "Produire un dossier professionnel")
+    report = evaluate_delivery(tmp_path, contract, plan["steps"], [])
+    artifact_check = next(
+        check for check in report["checks"]
+        if check["name"] == "artifact_structure_and_constraints"
+    )
+    invalid = {
+        item["artifact"] for item in artifact_check["reports"]
+        if not item["valid"] and item["metrics"]["duplicate_list_items"] == 1
+    }
+
+    assert invalid == {"dossier.md", "quality-report.md"}
+    assert not report["passed"]
+
+
 def test_declared_interface_is_checked_against_actual_ast(tmp_path):
     package = tmp_path / "src" / "sample"
     package.mkdir(parents=True)
@@ -272,6 +343,20 @@ def test_requirement_extraction_preserves_lists_punctuation_and_has_no_hidden_ca
     assert len(requirements) == 30
     assert ", semicolons;" in requirements[0]["statement"]
     assert requirements[-1]["statement"].startswith("Outcome 29")
+
+
+def test_requirement_extraction_preserves_explicit_stable_identifiers():
+    requirements = extract_requirements(
+        "REQ-E2E-001 — Inventorier toutes les pièces.\n"
+        "REQ-E2E-002: Produire une matrice de traçabilité.\n"
+        "- Conserver aussi cette exigence sans identifiant."
+    )
+
+    assert [item["id"] for item in requirements] == [
+        "REQ-E2E-001", "REQ-E2E-002", "REQ-001",
+    ]
+    assert requirements[0]["statement"] == "Inventorier toutes les pièces"
+    assert requirements[1]["statement"] == "Produire une matrice de traçabilité"
 
 
 def test_complete_without_placeholders_is_not_misclassified_as_scope_reduction():

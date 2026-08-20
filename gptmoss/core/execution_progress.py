@@ -18,6 +18,144 @@ from gptmoss.core.execution_plan import (
 
 
 class ExecutionProgressMixin:
+    @staticmethod
+    def _freeze_existing_record_ids(path: str, constraints: Dict[str, Any]) -> None:
+        """Persist record IDs already present before a semantic repair begins."""
+        policy = constraints.get("record_section_policy")
+        if not isinstance(policy, dict) or not policy.get("preserve_existing_record_ids"):
+            return
+        if policy.get("required_record_ids"):
+            return
+        heading_pattern = str(policy.get("heading_pattern") or "").strip()
+        if not heading_pattern:
+            return
+        try:
+            record_pattern = re.compile(heading_pattern, flags=re.IGNORECASE)
+            with open(path, "r", encoding="utf-8") as handle:
+                text = handle.read()
+        except (OSError, UnicodeError, re.error):
+            return
+        identifiers: List[str] = []
+        seen = set()
+        for line in text.splitlines():
+            heading = re.match(r"^\s*#{1,6}\s+(.+?)\s*#*\s*$", line)
+            if not heading:
+                continue
+            for match in record_pattern.finditer(heading.group(1)):
+                identifier = match.group(0).strip()
+                folded = identifier.casefold()
+                if identifier and folded not in seen:
+                    seen.add(folded)
+                    identifiers.append(identifier)
+        if identifiers:
+            policy["required_record_ids"] = identifiers
+            policy["minimum_records"] = max(
+                int(policy.get("minimum_records") or 0), len(identifiers),
+            )
+
+    def _reopen_invalid_completed_steps(
+        self, execution_id: str, state, steps: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        """Reopen persisted work invalidated by stronger deterministic gates.
+
+        Profile upgrades are intentionally applied on resume. Completed steps
+        must not bypass those new gates: reopen the invalid producer and every
+        transitive consumer while preserving their durable files for repair.
+        """
+        profile_retry_prefix = (
+            "A deterministic profile upgrade invalidated this persisted artifact. "
+        )
+        upstream_retry_prefix = (
+            "A completed upstream artifact was reopened by stronger deterministic "
+            "quality gates. "
+        )
+        # A pause can leave a reopened step pending. Recompute its repair brief
+        # after every profile upgrade so removed or narrowed gates cannot keep
+        # sending a replacement child after obsolete defects.
+        for step in steps:
+            retry_context = str(step.get("retry_context") or "")
+            failed_attempt_retry = "Current machine gate failures:" in retry_context
+            refreshable_retry = retry_context.startswith(
+                profile_retry_prefix
+            ) or retry_context.startswith(upstream_retry_prefix) or failed_attempt_retry
+            if step.get("status") != "pending" or not refreshable_retry:
+                continue
+            current_issues = self._step_artifact_validation_issues(execution_id, step)
+            if current_issues:
+                if failed_attempt_retry:
+                    step["retry_context"] = (
+                        "A resumed specialist retry was refreshed from the current durable "
+                        "artifact. Ignore obsolete defects and repair only these current "
+                        "machine gate failures:\n" + "; ".join(current_issues)
+                    )[:12_000]
+                else:
+                    step["retry_context"] = (
+                        profile_retry_prefix
+                        + "Preserve valid content and repair these machine-observed defects:\n"
+                        + "; ".join(current_issues)
+                    )[:12_000]
+                runtime = state.variables.get("step_runtime")
+                runtime = runtime.get(str(step.get("id"))) if isinstance(runtime, dict) else None
+                if isinstance(runtime, dict):
+                    runtime.pop("required_next_tool", None)
+                    runtime.pop("required_repair_issues", None)
+            elif retry_context.startswith(profile_retry_prefix) or failed_attempt_retry:
+                step.pop("retry_context", None)
+
+        invalid: Dict[str, List[str]] = {}
+        for step in steps:
+            if step.get("status") != "completed":
+                continue
+            issues = self._step_artifact_validation_issues(execution_id, step)
+            if issues:
+                invalid[str(step.get("id"))] = issues
+        if not invalid:
+            return []
+
+        affected = set(invalid)
+        changed = True
+        while changed:
+            changed = False
+            for step in steps:
+                identifier = str(step.get("id"))
+                dependencies = {str(item) for item in step.get("dependencies", [])}
+                if identifier not in affected and dependencies & affected:
+                    affected.add(identifier)
+                    changed = True
+
+        reopened: List[Dict[str, Any]] = []
+        stored_steps = state.results.get("steps")
+        for step in steps:
+            identifier = str(step.get("id"))
+            if identifier not in affected:
+                continue
+            own_issues = invalid.get(identifier)
+            step["status"] = "pending"
+            step.pop("assigned_execution_id", None)
+            step.pop("delivery", None)
+            step.pop("result", None)
+            step.pop("error", None)
+            step.pop("validation_passed", None)
+            if own_issues:
+                step["retry_context"] = (
+                    profile_retry_prefix
+                    + "Preserve valid content and repair these machine-observed defects:\n"
+                    + "; ".join(own_issues)
+                )[:12_000]
+            else:
+                step["retry_context"] = (
+                    "A completed upstream artifact was reopened by stronger deterministic "
+                    "quality gates. Reuse its corrected result and refresh this dependent "
+                    "artifact without trusting stale conclusions."
+                )
+            if isinstance(stored_steps, dict):
+                stored_steps.pop(identifier, None)
+            reopened.append(step)
+        state.current_step = sum(
+            1 for step in steps if step.get("status") == "completed"
+        )
+        return reopened
+
     def _artifact_quality_defects(
         self, execution_id: str, step: Dict[str, Any]
     ) -> tuple:
@@ -65,6 +203,19 @@ class ExecutionProgressMixin:
                     int(metrics.get("duplicate_paragraphs") or 0)
                     - int(constraints.get("max_duplicate_paragraphs") or 0),
                 ),
+                max(
+                    0,
+                    int(metrics.get("duplicate_list_items") or 0)
+                    - int(constraints.get("max_duplicate_list_items") or 0),
+                ),
+                max(
+                    0,
+                    int(metrics.get("duplicate_headings") or 0)
+                    - int(constraints.get("max_duplicate_headings") or 0),
+                ),
+                max(0, int(metrics.get("heading_number_restarts") or 0)),
+                max(0, int(metrics.get("invalid_record_sections") or 0)),
+                max(0, int(metrics.get("missing_record_section_ids") or 0)),
                 max(0, int(metrics.get("unsupported_claim_paragraphs") or 0)),
                 max(0, int(metrics.get("placeholder_markers") or 0)),
                 (
@@ -95,6 +246,11 @@ class ExecutionProgressMixin:
                 deficit("local_references"),
                 deficit("cited_sources"),
                 deficit("headings"),
+                deficit("valid_diagrams"),
+                (
+                    max(0, int(metrics.get("invalid_diagrams") or 0))
+                    if constraints.get("reject_invalid_diagrams") else 0
+                ),
             )
             defects.append((path, defect_vector))
         return tuple(sorted(defects))
@@ -142,6 +298,9 @@ class ExecutionProgressMixin:
                 constraints["forbid_placeholders"] = True
             try:
                 resolved = filesystem._resolve_path(normalized, execution_id)
+                self._freeze_existing_record_ids(resolved, constraints)
+                if specification:
+                    specification["constraints"] = constraints
                 report = validate_artifact(
                     resolved, validator=validator, constraints=constraints,
                 )
@@ -196,7 +355,32 @@ class ExecutionProgressMixin:
         covered: Dict[str, set[int]] = {
             artifact_id: set() for artifact_id in document_ids
         }
-        history = state.variables.get("tool_call_history", [])
+        history = list(state.variables.get("tool_call_history", []))
+        parent_id = state.variables.get("parent_execution_id")
+        plan_step_id = state.variables.get("plan_step_id")
+        project_id = state.variables.get("project_id")
+        # A manual pause or process restart creates a fresh specialist while
+        # retaining durable workspace edits. Reuse only successful local read
+        # evidence from an earlier specialist assigned to the exact same
+        # parent step, project and attachment set. Artifact IDs bind the proof
+        # to the same immutable uploaded content; unrelated siblings cannot
+        # satisfy this execution's coverage gate.
+        if parent_id is not None and plan_step_id is not None:
+            for sibling in self.state_engine.executions.values():
+                if sibling.execution_id == execution_id:
+                    continue
+                sibling_variables = sibling.variables
+                if (
+                    sibling_variables.get("parent_execution_id") != parent_id
+                    or sibling_variables.get("plan_step_id") != plan_step_id
+                    or sibling_variables.get("project_id") != project_id
+                    or {
+                        str(item) for item in sibling_variables.get("attachment_ids", [])
+                        if item
+                    } != attached
+                ):
+                    continue
+                history.extend(sibling_variables.get("tool_call_history", []))
         for item in history:
             if item.get("capability") != "documents" or item.get("action") != "read":
                 continue
@@ -242,7 +426,12 @@ class ExecutionProgressMixin:
                 "visualized_artifact_ids", []
             ) if item
         }
-        missing_images = sorted(image_ids - visualized)
+        # When vision is unavailable, the declared capability-gap workflow owns
+        # the limitation and requires human scope approval at the parent level.
+        # Requiring a visual tool here would create an impossible child loop and
+        # could falsely imply that image content had been interpreted.
+        vision_available = bool(getattr(self.llm_provider, "supports_vision", False))
+        missing_images = sorted(image_ids - visualized) if vision_available else []
         if missing_images:
             names = []
             for artifact_id in missing_images[:20]:
@@ -259,6 +448,41 @@ class ExecutionProgressMixin:
                 f"missing: {', '.join(names)}{suffix}"
             )
         return issues
+
+    def _inherits_complete_document_coverage(
+        self, execution_id: str, step: Dict[str, Any]
+    ) -> bool:
+        """Identify a fresh retry whose exact prior assignment proved full coverage."""
+        state = self.state_engine.get_execution(execution_id)
+        variables = state.variables
+        parent_id = variables.get("parent_execution_id")
+        plan_step_id = variables.get("plan_step_id")
+        project_id = variables.get("project_id")
+        attachments = {
+            str(item) for item in variables.get("attachment_ids", []) if item
+        }
+        if parent_id is None or plan_step_id is None or not attachments:
+            return False
+        if any(
+            item.get("capability") == "documents" and item.get("action") == "read"
+            for item in variables.get("tool_call_history", [])
+        ):
+            return False
+        prior_assignment = any(
+            sibling.execution_id != execution_id
+            and sibling.variables.get("parent_execution_id") == parent_id
+            and sibling.variables.get("plan_step_id") == plan_step_id
+            and sibling.variables.get("project_id") == project_id
+            and {
+                str(item) for item in sibling.variables.get("attachment_ids", []) if item
+            } == attachments
+            and any(
+                item.get("capability") == "documents" and item.get("action") == "read"
+                for item in sibling.variables.get("tool_call_history", [])
+            )
+            for sibling in self.state_engine.executions.values()
+        )
+        return prior_assignment and not self._document_coverage_issues(execution_id, step)
 
     def _capability_gaps(self, state) -> List[Dict[str, Any]]:
         """Describe unavailable input modalities without pretending to use them."""

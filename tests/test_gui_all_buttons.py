@@ -56,6 +56,7 @@ REQUIRED_HANDLERS = (
     "closeSettingsModal()",
     "scrollSettingsSection('settings-model-section')",
     "scrollSettingsSection('settings-security-section')",
+    "scrollSettingsSection('settings-documents-section')",
     "scrollSettingsSection('settings-skills-section')",
     "scrollSettingsSection('settings-projects-section')",
     "revealApiKey()",

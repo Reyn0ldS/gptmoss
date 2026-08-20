@@ -5,10 +5,12 @@ import json
 import time
 import logging
 import inspect
+import math
 import os
 import re
 import shlex
 import sys
+import unicodedata
 from contextlib import AsyncExitStack
 from pathlib import Path
 from typing import Dict, Any, List, Optional
@@ -40,6 +42,7 @@ from gptmoss.core.delivery_feedback import (
 from gptmoss.core.plan_obligations import attach_plan_obligations
 from gptmoss.core.corpus_policy import normalize_corpus_policy
 from gptmoss.core.professional_delivery import apply_professional_profile
+from gptmoss.core.document_planning import optimize_professional_document_dag
 from gptmoss.core.delivery_package import build_delivery_package
 from gptmoss.core.delivery_coordinator import DeliveryCoordinator
 from gptmoss.core.approval_coordinator import ApprovalCoordinator
@@ -50,6 +53,7 @@ from gptmoss.core.provider_recovery import (
 )
 from gptmoss.core.scheduler import Scheduler
 from gptmoss.core.long_document_engine import LongDocumentEngine
+from gptmoss.core.document_model import DocumentSection, SectionContract
 from gptmoss.core.execution_plan import (
     ROLE_ALIASES,
     ROLE_DISPLAY_NAMES,
@@ -533,6 +537,17 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
                         if alias in normalized:
                             normalized["content"] = normalized.pop(alias)
                             break
+            if action.lower() == "replace_section":
+                if "heading_selector" not in normalized:
+                    for alias in ("heading", "section_heading", "selector"):
+                        if normalized.get(alias):
+                            normalized["heading_selector"] = normalized.pop(alias)
+                            break
+                if "content" not in normalized:
+                    for alias in ("new_text", "replacement", "text", "body"):
+                        if alias in normalized:
+                            normalized["content"] = normalized.pop(alias)
+                            break
         return normalized
 
     def _fake_dependency_packages(self, execution_id: str) -> List[str]:
@@ -696,18 +711,28 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
         issues: List[str],
     ) -> str:
         """Return the exact mutation required to repair a long writer delivery."""
-        targeted_markers = ("duplicate paragraph", "lack a local reference")
-        replacement_markers = (
-            "invalid local reference", "external link", "placeholder marker",
-            "reasoning tag",
+        targeted_markers = (
+            "arithmetic sum mismatch", "source inventory total mismatch",
+            "duplicate paragraph", "duplicate list item", "duplicate heading", "invalid local reference",
+            "heading numbering restart", "lack a local reference",
         )
-        if role_key != "writer" or not any(
+        replacement_markers = (
+            "citation-like pattern",
+            "external link", "placeholder marker", "reasoning tag",
+        )
+        section_markers = ("record section", "invalid diagram", "empty required section")
+        append_markers = (
+            "uncited required source", "cited_sources=", "local_references=",
+        )
+        if not any(
             marker in issue
             for issue in issues
             for marker in (
                 "words=", "empty required section", "lack a local reference",
                 *targeted_markers,
+                *section_markers,
                 *replacement_markers,
+                *append_markers,
             )
         ):
             return ""
@@ -717,6 +742,14 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
         target = artifacts[0]
         if any(marker in issue for issue in issues for marker in targeted_markers):
             return "filesystem__replace_paragraph"
+        if any(marker in issue for issue in issues for marker in section_markers):
+            return "filesystem__replace_section"
+        # Missing real evidence takes precedence over citation examples that
+        # happen to be wrapped in Markdown code.  Appending the missing plain
+        # bounded citation can satisfy both observations without destroying a
+        # valid document merely to remove harmless syntax examples.
+        if any(marker in issue for issue in issues for marker in append_markers):
+            return "filesystem__append"
         if any(marker in issue for issue in issues for marker in replacement_markers):
             return "filesystem__write"
         exists = self._artifact_exists(execution_id, target)
@@ -738,18 +771,83 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
         artifacts = [str(path).strip() for path in step.get("required_artifacts", []) if str(path).strip()]
         target = artifacts[0]
         if action == "filesystem__replace_paragraph":
+            if any("heading numbering restart" in str(issue).casefold() for issue in issues):
+                return (
+                    f" Do not answer with a plan. Your next response must be exactly one valid "
+                    f"{action} tool call targeting '{target}'. Copy the exact restarted Markdown "
+                    "heading selector (including its # markers) reported by the gate, set "
+                    "occurrence=1, and set content to an empty string. Remove exactly that "
+                    "appended heading line; never rewrite or delete the whole document."
+                )
+            if any("duplicate heading" in str(issue).casefold() for issue in issues):
+                return (
+                    f" Do not answer with a plan. Your next response must be exactly one valid "
+                    f"{action} tool call targeting '{target}'. Copy one exact Markdown heading "
+                    "selector (including its # markers) reported by the gate, set occurrence=2, "
+                    "and set content to an empty string. This removes only the repeated heading "
+                    "line and preserves all section body content. Change exactly one heading "
+                    "occurrence per iteration; never rewrite or delete the whole document."
+                )
             return (
                 f" Do not answer with a plan. Your next response must be exactly one valid "
                 f"{action} tool call targeting '{target}'. Use a paragraph prefix reported by "
                 "the gate. For a duplicate, remove occurrence=2 with empty content. For an "
                 "unsupported claim, replace occurrence=1 with one corrected, evidence-grounded "
-                "paragraph containing a valid nearby bounded local citation. Change exactly one "
+                "paragraph containing a valid nearby bounded local citation. For an arithmetic "
+                "or inventory-total mismatch, preserve the paragraph and replace every incorrect "
+                "total in it with the calculated value reported by the gate. For an invalid local "
+                "reference, preserve the surrounding Markdown and correct its source plus one-based "
+                "block or slide bounds from the gate. Change exactly one "
                 "paragraph per iteration; never rewrite or delete the whole document."
             )
-        if action == "filesystem__append":
-            continuity = (
-                "Preserve the existing valid content and append the next missing or underdeveloped section"
+        if action == "filesystem__replace_section":
+            if any("empty required section" in str(issue).casefold() for issue in issues):
+                return (
+                    f" Do not answer with a plan. Your next response must be exactly one valid "
+                    f"{action} tool call targeting '{target}'. Copy one exact Markdown heading "
+                    "selector reported by the gate and replace only its empty or underdeveloped "
+                    "body with 400-800 words of non-repetitive professional prose, nearby valid "
+                    "bounded local citations, and any required distinctions between fact, "
+                    "inference, and recommendation. Do not include the selected heading in "
+                    "content and do not modify any other section."
+                )
+            if any("invalid diagram" in str(issue).casefold() for issue in issues):
+                return (
+                    f" Do not answer with a plan. Your next response must be exactly one valid "
+                    f"{action} tool call targeting '{target}'. Copy the exact Markdown section "
+                    "selector reported for the invalid diagram and replace only that section body "
+                    "with one complete, syntactically valid Mermaid diagram plus concise explanatory "
+                    "prose and nearby bounded local citations. Eliminate every reported semantic "
+                    "diagram defect, including self-loops, while preserving all other sections."
+                )
+            return (
+                f" Do not answer with a plan. Your next response must be exactly one valid "
+                f"{action} tool call targeting '{target}'. Copy one exact Markdown heading "
+                "selector (including its # markers) reported by the gate and replace only that "
+                "section body with complete required fields, evidence and nearby valid bounded "
+                "local citations. Do not include the selected heading in content. Repair exactly "
+                "one record per iteration; every other record and section must remain untouched."
             )
+        chunk_size = "400-800 word"
+        if action == "filesystem__append":
+            if any(
+                marker in str(issue).casefold()
+                for issue in issues
+                for marker in ("uncited required source", "cited_sources=", "local_references=")
+            ):
+                continuity = (
+                    "Preserve the existing valid content and append exactly one short prose "
+                    "paragraph citing every currently missing source exactly once with a plain, "
+                    "one-based bounded locator from source_inventory. Do not add a heading, list, "
+                    "table, requirement matrix, or repeat existing content"
+                )
+                chunk_size = "40-120 word"
+            else:
+                continuity = (
+                    "Preserve the existing valid content and append only new non-repetitive "
+                    "prose under the current final section, without adding any Markdown heading"
+                )
+                chunk_size = "400-800 word"
         elif self._artifact_exists(execution_id, target):
             continuity = (
                 "Replace the defective document with only the first clean, complete section; "
@@ -760,9 +858,163 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
         return (
             f" Do not answer with a plan and do not send the whole document in one call. "
             f"Your next response must be exactly one valid {action} tool call targeting '{target}'. "
-            f"{continuity} in a bounded 400-800 word chunk with nearby valid local citations. "
+            f"{continuity} in a bounded {chunk_size} chunk with nearby valid local citations. "
             "Repeat with another bounded append call on later iterations until every gate passes; "
             "never create undeclared part files."
+        )
+
+    @staticmethod
+    def _document_coverage_repair_tool(issues: List[str]) -> str:
+        """Select the read-only tool required by a failed corpus coverage gate."""
+        for issue in issues:
+            normalized = str(issue or "").casefold()
+            if (
+                "read every normalized block" in normalized
+                or "prove complete document coverage" in normalized
+            ):
+                return "documents__read"
+        for issue in issues:
+            if "analyze every attached image" in str(issue or "").casefold():
+                return "documents__read_image"
+        return ""
+
+    @classmethod
+    def _document_coverage_repair_nudge(cls, issues: List[str]) -> str:
+        """Turn corpus gate failures into one bounded, executable read action."""
+        action = cls._document_coverage_repair_tool(issues)
+        if not action:
+            return ""
+        if action == "documents__read":
+            issue = next(
+                (
+                    str(item) for item in issues
+                    if "read every normalized block" in str(item).casefold()
+                ),
+                "",
+            )
+            filename_match = re.search(
+                r"read every normalized block of (.+?);", issue,
+                flags=re.IGNORECASE,
+            )
+            block_match = re.search(
+                r"missing 1-based block\(s\):\s*(\d+)", issue,
+                flags=re.IGNORECASE,
+            )
+            target = filename_match.group(1).strip() if filename_match else "the first incomplete attachment"
+            start_block = max(0, int(block_match.group(1)) - 1) if block_match else 0
+            return (
+                " Do not describe or simulate the read. Your next response must be exactly one valid "
+                f"{action} tool call for '{target}', with start_block={start_block} and a bounded "
+                "block_count no greater than 200. Use the real tool result as evidence; prose that merely "
+                "claims blocks were read does not satisfy the gate."
+            )
+        issue = next(
+            (
+                str(item) for item in issues
+                if "analyze every attached image" in str(item).casefold()
+            ),
+            "",
+        )
+        missing_match = re.search(r"missing:\s*([^,;]+)", issue, flags=re.IGNORECASE)
+        target = missing_match.group(1).strip() if missing_match else "the first missing image"
+        return (
+            " Do not describe or simulate visual inspection. Your next response must be exactly one valid "
+            f"{action} tool call for '{target}'. Use the injected image on the following model turn; prose "
+            "that merely claims the image was analyzed does not satisfy the gate."
+        )
+
+    def _required_artifact_initialization_tool(
+        self,
+        execution_id: str,
+        step: Dict[str, Any],
+        issues: List[str],
+    ) -> str:
+        """Require a bounded first write when an owned text artifact is absent."""
+        if not any(
+            "create non-empty required artifacts" in str(issue or "").casefold()
+            for issue in issues
+        ):
+            return ""
+        textual_suffixes = {
+            ".css", ".csv", ".html", ".ini", ".js", ".json", ".jsonl",
+            ".jsx", ".md", ".py", ".pyi", ".sh", ".toml", ".ts", ".tsx",
+            ".txt", ".xml", ".yaml", ".yml",
+        }
+        return "filesystem__write" if any(
+            not self._artifact_exists(execution_id, path)
+            and Path(str(path)).suffix.casefold() in textual_suffixes
+            for path in step.get("required_artifacts", [])
+        ) else ""
+
+    def _required_artifact_initialization_nudge(
+        self,
+        execution_id: str,
+        step: Dict[str, Any],
+        issues: List[str],
+    ) -> str:
+        """Constrain first artifact creation so prompt-fallback JSON stays complete."""
+        action = self._required_artifact_initialization_tool(
+            execution_id, step, issues,
+        )
+        if not action:
+            return ""
+        target = next(
+            str(path) for path in step.get("required_artifacts", [])
+            if not self._artifact_exists(execution_id, str(path))
+            and Path(str(path)).suffix.casefold() in {
+                ".css", ".csv", ".html", ".ini", ".js", ".json", ".jsonl",
+                ".jsx", ".md", ".py", ".pyi", ".sh", ".toml", ".ts", ".tsx",
+                ".txt", ".xml", ".yaml", ".yml",
+            }
+        )
+        prose_suffixes = {".html", ".md", ".txt"}
+        bounded_content = (
+            "Write one self-contained 300-500 word first section with the required nearby evidence references"
+            if Path(target).suffix.casefold() in prose_suffixes
+            else "Write one small, syntactically complete initial unit no larger than 4,000 characters"
+        )
+        return (
+            " Do not answer with a plan and do not serialize the entire artifact in one response. "
+            f"Your next response must be exactly one valid {action} tool call targeting '{target}'. "
+            f"{bounded_content}. Later turns can append further bounded sections after the first call succeeds."
+        )
+
+    def _quality_repair_directive(
+        self,
+        execution_id: str,
+        role_key: str,
+        step: Dict[str, Any],
+        issues: List[str],
+    ) -> tuple[str, str]:
+        """Choose one safe repair, always gathering missing evidence before mutation."""
+        refresh_issue = next((
+            str(issue) for issue in issues
+            if str(issue).startswith("reread refreshed artifact before accepting dependent conclusions: ")
+        ), "")
+        if refresh_issue:
+            target = refresh_issue.split(": ", 1)[1].strip()
+            return (
+                "filesystem__read",
+                " Do not claim completion yet. Your next response must be exactly one valid "
+                f"filesystem__read tool call targeting '{target}' with offset=0 and limit=12000. "
+                "Use the current durable artifact to refresh the dependent conclusions; do not "
+                "substitute list_dir, an old handoff summary, or an Internet source.",
+            )
+        coverage_tool = self._document_coverage_repair_tool(issues)
+        if coverage_tool:
+            return coverage_tool, self._document_coverage_repair_nudge(issues)
+        artifact_tool = self._writer_incremental_repair_tool(
+            execution_id, role_key, step, issues,
+        )
+        if artifact_tool:
+            return artifact_tool, self._writer_incremental_repair_nudge(
+                execution_id, role_key, step, issues,
+            )
+        initialization_tool = self._required_artifact_initialization_tool(
+            execution_id, step, issues,
+        )
+        return initialization_tool, self._required_artifact_initialization_nudge(
+            execution_id, step, issues,
         )
 
     @staticmethod
@@ -775,6 +1027,19 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
         return [
             schema for schema in schemas
             if schema.get("function", {}).get("name") == required_tool
+        ]
+
+    @staticmethod
+    def _schemas_for_inherited_document_coverage(
+        schemas: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Hide redundant bulk reads while retaining targeted document search."""
+        redundant = {
+            "documents__inventory", "documents__read", "documents__read_chunk",
+        }
+        return [
+            schema for schema in schemas
+            if schema.get("function", {}).get("name") not in redundant
         ]
 
     @staticmethod
@@ -824,6 +1089,42 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
         issues.extend(self._document_coverage_issues(execution_id, step))
         issues.extend(self._step_artifact_validation_issues(execution_id, step))
 
+        delegated = execution_state.variables.get("delegated_step")
+        retry_context = str(
+            delegated.get("retry_context") if isinstance(delegated, dict) else ""
+        )
+        if retry_context.startswith(
+            "A completed upstream artifact was reopened by stronger deterministic quality gates."
+        ):
+            required_refreshes = [
+                str(path).replace("\\", "/")
+                for path in delegated.get("refresh_required_artifacts", [])
+                if str(path).strip() and self._artifact_exists(execution_id, str(path))
+            ]
+            conversation = self.state_engine.get_conversation(execution_id)
+            successful_tool_ids = {
+                str(message.get("tool_call_id") or "")
+                for message in conversation.messages
+                if message.get("role") == "tool"
+                and not str(message.get("content") or "").lstrip().startswith("Error:")
+            }
+            refreshed_paths = set()
+            for message in conversation.messages:
+                for call in message.get("tool_calls") or []:
+                    function = call.get("function", {})
+                    if (
+                        str(call.get("id") or "") in successful_tool_ids
+                        and function.get("name") == "filesystem__read"
+                    ):
+                        refreshed_paths.add(
+                            str(function.get("arguments", {}).get("path") or "").replace("\\", "/")
+                        )
+            for path in dict.fromkeys(required_refreshes):
+                if path not in refreshed_paths:
+                    issues.append(
+                        "reread refreshed artifact before accepting dependent conclusions: " + path
+                    )
+
         if role_key in {"qa", "debugger", "coordinator"}:
             fake_packages = self._fake_dependency_packages(execution_id)
             if fake_packages:
@@ -861,7 +1162,7 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
                 (
                     item.get("capability") == "filesystem"
                     and item.get("action") in {
-                        "write", "append", "replace_paragraph", "delete",
+                        "write", "append", "replace_paragraph", "replace_section", "delete",
                     }
                     and "Error" not in str(item.get("result") or "")
                 )
@@ -1025,31 +1326,101 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
         except ValueError as exc:
             logger.warning("Recreating corrupt document checkpoint for %s: %s", execution_id, exc)
             model = None
+        primary = str(plan.get("primary_artifact") or "deliverable.md")
+        headings: list[str] = []
+        primary_minimum_words = 0
+        for artifact_policy in plan.get("artifact_validations", []):
+            if artifact_policy.get("path") != primary:
+                continue
+            constraints = artifact_policy.get("constraints", {})
+            headings = [str(item) for item in constraints.get("required_headings", [])]
+            minimums = constraints.get("minimums") or {}
+            if isinstance(minimums, dict):
+                try:
+                    primary_minimum_words = max(0, int(minimums.get("words") or 0))
+                except (TypeError, ValueError):
+                    primary_minimum_words = 0
+            break
         if model is None:
-            primary = str(plan.get("primary_artifact") or "deliverable.md")
             output_path = (workspace_path / primary).resolve()
             if output_path == workspace_path or workspace_path not in output_path.parents:
                 logger.warning("Unsafe primary document path %r; using deliverable.md", primary)
                 primary = "deliverable.md"
                 output_path = workspace_path / primary
             model = engine.create_model(execution_id, task, str(output_path), plan.get("requirements", []))
-            headings: list[str] = []
-            for policy in plan.get("artifact_validations", []):
-                if policy.get("path") == primary:
-                    headings = [str(item) for item in policy.get("constraints", {}).get("required_headings", [])]
-                    break
             if not headings:
                 headings = [
                     str(step.get("specialist") or f"Section {index}")
                     for index, step in enumerate(plan.get("steps", []), 1)
                     if step.get("role") in {"architect", "security", "writer"}
                 ]
+            selected_headings = headings or ["Executive Summary", "Architecture", "Conclusion"]
+            target_words = max(
+                self.document_target_section_words,
+                math.ceil(primary_minimum_words / max(1, len(selected_headings))),
+            )
             engine.plan_sections(
                 model,
-                headings or ["Executive Summary", "Architecture", "Conclusion"],
+                selected_headings,
                 requirements=plan.get("requirements", []),
-                target_words=self.document_target_section_words,
+                target_words=target_words,
             )
+        else:
+            # A resume must inherit stricter policies introduced after the
+            # checkpoint was first created. Preserve written content while
+            # increasing section contracts and refreshing requirements.
+            model.requirements = [dict(item) for item in plan.get("requirements", [])]
+            if headings and not any(section.content for section in model.sections):
+                target_words = max(
+                    self.document_target_section_words,
+                    math.ceil(primary_minimum_words / max(1, len(headings))),
+                )
+                engine.plan_sections(
+                    model,
+                    headings,
+                    requirements=model.requirements,
+                    target_words=target_words,
+                )
+            elif headings:
+                folded_existing = {
+                    section.contract.heading.casefold() for section in model.sections
+                }
+                for heading in headings:
+                    if heading.casefold() in folded_existing:
+                        continue
+                    section_number = len(model.sections) + 1
+                    model.sections.append(DocumentSection(contract=SectionContract(
+                        section_id=f"SEC-{section_number:03d}",
+                        heading=heading,
+                        purpose=f"Explain {heading} with source-grounded facts, decisions and consequences.",
+                        target_words=self.document_target_section_words,
+                        required_topics=[heading],
+                        dependencies=[f"SEC-{section_number - 1:03d}"] if section_number > 1 else [],
+                    )))
+                    folded_existing.add(heading.casefold())
+            section_count = max(1, len(model.sections))
+            target_words = max(
+                self.document_target_section_words,
+                math.ceil(primary_minimum_words / section_count),
+            )
+            for section in model.sections:
+                section.contract.target_words = max(
+                    int(section.contract.target_words or 0), target_words
+                )
+            assigned_ids = {
+                identifier
+                for section in model.sections
+                for identifier in section.contract.requirement_ids
+            }
+            missing_ids = [
+                str(item.get("id")) for item in model.requirements
+                if item.get("id") and str(item.get("id")) not in assigned_ids
+            ]
+            for index, identifier in enumerate(missing_ids):
+                if model.sections:
+                    model.sections[index % len(model.sections)].contract.requirement_ids.append(identifier)
+            model.revision += 1
+            engine.store.save(model)
         state.variables["document_model_checkpoint"] = str(
             Path(".gptmoss") / "document-state" / engine.store.path_for(execution_id).name
         ).replace("\\", "/")
@@ -1320,6 +1691,7 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
                 self.artifact_store,
                 state.variables.get("attachment_ids", []),
             )
+            plan_result = optimize_professional_document_dag(plan_result)
             plan_result["corpus_policy"] = dict(
                 state.variables.get("corpus_policy") or {}
             )
@@ -1355,23 +1727,51 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
             ))
 
         state.current_plan = normalize_plan(state.current_plan)
-        if "document_model_checkpoint" not in state.variables:
-            self._initialize_document_state(execution_id, task, state.current_plan, state)
-        if not isinstance(state.variables.get("delivery_contract"), dict):
-            state.variables["delivery_contract"] = build_delivery_contract(
-                state.current_plan, task,
-                repair_obligations=not bool(state.variables.get("parent_execution_id")),
+        # Reapply the deterministic profile on resume so persisted plans gain
+        # newly introduced quality gates without requiring replanning or losing
+        # completed work. The operation is idempotent and preserves stricter
+        # planner/user constraints.
+        state.current_plan = apply_professional_profile(
+            state.current_plan,
+            self.artifact_store,
+            state.variables.get("attachment_ids", []),
+        )
+        state.current_plan = optimize_professional_document_dag(state.current_plan)
+        self._initialize_document_state(execution_id, task, state.current_plan, state)
+        # Rebuild after deterministic profile upgrades. A persisted contract
+        # must never keep weaker validations or stale requirement ownership.
+        state.variables["delivery_contract"] = build_delivery_contract(
+            state.current_plan, task,
+            repair_obligations=not bool(state.variables.get("parent_execution_id")),
+        )
+        if not state.variables.get("parent_execution_id"):
+            reopened = self._reopen_invalid_completed_steps(
+                execution_id,
+                state,
+                state.current_plan.get("steps", []),
             )
+            if reopened:
+                self.telemetry.record(
+                    "persisted_steps_reopened", execution_id,
+                    step_ids=[step.get("id") for step in reopened],
+                )
         delivery_contract = state.variables["delivery_contract"]
         scope_changes = delivery_contract.get("scope_changes", [])
         approved_contract = state.variables.get("approved_scope_contract_sha256")
+        scope_changes_sha256 = delivery_contract.get("scope_changes_sha256")
+        approved_scope = state.variables.get("approved_scope_changes_sha256")
+        scope_is_approved = bool(
+            (scope_changes_sha256 and approved_scope == scope_changes_sha256)
+            or approved_contract == delivery_contract.get("contract_sha256")
+        )
         if (not state.variables.get("parent_execution_id") and scope_changes
-                and approved_contract != delivery_contract.get("contract_sha256")):
+                and not scope_is_approved):
             self.state_engine.transition_execution(
                 state, "paused", reason="scope approval required", actor="runtime"
             )
             state.variables["pending_scope_approval"] = {
                 "contract_sha256": delivery_contract.get("contract_sha256"),
+                "scope_changes_sha256": scope_changes_sha256,
                 "changes": scope_changes,
             }
             self.state_engine.save_to_disk()
@@ -1380,6 +1780,7 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
                 payload={
                     "execution_id": execution_id,
                     "contract_sha256": delivery_contract.get("contract_sha256"),
+                    "scope_changes_sha256": scope_changes_sha256,
                     "changes": scope_changes,
                 },
             ))
@@ -1534,19 +1935,45 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
                             },
                         ))
                         break
+                    workspace = self._delivery_workspace(execution_id)
+                    package = None
+                    delivery_plan = state.current_plan or {}
+                    try:
+                        if workspace:
+                            package = build_delivery_package(
+                                workspace, execution_id, delivery_plan,
+                                assurance_report,
+                                diagram_rendering=self.diagram_rendering,
+                                docx_embed_diagrams=self.docx_embed_diagrams,
+                            )
+                    except (OSError, TypeError, ValueError) as error:
+                        self.state_engine.transition_execution(
+                            state, "failed", reason="delivery packaging failed", actor="runtime"
+                        )
+                        state.results["error"] = f"Delivery packaging failed: {error}"
+                        await self.event_bus.publish(Event(
+                            type="ExecutionFailed",
+                            payload={"execution_id": execution_id, "error": state.results["error"]},
+                        ))
+                        break
+                    if delivery_plan.get("delivery_profile") == "professional-local" and not package:
+                        self.state_engine.transition_execution(
+                            state, "failed", reason="professional package missing", actor="runtime"
+                        )
+                        state.results["error"] = (
+                            "Professional delivery passed assurance but its DOCX/manifest/ZIP package "
+                            "could not be created."
+                        )
+                        await self.event_bus.publish(Event(
+                            type="ExecutionFailed",
+                            payload={"execution_id": execution_id, "error": state.results["error"]},
+                        ))
+                        break
+                    if package:
+                        state.results["delivery_package"] = package
                     self.state_engine.transition_execution(
                         state, "completed", reason="delivery completed", actor="runtime"
                     )
-                    workspace = self._delivery_workspace(execution_id)
-                    if workspace:
-                        package = build_delivery_package(
-                            workspace, execution_id, state.current_plan,
-                            assurance_report,
-                            diagram_rendering=self.diagram_rendering,
-                            docx_embed_diagrams=self.docx_embed_diagrams,
-                        )
-                        if package:
-                            state.results["delivery_package"] = package
                     state.results["deliveries"] = [
                         state.results.get("steps", {}).get(str(step.get("id"))) for step in steps
                     ]
@@ -1705,7 +2132,9 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
                 if step.get("retry_context"):
                     sub_task += (
                         "\n\nAUTONOMOUS RETRY: A previous specialist attempt did not satisfy its delivery gates. "
-                        "Inspect and reuse any valid partial artifacts, correct the root cause, and complete the assignment. "
+                        "Reuse every valid partial artifact and correct the root cause. When the machine defects "
+                        "already provide an exact selector, act on that selector before any broad inspection; "
+                        "never reread the complete artifact merely to rediscover a reported defect. "
                         + str(step["retry_context"])
                     )
                 if dependency_results:
@@ -1746,10 +2175,26 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
                         *step.get("autonomous_skill_names", []),
                     ] if isinstance(item, str)
                 })
-                sub_exec.variables["delegated_step"] = {
+                delegated_payload = {
                     key: value for key, value in step.items()
                     if key not in {"id", "dependencies", "status", "assigned_execution_id", "delivery", "result", "error"}
                 }
+                if str(step.get("retry_context") or "").startswith(
+                    "A completed upstream artifact was reopened by stronger deterministic quality gates."
+                ):
+                    refresh_artifacts = list(step.get("required_artifacts", []))
+                    for dependency_id in step.get("dependencies", []):
+                        dependency_step = next(
+                            item for item in steps if item.get("id") == dependency_id
+                        )
+                        refresh_artifacts.extend(
+                            dependency_step.get("required_artifacts", [])
+                        )
+                    delegated_payload["refresh_required_artifacts"] = list(dict.fromkeys(
+                        str(path).replace("\\", "/")
+                        for path in refresh_artifacts if str(path).strip()
+                    ))
+                sub_exec.variables["delegated_step"] = delegated_payload
                 sub_exec.variables["attachment_ids"] = partition_attachment_ids(
                     state.variables.get("attachment_ids", []),
                     step.get("source_partition"),
@@ -2061,7 +2506,7 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
                     if (
                         item.get("capability") == "filesystem"
                         and item.get("action") in {
-                            "write", "append", "replace_paragraph", "delete",
+                            "write", "append", "replace_paragraph", "replace_section", "delete",
                         }
                         and "Error" not in str(item.get("result") or "")
                     )
@@ -2277,6 +2722,9 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
         allowed_capabilities = self._allowed_capabilities(skills)
         
         step_desc = step.get("description", "")
+        inherited_document_coverage = self._inherits_complete_document_coverage(
+            execution_id, step,
+        )
         prerequisite_outputs = state.variables.get("dependency_results") or []
         if not prerequisite_outputs and state.current_plan:
             if role_for_step == "coordinator":
@@ -2303,6 +2751,14 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
             reuse_instruction = ""
             if prerequisite_outputs:
                 reuse_instruction = " Reuse the validated prerequisite outputs supplied in the task; do not repeat their work."
+            if inherited_document_coverage:
+                reuse_instruction += (
+                    " Machine-verified complete document coverage was inherited from the exact prior "
+                    "assignment. Do not inventory or reread the corpus; preserve the existing artifact, "
+                    "and apply only machine-reported repairs. If a defect includes an exact paragraph or "
+                    "Markdown heading selector, mutate it directly without reading the whole artifact; "
+                    "otherwise use one bounded filesystem.read window only around the necessary location."
+                )
             convo.messages.append({"role": "system", "content": f"Current Step objectives: {step_desc}.{reuse_instruction} Generate thought and select tools if needed.", "timestamp": time.time()})
 
         runtime_key = str(step.get("id"))
@@ -2364,12 +2820,25 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
                     if requested_nudge_level > delivered_nudge_level:
                         runtime["stagnation_nudge_level"] = requested_nudge_level
                         if requested_nudge_level == 1:
-                            guidance = (
-                                "STAGNATION WARNING: repeated inspection has produced no durable quality improvement. "
-                                "Stop rereading or rerunning the same failing command. Use the latest concrete failure to "
-                                "perform the smallest requirement-preserving source correction now, preferably with "
-                                "filesystem.write, then run one targeted verification. Do not modify or weaken QA tests."
+                            coverage_issues = self._document_coverage_issues(
+                                execution_id, step,
                             )
+                            coverage_nudge = self._document_coverage_repair_nudge(
+                                coverage_issues,
+                            )
+                            if coverage_nudge:
+                                guidance = (
+                                    "STAGNATION WARNING: repeated inspection has produced no new durable corpus "
+                                    "coverage. Stop promising or narrating reads and perform the next missing bounded "
+                                    "document action now." + coverage_nudge
+                                )
+                            else:
+                                guidance = (
+                                    "STAGNATION WARNING: repeated inspection has produced no durable quality improvement. "
+                                    "Stop rereading or rerunning the same failing command. Use the latest concrete failure to "
+                                    "perform the smallest requirement-preserving source correction now, preferably with "
+                                    "filesystem.write, then run one targeted verification. Do not modify or weaken QA tests."
+                                )
                         else:
                             guidance = (
                                 "STAGNATION CRITICAL: no durable correction followed the previous warning. Either make "
@@ -2483,6 +2952,8 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
                     )
                 ),
             )
+            if inherited_document_coverage:
+                schemas = self._schemas_for_inherited_document_coverage(schemas)
             required_next_tool = str(runtime.get("required_next_tool") or "")
             if required_next_tool:
                 constrained_schemas = self._schemas_for_required_tool(
@@ -2648,10 +3119,12 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
                     "For long documents, work section-by-section from the declared section contracts: meet each target "
                     "word count, cite bounded local evidence near factual claims, preserve terminology and requirement IDs, "
                     "and avoid repeating prerequisite sections. Treat the checkpoint and previous-section memory as the "
-                    "canonical source of continuity. Build an oversized owned artifact with one filesystem.write call for "
+                    "canonical source of continuity. Build a large owned artifact incrementally, using one filesystem.write call for "
                     "its first bounded section followed by filesystem.append calls for later sections; do not create undeclared "
                     "temporary part files. When a quality gate reports the normalized prefix of one duplicate or unsupported "
                     "paragraph, repair only that occurrence with filesystem.replace_paragraph instead of rebuilding the artifact. "
+                    "When a gate reports a defective named record section, repair only its body with "
+                    "filesystem.replace_section using the exact reported Markdown heading selector. "
                     "Never invent a source, citation locator, diagram, metric, or validation result."
                 )
             else:
@@ -2676,6 +3149,12 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
                 "delivery response. Do not invoke repository-only validator scripts or fabricate constraints/report inputs. "
                 "Create and read back only your owned artifacts, then return the structured response to trigger validation; "
                 "if the engine rejects it, repair the reported violations and retry."
+                " Write bounded local evidence citations as plain Markdown text such as "
+                "[source.ext > Section > blocks 1-3], never inside inline-code backticks or code fences. "
+                "Citation bounds are strictly one-based and inclusive even though documents.read "
+                "start_block and returned block.order values are zero-based. Use only `blocks N-M` "
+                "for documents or `slide N`/`slides N-M` for presentations; never use `sections`, "
+                "zero bounds, raw tool offsets, or a range outside source_inventory."
                 f"\nLong-document checkpoint: {json.dumps(state.variables.get('document_model_checkpoint', ''), ensure_ascii=False)}."
                 f"\nSection progress: {json.dumps(state.variables.get('document_sections', []), ensure_ascii=False)}."
                 f"\nDocument continuity memory: {state.variables.get('document_memory', 'none')}."
@@ -2822,7 +3301,7 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
             if not tool_calls:
                 response_text = llm_response.get("content") or ""
                 if re.search(
-                    r"(?:<tool_code\b|\"?tool_call\"?\s*:|\"?name\"?\s*:\s*\"?(?:filesystem|shell|agent|devteam)__)",
+                    r"(?:<tool_code\b|\"?tool_call\"?\s*:|\"?name\"?\s*:\s*\"?(?:filesystem|documents|shell|agent|devteam)__)",
                     response_text,
                     flags=re.IGNORECASE,
                 ):
@@ -2840,14 +3319,14 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
                     malformed_issues = self._step_completion_issues(
                         execution_id, step, response_text,
                     )
-                    required_repair_tool = self._writer_incremental_repair_tool(
-                        execution_id, role_for_step, step, malformed_issues,
-                    )
-                    repair_nudge = self._writer_incremental_repair_nudge(
+                    required_repair_tool, repair_nudge = self._quality_repair_directive(
                         execution_id, role_for_step, step, malformed_issues,
                     )
                     if required_repair_tool:
                         runtime["required_next_tool"] = required_repair_tool
+                        runtime["required_repair_issues"] = [
+                            str(item) for item in malformed_issues if str(item).strip()
+                        ]
                     convo.messages.append({
                         "role": "system",
                         "content": (
@@ -2867,14 +3346,14 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
                 if completion_issues:
                     if self._can_engine_finalize(execution_id, step):
                         return self._engine_delivery(execution_id, step)
-                    repair_nudge = self._writer_incremental_repair_nudge(
-                        execution_id, role_for_step, step, completion_issues,
-                    )
-                    required_repair_tool = self._writer_incremental_repair_tool(
+                    required_repair_tool, repair_nudge = self._quality_repair_directive(
                         execution_id, role_for_step, step, completion_issues,
                     )
                     if required_repair_tool:
                         runtime["required_next_tool"] = required_repair_tool
+                        runtime["required_repair_issues"] = [
+                            str(item) for item in completion_issues if str(item).strip()
+                        ]
                     convo.messages.append({
                         "role": "system",
                         "content": (
@@ -2904,10 +3383,57 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
             )
             if pause_result is not None:
                 return pause_result
-            if required_next_tool and self._required_tool_succeeded(
-                convo.messages, tool_calls, required_next_tool,
+            effective_required_tool = (
+                required_next_tool or self._active_required_repair_tool(state)
+            )
+            if effective_required_tool and self._required_tool_succeeded(
+                convo.messages, tool_calls, effective_required_tool,
             ):
+                validation_probe = json.dumps({
+                    "summary": "automatic post-mutation validation",
+                    "artifacts": list(step.get("required_artifacts", [])),
+                    "evidence": ["deterministic artifact validation"],
+                    "risks": [],
+                    "next_action": "",
+                })
+                post_mutation_issues = self._step_completion_issues(
+                    execution_id, step, validation_probe,
+                )
+                if post_mutation_issues:
+                    next_repair_tool, next_repair_nudge = self._quality_repair_directive(
+                        execution_id, role_for_step, step, post_mutation_issues,
+                    )
+                    if next_repair_tool:
+                        runtime["required_next_tool"] = next_repair_tool
+                        runtime["required_repair_issues"] = [
+                            str(item) for item in post_mutation_issues if str(item).strip()
+                        ]
+                    else:
+                        runtime.pop("required_next_tool", None)
+                        runtime.pop("required_repair_issues", None)
+                    convo.messages.append({
+                        "role": "system",
+                        "content": (
+                            "The required mutation succeeded and deterministic gates were "
+                            "re-run immediately. Do not inspect or modify any unrelated content. "
+                            "Remaining defects: " + "; ".join(post_mutation_issues) + "."
+                            + next_repair_nudge
+                        ),
+                        "timestamp": time.time(),
+                    })
+                    continue
                 runtime.pop("required_next_tool", None)
+                runtime.pop("required_repair_issues", None)
+                convo.messages.append({
+                    "role": "system",
+                    "content": (
+                        "The required mutation succeeded and all machine-checkable delivery "
+                        "gates now pass. Stop calling tools and return only the compact raw JSON "
+                        "delivery contract immediately."
+                    ),
+                    "timestamp": time.time(),
+                })
+                continue
 
             tool_history = state.variables.get("tool_call_history", [])
             if (self._missing_artifacts(execution_id, step) and len(tool_history) >= 8
@@ -3076,7 +3602,52 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
         step_id = str(steps[index].get("id", index))
         runtimes = state.variables.get("step_runtime")
         runtime = runtimes.get(step_id) if isinstance(runtimes, dict) else None
-        return str(runtime.get("required_next_tool") or "") if isinstance(runtime, dict) else ""
+        required = (
+            str(runtime.get("required_next_tool") or "")
+            if isinstance(runtime, dict) else ""
+        )
+        if required:
+            return required
+        delegated = state.variables.get("delegated_step")
+        retry_context = (
+            str(delegated.get("retry_context") or "")
+            if isinstance(delegated, dict) else ""
+        )
+        if not retry_context:
+            return ""
+        # The parent builds retry_context exclusively from the preceding
+        # machine gate. A fresh child may therefore inspect first, then use
+        # the exact repair that gate authorized without weakening normal
+        # overwrite protection.
+        return str(classify_issue_texts([retry_context]).required_tool or "")
+
+    @staticmethod
+    def _active_required_repair_issues(state) -> List[str]:
+        """Return machine gate issues authorizing the active targeted repair."""
+        plan = state.current_plan if isinstance(state.current_plan, dict) else {}
+        steps = plan.get("steps") if isinstance(plan.get("steps"), list) else []
+        index = int(state.current_step or 0)
+        if index < 0 or index >= len(steps) or not isinstance(steps[index], dict):
+            return []
+        step_id = str(steps[index].get("id", index))
+        runtimes = state.variables.get("step_runtime")
+        runtime = runtimes.get(step_id) if isinstance(runtimes, dict) else None
+        issues = (
+            [
+                str(item) for item in runtime.get("required_repair_issues", [])
+                if str(item).strip()
+            ]
+            if isinstance(runtime, dict) else []
+        )
+        if issues:
+            return issues
+        delegated = state.variables.get("delegated_step")
+        retry_context = (
+            str(delegated.get("retry_context") or "")
+            if isinstance(delegated, dict) else ""
+        )
+        target = classify_issue_texts([retry_context]) if retry_context else None
+        return [retry_context] if target and target.required_tool else []
 
     @staticmethod
     def _shell_requests_deletion(command: str) -> bool:
@@ -3092,7 +3663,7 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
         if state.status == "cancelled":
             raise asyncio.CancelledError()
         is_mutation = capability.lower() == "filesystem" and action.lower() in {
-            "write", "append", "replace_paragraph", "delete",
+            "write", "append", "replace_paragraph", "replace_section", "delete",
         }
         path = str(arguments.get("path") or "")
         if is_mutation and not path.strip():
@@ -3143,18 +3714,201 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
             )
         role = str(state.variables.get("role_key") or "coordinator").lower()
         required_repair_tool = self._active_required_repair_tool(state)
-        normalized_path = self._normalized_workspace_path(path)
-        overwrites_existing_document = (
-            role == "writer"
+        required_repair_issues = self._active_required_repair_issues(state)
+        if (
+            required_repair_tool == "filesystem__append"
             and capability.lower() == "filesystem"
+            and action.lower() == "append"
+            and any("words=" in str(issue).casefold() for issue in required_repair_issues)
+        ):
+            append_content = str(arguments.get("content") or "")
+            appended_headings = [
+                line.strip() for line in append_content.splitlines()
+                if re.match(r"^\s*#{1,6}\s+\S", line)
+            ]
+            if appended_headings:
+                self.telemetry.record(
+                    "unsafe_word_count_heading_append_blocked", execution_id,
+                    headings=appended_headings[:10],
+                )
+                return (
+                    "Error: Word-count repair must extend existing content without adding "
+                    "Markdown headings. Fill an empty named section with "
+                    "filesystem.replace_section, or append only new non-repetitive prose "
+                    "under the current final section."
+                )
+        if (
+            required_repair_tool == "filesystem__append"
+            and capability.lower() == "filesystem"
+            and action.lower() == "append"
+            and any(
+                "uncited required source" in str(issue).casefold()
+                for issue in required_repair_issues
+            )
+        ):
+            append_content = str(arguments.get("content") or "").strip()
+            append_words = re.findall(r"[^\W_]+(?:[-'][^\W_]+)*", append_content)
+            contains_structure = any(
+                re.match(r"^\s*(?:#{1,6}\s|\||[-*+]\s+)", line)
+                for line in append_content.splitlines()
+                if line.strip()
+            )
+            if not append_content or len(append_words) > 180 or contains_structure:
+                self.telemetry.record(
+                    "unsafe_source_coverage_append_blocked", execution_id,
+                    words=len(append_words), contains_structure=contains_structure,
+                )
+                return (
+                    "Error: Source-coverage append must be one concise prose paragraph of at "
+                    "most 180 words, without headings, lists, or tables. Cite only the missing "
+                    "sources with valid bounded locators and do not repeat existing sections."
+                )
+        if (
+            required_repair_tool == "filesystem__replace_paragraph"
+            and capability.lower() == "filesystem"
+            and action.lower() == "replace_paragraph"
+            and required_repair_issues
+        ):
+            duplicate_heading_repair = any(
+                "duplicate heading" in str(issue).casefold()
+                for issue in required_repair_issues
+            )
+            if duplicate_heading_repair:
+                selector = str(arguments.get("paragraph_prefix") or "").strip()
+                try:
+                    occurrence = int(arguments.get("occurrence", 1))
+                except (TypeError, ValueError):
+                    occurrence = 0
+                if (
+                    not re.match(r"^#{1,6}\s+\S", selector)
+                    or occurrence != 2
+                    or str(arguments.get("content") or "").strip()
+                ):
+                    self.telemetry.record(
+                        "unsafe_duplicate_heading_repair_blocked", execution_id,
+                        paragraph_prefix=selector[:180], occurrence=occurrence,
+                    )
+                    return (
+                        "Error: Duplicate-heading repair must copy one reported Markdown "
+                        "heading selector, set occurrence=2, and use empty content. This "
+                        "preserves the duplicate section body under the first heading."
+                    )
+            def repair_prefix_key(value: Any) -> str:
+                decomposed = unicodedata.normalize("NFKD", str(value or ""))
+                folded = "".join(
+                    character for character in decomposed
+                    if not unicodedata.combining(character)
+                ).casefold()
+                return " ".join(re.findall(r"[^\W_]+", folded, flags=re.UNICODE))
+
+            supplied_prefix = repair_prefix_key(arguments.get("paragraph_prefix"))
+            normalized_issues = repair_prefix_key(" ".join(required_repair_issues))
+            reported_prefix = supplied_prefix[:100]
+            prefix_is_reported = bool(
+                supplied_prefix
+                and (
+                    supplied_prefix in normalized_issues
+                    or (
+                        len(supplied_prefix) > len(reported_prefix)
+                        and reported_prefix in normalized_issues
+                    )
+                )
+            )
+            if not prefix_is_reported:
+                self.telemetry.record(
+                    "unreported_document_repair_blocked", execution_id,
+                    paragraph_prefix=str(arguments.get("paragraph_prefix") or "")[:180],
+                )
+                return (
+                    "Error: Targeted repair blocked because paragraph_prefix was not reported "
+                    "by the active machine quality gate. Use one exact paragraph prefix from "
+                    "the latest gate failure and change only that passage."
+                )
+        if (
+            required_repair_tool == "filesystem__replace_section"
+            and capability.lower() == "filesystem"
+            and action.lower() == "replace_section"
+            and required_repair_issues
+        ):
+            supplied_heading = " ".join(
+                str(arguments.get("heading_selector") or "").casefold().split()
+            )
+            normalized_issues = " ".join(
+                " ".join(issue.casefold().split()) for issue in required_repair_issues
+            )
+            empty_section_issues = [
+                str(issue) for issue in required_repair_issues
+                if "empty required section" in str(issue).casefold()
+            ]
+            allowed_empty_headings = set()
+            for issue in empty_section_issues:
+                if "exact Markdown heading selector(s):" not in issue:
+                    continue
+                selector_text = issue.split(
+                    "exact Markdown heading selector(s):", 1
+                )[1]
+                allowed_empty_headings.update(
+                    " ".join(match.casefold().split())
+                    for match in re.findall(r"#{1,6}\s+[^;\r\n]+", selector_text)
+                )
+            unreported_heading = not supplied_heading or supplied_heading not in normalized_issues
+            wrong_empty_heading = bool(
+                allowed_empty_headings and supplied_heading not in allowed_empty_headings
+            )
+            if unreported_heading or wrong_empty_heading:
+                self.telemetry.record(
+                    "unreported_document_section_repair_blocked", execution_id,
+                    heading_selector=str(arguments.get("heading_selector") or "")[:180],
+                )
+                return (
+                    "Error: Section repair blocked because heading_selector was not reported "
+                    "for this defect by the active machine quality gate. Copy one exact "
+                    "Markdown heading selector from the latest gate failure; when filling "
+                    "an empty required section, use only a selector listed after "
+                    "'exact Markdown heading selector(s)'."
+                )
+        normalized_path = self._normalized_workspace_path(path)
+        gate_authorized_rewrite_shrinks_document = False
+        if (
+            capability.lower() == "filesystem"
+            and action.lower() == "write"
+            and normalized_path in protected_document_artifacts
+            and self._artifact_exists(execution_id, path)
+            and required_repair_tool == "filesystem__write"
+        ):
+            filesystem = self.get_capability("filesystem")
+            try:
+                resolved = filesystem._resolve_path(path, execution_id)
+                existing_length = len(Path(resolved).read_text(encoding="utf-8"))
+            except (AttributeError, OSError, UnicodeError, ValueError):
+                existing_length = 0
+            replacement_length = len(str(arguments.get("content") or ""))
+            gate_authorized_rewrite_shrinks_document = bool(
+                existing_length >= 2_000
+                and replacement_length < math.ceil(existing_length * 0.8)
+            )
+        if gate_authorized_rewrite_shrinks_document:
+            self.telemetry.record(
+                "lossy_required_document_rewrite_blocked", execution_id,
+                path=path, existing_characters=existing_length,
+                replacement_characters=replacement_length,
+            )
+            return (
+                "Error: Lossy global rewrite blocked for existing required document "
+                f"'{path}': the replacement contains {replacement_length} characters "
+                f"but the current artifact contains {existing_length}. Preserve prior "
+                "validated work and use filesystem.replace_paragraph, "
+                "filesystem.replace_section, or bounded filesystem.append calls."
+            )
+        overwrites_existing_document = (
+            capability.lower() == "filesystem"
             and action.lower() == "write"
             and normalized_path in protected_document_artifacts
             and self._artifact_exists(execution_id, path)
             and required_repair_tool != "filesystem__write"
         )
         shell_mutates_document = (
-            role == "writer"
-            and capability.lower() == "shell"
+            capability.lower() == "shell"
             and action.lower() == "execute"
             and any(
                 self._normalized_workspace_path(target) in protected_document_artifacts
@@ -3170,7 +3924,8 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
             return (
                 "Error: Global overwrite blocked for existing required document artifact(s): "
                 + ", ".join(denied)
-                + ". Preserve valid content with filesystem.append or filesystem.replace_paragraph. "
+                + ". Preserve valid content with filesystem.append, filesystem.replace_paragraph, "
+                "or filesystem.replace_section. "
                 "A full filesystem.write is allowed only when the automatic quality gate explicitly requires it."
             )
         empties_required_artifact = (

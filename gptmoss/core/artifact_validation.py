@@ -540,6 +540,22 @@ def validate_json(path: Path, constraints: Dict[str, Any]) -> ValidationReport:
             report,
             f"JSON top-level type is {report['metrics']['top_level_type']}, expected {expected_type}",
         )
+    required_keys = constraints.get("required_keys") or []
+    if not isinstance(required_keys, list) or not all(
+        isinstance(item, str) for item in required_keys
+    ):
+        raise TypeError("required_keys must be a list of strings")
+    if required_keys:
+        if not isinstance(value, dict):
+            _failure(report, "JSON required_keys can only be checked on an object")
+        else:
+            missing = [item for item in required_keys if item not in value]
+            if missing:
+                _failure(report, "JSON is missing required key(s): " + ", ".join(missing))
+    report["metrics"]["required_keys_total"] = len(required_keys)
+    report["metrics"]["required_keys_covered"] = (
+        len(required_keys) - len([item for item in required_keys if not isinstance(value, dict) or item not in value])
+    )
     _apply_numeric_constraints(report, report["metrics"], constraints)
     return report
 

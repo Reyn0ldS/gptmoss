@@ -4,7 +4,7 @@ Ce guide explique comment utiliser GPTMOSS pour analyser un corpus local, rédig
 
 ## Périmètre
 
-Formats prioritaires pris en charge sans dépendance documentaire externe :
+Formats pris en charge localement :
 
 | Format | Type de contenu API | Structure conservée |
 |---|---|---|
@@ -14,14 +14,15 @@ Formats prioritaires pris en charge sans dépendance documentaire externe :
 | Markdown | `text/markdown` | titres, paragraphes, listes, tableaux et blocs de code |
 | HTML local | `text/html` | titre, titres, texte, listes, tableaux, code et citations, sans script ni chargement de ressource |
 | JSON et CSV | `application/json`, `text/csv` | contenu textuel normalisé |
+| PDF texte | `application/pdf` | texte par page via `pypdf` ; les pages sans texte sont signalées. Pas d'OCR. |
 
-Le PDF, l'OCR et la conversion graphique haute fidélité ne font pas partie de ce workflow. Ils pourront être ajoutés plus tard comme adaptateurs optionnels. Un fichier DOCX ou PPTX n'est pas rendu comme dans Office : GPTMOSS en extrait la structure utile au raisonnement.
+Un fichier DOCX ou PPTX n'est pas rendu comme dans Office : GPTMOSS en extrait la structure utile au raisonnement. La conversion graphique haute fidélité n'est pas promise.
 
 ## Garanties locales et sécurité
 
 Le workflow reçoit uniquement des fichiers téléversés ou déjà présents dans le workspace autorisé. Il ne consulte pas les liens trouvés dans un HTML, un DOCX ou un PPTX, ne charge pas les images distantes et n'exécute pas les scripts intégrés. Une URL fournie à la place d'un chemin local est refusée.
 
-Les fichiers OOXML sont inspectés comme des archives : traversée de chemin, chiffrement, membre anormalement volumineux, volume décompressé excessif et ratio de compression dangereux sont refusés. Ces limites de sécurité restent actives même lorsque les budgets fonctionnels valent `0`.
+Les fichiers OOXML sont inspectés comme des archives : traversée de chemin, chiffrement, membre anormalement volumineux, volume décompressé excessif et ratio de compression dangereux sont refusés. Ces limites de sécurité restent actives indépendamment des plafonds `max_upload_bytes` et `max_attachment_text_chars` (entiers `≥ 1`).
 
 Les fichiers, représentations normalisées, index et rapports restent sous le workspace local. Seuls les extraits sélectionnés sont envoyés au serveur de modèle configuré. Pour qu'aucun contenu ne quitte la machine, utilisez un serveur de modèle local ou hébergé dans le réseau isolé de l'organisation.
 
@@ -118,7 +119,7 @@ $execution = Invoke-RestMethod -Method Post -Uri 'http://127.0.0.1:8000/executio
 
 La capability `documents` ne peut inventorier, rechercher et lire que les identifiants présents dans `attachment_ids`. Une autre exécution ne gagne donc pas implicitement accès à tout le corpus stocké. `documents.read` et le filtre de `documents.search` acceptent l'`artifact_id` recommandé, mais aussi le nom de fichier exact ou l'empreinte `document_id` renvoyés par l'inventaire. Ces alias sont résolus uniquement parmi les pièces jointes de l'exécution ; un identifiant inventé, ambigu ou appartenant à un autre corpus reste refusé et l'erreur rappelle les références autorisées.
 
-L'inventaire distingue explicitement deux systèmes de coordonnées. `normalized_block_offsets` décrit les offsets à base zéro attendus par `documents.read start_block`. `citation_bounds` décrit les bornes à base un autorisées dans les références du livrable. Pour un PPTX, ces bornes utilisent les numéros de diapositives déclarés par le document, y compris une diapositive sans bloc textuel ; elles ne doivent jamais être déduites du nombre ou de l'ordre des blocs normalisés.
+L'inventaire distingue explicitement deux systèmes de coordonnées. `normalized_block_offsets` décrit les offsets à base zéro attendus par `documents.read start_block`. `citation_bounds` décrit les bornes à base un autorisées dans les références du livrable. Pour éviter toute conversion laissée au modèle, chaque résultat de `documents.search`, chaque bloc de `documents.read` et chaque `documents.read_chunk` contient aussi un champ `citation` prêt à copier en Markdown simple. Pour un PPTX, ces citations utilisent les numéros de diapositives déclarés par le document, y compris une diapositive sans bloc textuel ; elles ne sont jamais déduites du nombre ou de l'ordre des blocs normalisés. Les pseudo-locators `sections`, une borne zéro ou une citation entourée de backticks sont refusés.
 
 ## Fonctionnement interne
 
@@ -138,6 +139,8 @@ fichier local
 
 Le fallback professionnel estime désormais un budget d'étapes selon la taille réelle du corpus et du livrable. Une note courte reçoit un chemin compact ; un dossier à nombreuses sources, exigences, rapports ou diagrammes conserve les étapes d'analyse, rédaction, réparation et assurance indépendante. La production de la politique et des rapports qualité appartient à un rédacteur de preuves après réparation ; un QA distinct crée ensuite `analysis/final-delivery-audit.md` sans modifier les sorties des auteurs, puis le coordinateur contrôle toute la traçabilité. Les exigences complètes transmises à un spécialiste restent limitées à sa nature de travail et ne l'autorisent jamais à écrire les livrables des étapes sœurs.
 
+Une longueur exprimée en pages est convertie en budget minimal de rédaction à raison de 250 mots par page minimale demandée. Le rédacteur du livrable principal hérite systématiquement de toutes les exigences obligatoires, même lorsqu'elles ont aussi un propriétaire analytique spécialisé. Les titres professionnels explicitement demandés deviennent des sections contrôlées, et une reprise recalcule les contrats de sections ainsi que le contrat de livraison : elle ne conserve jamais silencieusement l'ancien plancher de 450 mots ni une politique devenue obsolète.
+
 Le plan LLM décrit des opérations et leurs dépendances, sans minimum global d'étapes. La
 politique `corpus_policy` impose les garanties locales sans devenir une nouvelle demande
 utilisateur. Les champs `operation`, `satisfies_obligations` et `required_evidence` sont
@@ -147,13 +150,20 @@ justifie, il remplace uniquement l'opération source par des partitions stables 
 persistance 128) puis une consolidation. Chaque pièce appartient à une seule partition ;
 le consolidateur reçoit leurs résultats validés et non une nouvelle copie du corpus. Le
 scheduler conserve toutes ces unités mais n'en exécute qu'une vague bornée simultanément,
-automatique avec `max_parallel_plan_steps=0`.
+automatique avec `max_parallel_plan_steps=0`. Dans le plan professionnel, décisions et
+architecture application/intégration/données forment une même vague après inventaire et
+exigences ; sécurité et plateforme/SRE forment la vague suivante lorsqu'elles sont présentes.
+La suppression adaptative d'une étape facultative conserve ses ancêtres causaux et n'ajoute
+jamais une dépendance artificielle vers l'étape précédente.
 
 Les arêtes typées (`plan.edges`) expliquent pourquoi une étape dépend d'une autre
 (`produces_for`, `validates`, `repairs`, `consolidates`, `blocks`) sans changer
 l'ordonnancement. Un quality gate documentaire classifie le défaut et rouvre le
 propriétaire : inventaire si la couverture source manque, rédacteur avec
-`replace_paragraph` pour un doublon ou un paragraphe non sourcé, debugger seulement
+`replace_paragraph` pour un doublon ou un paragraphe non sourcé, et
+`replace_section` pour une fiche sémantique identifiée par son titre Markdown exact. Les
+identifiants DEC/ADR déjà présents sont figés avant réparation pour empêcher qu'une fiche
+disparaisse au lieu d'être complétée. Le debugger intervient seulement
 pour un défaut logiciel. `GET /executions/{id}/evidence-graph` projette inventaires,
 lectures, images et citations en un graphe borné unifié par SHA-256 ; ce n'est pas
 un dump de `tool_call_history`. Dans la GUI, l'onglet **Graphe** de la colonne plan
@@ -170,10 +180,13 @@ volume cible, exigences, preuves et dépendances), sauvegarde chaque révision d
 validées. Cette mémoire réduit les répétitions et permet de reprendre après une
 interruption fournisseur sans recommencer les sections terminées.
 
-Les blocs `mermaid` ou `diagram` sont convertis par le modèle canonique de diagramme,
+Les blocs `mermaid` ou `diagram` (`flowchart`, `sequenceDiagram` et
+`stateDiagram-v2`) sont convertis par le modèle canonique de diagramme,
 contrôlés (nœuds, arêtes, zones de confiance, densité, métadonnées), puis rendus en
 SVG déterministe. Le paquet DOCX conserve la figure dans `word/media/` et relie son
-`rId` dans `document.xml`; une erreur sémantique n'est jamais masquée par un dessin vide.
+`rId` dans `document.xml`; une erreur sémantique ou une figure sans relation ne sont
+jamais masquées par un dessin vide. Quand un minimum est demandé, le nombre de figures
+valides dans le Markdown puis le nombre de SVG réellement intégrés au DOCX sont vérifiés.
 
 L'index est lexical, accent-insensible et sans modèle à télécharger. Il est enregistré dans `workspace/uploads/document-index.json`, rechargé au redémarrage et reconstruit automatiquement si son état ne correspond plus aux documents. La représentation normalisée de chaque fichier évite de reparcourir l'archive à chaque lecture.
 
@@ -198,7 +211,9 @@ Pour une revue exhaustive, l'agent tient une matrice contenant au minimum : iden
 
 ## Politique qualité déclarative
 
-Le plan peut déclarer un validateur `document` dans `artifact_validations`. Chaque politique est appliquée immédiatement à l'artefact produit avant tout handoff, puis lors de l'audit final. Le fallback de rédaction professionnelle crée aussi des politiques pour l'inventaire, les matrices, les analyses spécialisées, les registres et les rapports JSON/Markdown : un simple fichier non vide ne suffit donc plus. Les locators bornés acceptent `block/blocks`, `bloc/blocs`, `slide` et `diapositive`, sans changer les bornes numériques exigées. La même politique peut être enregistrée dans `quality-policy.json` :
+Le plan peut déclarer un validateur `document` dans `artifact_validations`. Chaque politique est appliquée immédiatement à l'artefact produit avant tout handoff, puis lors de l'audit final. Le fallback de rédaction professionnelle crée aussi des politiques pour l'inventaire, les matrices, les analyses spécialisées, les registres et les rapports JSON/Markdown : un simple fichier non vide ne suffit donc plus. Il refuse également les titres répétés, le redémarrage de la série principale de sections numérotées (symptôme d'un second document ajouté à la suite) et tout diagramme présent mais invalide. Les registres DEC/ADR doivent compléter, dans chaque fiche, contexte, facteurs, alternatives, décision, conséquences, risques, responsable et statut de validation. À la reprise, un artefact terminé qui échoue à une politique renforcée rouvre automatiquement son producteur et les consommateurs qui dépendaient de son ancien contenu. Les locators bornés acceptent `block/blocks`, `bloc/blocs`, `slide` et `diapositive`, sans changer les bornes numériques exigées. La même politique peut être enregistrée dans `quality-policy.json` :
+
+Si une source obligatoire manque alors que des syntaxes de citation figurent dans du code Markdown, la réparation ajoute d'abord une citation probante bornée au lieu de réécrire le document pour supprimer ces exemples. La garde d'exécution refuse dans cet ajout tout titre, liste, tableau ou contenu supérieur à 180 mots pour empêcher la duplication d'une structure existante. Les puces longues identiques sont comptées séparément des paragraphes et réparées une par une ; elles ne peuvent plus contourner le contrôle de non-répétition. Une étape dépendante rouverte après correction de l'amont doit produire des lectures `filesystem.read` réussies de son propre artefact et des artefacts requis de ses dépendances avant de rendre son contrat final.
 
 ```json
 {
@@ -236,6 +251,7 @@ Le plan peut déclarer un validateur `document` dans `artifact_validations`. Cha
   "claim_min_words": 24,
   "forbid_external_links": true,
   "forbid_placeholders": true,
+  "validate_arithmetic": true,
   "max_duplicate_paragraphs": 0,
   "duplicate_min_words": 14,
   "terminology": {
@@ -248,7 +264,9 @@ Le plan peut déclarer un validateur `document` dans `artifact_validations`. Cha
 
 Renseignez les bornes depuis le corpus réel ; ne recopiez pas les nombres de cet exemple. `required_traceability_ids` exige que chaque identifiant apparaisse dans une ligne de tableau Markdown, pas seulement quelque part dans le texte. `terminology` associe le terme canonique aux variantes interdites.
 
-Métriques disponibles : `characters`, `words`, `lines`, `headings`, `paragraphs`, `local_references`, `cited_sources`, `external_links`, `placeholder_markers`, `duplicate_paragraphs`, `unsupported_claim_paragraphs` et les compteurs de couverture des titres, exigences, lignes de traçabilité et sources.
+Métriques disponibles : `characters`, `words`, `lines`, `headings`, `paragraphs`, `local_references`, `cited_sources`, `external_links`, `placeholder_markers`, `duplicate_paragraphs`, `unsupported_claim_paragraphs`, `diagrams`, `valid_diagrams`, `invalid_diagrams` et les compteurs de couverture des titres, exigences, lignes de traçabilité et sources. Le validateur JSON accepte aussi `required_keys` afin qu'une politique ou un rapport qualité ne puisse pas passer avec un objet syntaxiquement valide mais vide de sens.
+
+Les métriques `arithmetic_mismatches` et `inventory_total_mismatches` comptent les additions entières explicites incohérentes et les totaux incompatibles avec l'inventaire machine. Avec `validate_arithmetic`, toute addition d'au moins trois termes est recalculée ; les totaux de blocs normalisés sont comparés au corpus, indépendamment du nombre de diapositives, et le validateur fournit un préfixe de paragraphe pour une réparation ciblée.
 
 ## Générer et lire les rapports
 
@@ -273,13 +291,14 @@ python scripts/validate_document.py --help
 
 # Tests des parseurs, de la recherche, des agents et du validateur
 python -m pytest -q tests/test_documents.py tests/test_corpus.py `
-  tests/test_document_capability.py tests/test_document_quality.py
+  tests/test_document_capability.py tests/test_document_quality.py `
+  tests/test_long_document_engine.py tests/test_diagrams_and_docx.py
 
 # Suite complète GPTMOSS
 python -m pytest -q
 ```
 
-Le workflow n'ajoute aucune dépendance Python : DOCX et PPTX sont lus avec XML et ZIP de la bibliothèque standard. Le SHA-256 de `requirements-runtime.txt` dans `offline-runtime-manifest.json` ne change donc pas pour cette fonction. Les tests du paquet vérifient néanmoins que le Python portable versionné exécute le point d'entrée documentaire.
+DOCX et PPTX sont lus avec XML et ZIP de la bibliothèque standard. Le texte PDF utilise `pypdf`, déjà épinglé dans `requirements-runtime.txt` et le runtime portable. Les tests du paquet vérifient que le Python portable versionné exécute le point d'entrée documentaire.
 
 ## Diagnostic
 
@@ -304,4 +323,4 @@ Le workflow n'ajoute aucune dépendance Python : DOCX et PPTX sont lus avec XML 
 - le contrôle des affirmations sans source est heuristique et configurable ; la revue humaine reste nécessaire pour une décision critique ;
 - la validité structurelle et la traçabilité ne prouvent pas à elles seules la justesse métier de chaque décision.
 
-Le plan d'intégration, les phases validées et les critères globaux de fin sont suivis dans [document-workflow-plan.md](document-workflow-plan.md).
+Le contrat vivant est ce guide, [architecture.md](architecture.md) et [delivery-graph.md](delivery-graph.md). [document-workflow-plan.md](document-workflow-plan.md) est un journal historique, plus le tracker d'intégration.

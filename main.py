@@ -93,6 +93,13 @@ def bootstrap_runtime(workspace_root: str):
     )
     config_data.setdefault("base_url", os.getenv("OPENAI_BASE_URL") or RuntimeSettings().base_url)
     config_data.setdefault("model_name", os.getenv("OPENAI_MODEL_NAME") or "qwen-turbo")
+    # Keep first-run bootstrap aligned with the documented .env contract.
+    # Pydantic performs the strict boolean conversion (for example
+    # ``SSL_VERIFY=False``); an existing config.json remains authoritative.
+    if os.getenv("SSL_VERIFY") is not None:
+        config_data.setdefault("ssl_verify", os.getenv("SSL_VERIFY"))
+    if os.getenv("SSL_CERT_PATH") is not None:
+        config_data.setdefault("ssl_cert_path", os.getenv("SSL_CERT_PATH"))
     config_data.setdefault("workspace_path", os.path.abspath(workspace_root))
     settings = RuntimeSettings.model_validate(config_data).normalized()
     api_key = settings.api_key

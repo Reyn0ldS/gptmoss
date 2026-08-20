@@ -10,6 +10,8 @@ from collections import Counter
 from pathlib import Path, PurePosixPath
 from typing import Any, Dict, List, Sequence, Tuple
 
+from gptmoss.core.diagrams import parse_mermaid, validate_diagram
+
 
 ValidationReport = Dict[str, Any]
 _HEADING = re.compile(r"^(#{1,6})[ \t]+(.+?)\s*#*\s*$")
@@ -19,7 +21,7 @@ _DEFAULT_PLACEHOLDERS = (
     r"\bTODO\b",
     r"\bTBD\b",
     r"\bFIXME\b",
-    r"\bXXX\b",
+    r"(?<![\w-])XXX(?![\w-])",
     r"\blorem\s+ipsum\b",
     r"\b(?:a|à)\s+compl(?:e|é)ter\b",
     r"\[(?:insert|placeholder|complete|compl(?:e|é)ter)[^\]]*\]",
@@ -170,6 +172,36 @@ def _normalized_paragraph(value: str) -> str:
     return " ".join(re.findall(r"[^\W_]+", _fold(without_references)))
 
 
+def _diagram_reports(text: str) -> List[Dict[str, Any]]:
+    """Validate fenced diagrams while ignoring unrelated code examples."""
+    reports: List[Dict[str, Any]] = []
+    lines = text.splitlines()
+    index = 0
+    while index < len(lines):
+        match = re.match(r"^\s*```(?:mermaid|diagram)\s*$", lines[index], re.IGNORECASE)
+        if not match:
+            index += 1
+            continue
+        start = index + 1
+        index += 1
+        body: List[str] = []
+        while index < len(lines) and not re.match(r"^\s*```\s*$", lines[index]):
+            body.append(lines[index])
+            index += 1
+        if index >= len(lines):
+            reports.append({"valid": False, "issues": ["diagram fence is not closed"], "line": start})
+            break
+        try:
+            report = validate_diagram(
+                parse_mermaid("\n".join(body), diagram_id=f"diagram-{len(reports) + 1}")
+            )
+        except (TypeError, ValueError) as error:
+            report = {"valid": False, "issues": [str(error)]}
+        reports.append({**report, "line": start})
+        index += 1
+    return reports
+
+
 def _normalize_source(value: str) -> str:
     return value.strip().replace(chr(92), "/").casefold()
 
@@ -187,6 +219,19 @@ def _is_safe_local_source(value: str) -> bool:
 
 
 def _locator_range(locator: str) -> Tuple[str, int, int] | None:
+    provenance_match = re.search(
+        r"(?i)\b(block|bloc|slide|diapositive)s?\s*:\s*(\d+)"
+        r"(?:\s*-\s*(\d+))?",
+        locator,
+    )
+    if provenance_match:
+        unit = (
+            "slides"
+            if provenance_match.group(1).casefold() in {"slide", "diapositive"}
+            else "blocks"
+        )
+        start = int(provenance_match.group(2))
+        return unit, start, int(provenance_match.group(3) or start)
     block_match = re.search(
         r"(?i)\bbloc(?:k)?s?\s+(\d+)(?:\s*[-–]\s*(\d+))?", locator
     )
@@ -252,12 +297,38 @@ def validate_document(path: Path, constraints: Dict[str, Any]) -> ValidationRepo
     paragraphs = _paragraphs(text)
     evidence_text = _without_markdown_code(text)
     all_reference_count = len(list(_LOCAL_REFERENCE.finditer(text)))
-    references = [
-        {"source": match.group(1).strip(), "locator": match.group(2).strip()}
-        for match in _LOCAL_REFERENCE.finditer(evidence_text)
-    ]
+    references = []
+    for match in _LOCAL_REFERENCE.finditer(evidence_text):
+        line_number = evidence_text.count("\n", 0, match.start())
+        original_line = lines[line_number] if line_number < len(lines) else ""
+        references.append({
+            "source": match.group(1).strip(),
+            "locator": match.group(2).strip(),
+            "paragraph_prefix": " ".join(original_line.strip().split())[:180],
+        })
     code_reference_count = max(0, all_reference_count - len(references))
     external_links = _EXTERNAL_LINK.findall(text)
+    diagram_reports = _diagram_reports(text)
+    invalid_diagrams = [item for item in diagram_reports if not item.get("valid")]
+    if constraints.get("reject_invalid_diagrams") and invalid_diagrams:
+        def diagram_section_selector(item: Dict[str, Any]) -> str:
+            diagram_line = int(item.get("line") or 0)
+            preceding = [
+                (level, title) for line_index, level, title in headings
+                if line_index < diagram_line
+            ]
+            if not preceding:
+                return ""
+            level, title = preceding[-1]
+            return f"{'#' * level} {title}"
+
+        samples = "; ".join(
+            f"line {item.get('line')} under section selector "
+            f"{diagram_section_selector(item)!r}: "
+            f"{', '.join(str(issue) for issue in item.get('issues', []))}"
+            for item in invalid_diagrams[:5]
+        )
+        _failure(report, f"document contains {len(invalid_diagrams)} invalid diagram(s): {samples}")
     required_headings = _strings(constraints.get("required_headings"), "required_headings")
     required_ids = _strings(
         constraints.get("required_requirement_ids"), "required_requirement_ids"
@@ -291,6 +362,7 @@ def validate_document(path: Path, constraints: Dict[str, Any]) -> ValidationRepo
         folded_headings.setdefault(_fold(title), []).append(index)
     missing_headings = []
     empty_headings = []
+    empty_heading_selectors = []
     for title in required_headings:
         matches = folded_headings.get(_fold(title), [])
         if not matches:
@@ -304,10 +376,156 @@ def validate_document(path: Path, constraints: Dict[str, Any]) -> ValidationRepo
             section_versions.append(section)
         if not any(len(_words(section)) >= min_section_words for section in section_versions):
             empty_headings.append(title)
+            heading_index = matches[0]
+            _, level, actual_title = headings[heading_index]
+            empty_heading_selectors.append(f"{'#' * level} {actual_title}")
     if missing_headings:
         _failure(report, "missing required heading(s): " + ", ".join(missing_headings))
     if empty_headings:
-        _failure(report, "empty required section(s): " + ", ".join(empty_headings))
+        _failure(
+            report,
+            "empty required section(s): " + ", ".join(empty_headings)
+            + "; exact Markdown heading selector(s): "
+            + "; ".join(empty_heading_selectors),
+        )
+
+    duplicate_heading_count = 0
+    duplicate_heading_samples: List[str] = []
+    if "max_duplicate_headings" in constraints:
+        max_duplicate_headings = _positive_int(
+            constraints.get("max_duplicate_headings"),
+            "max_duplicate_headings",
+            0,
+        )
+        heading_counts = Counter(
+            (level, _fold(title)) for _, level, title in headings
+        )
+        duplicate_heading_count = sum(
+            count - 1 for count in heading_counts.values() if count > 1
+        )
+        duplicate_heading_samples = [
+            f"{'#' * level} {title}"
+            for _, level, title in headings
+            if heading_counts[(level, _fold(title))] > 1
+        ]
+        duplicate_heading_samples = list(dict.fromkeys(duplicate_heading_samples))
+        if duplicate_heading_count > max_duplicate_headings:
+            _failure(
+                report,
+                f"document contains {duplicate_heading_count} duplicate heading occurrence(s); "
+                f"maximum is {max_duplicate_headings}; repeated Markdown heading selector(s): "
+                + "; ".join(duplicate_heading_samples[:10]),
+            )
+
+    heading_number_restarts: List[str] = []
+    if constraints.get("reject_heading_number_restarts"):
+        numbered_headings = []
+        for _, level, title in headings:
+            # A document-wide section number must have an explicit delimiter.
+            # Bare numeric headings such as ``30 jours`` / ``90 days`` are
+            # timeline milestones, not members of the chapter series.
+            number_match = re.match(r"^\s*(\d+)\s*[.)-]\s+", title)
+            if not number_match:
+                continue
+            numbered_headings.append((level, title, int(number_match.group(1))))
+        # Nested lists of sections commonly restart below each parent.  Only the
+        # shallowest numbered heading level represents the document-wide series.
+        primary_level = min((item[0] for item in numbered_headings), default=None)
+        previous = None
+        for level, title, number in numbered_headings:
+            if level != primary_level:
+                continue
+            if previous is not None and number <= previous:
+                heading_number_restarts.append(
+                    f"{'#' * level} {title} (number {number} after {previous})"
+                )
+            previous = number
+        if heading_number_restarts:
+            _failure(
+                report,
+                f"document contains {len(heading_number_restarts)} heading numbering "
+                "restart(s), suggesting an appended duplicate section series: "
+                + "; ".join(heading_number_restarts[:10]),
+            )
+
+    record_policy = constraints.get("record_section_policy")
+    record_sections_total = 0
+    invalid_record_sections: List[Tuple[str, List[str]]] = []
+    missing_record_ids: List[str] = []
+    if record_policy is not None:
+        if not isinstance(record_policy, dict):
+            raise TypeError("record_section_policy must be an object")
+        heading_pattern = str(record_policy.get("heading_pattern") or "").strip()
+        if not heading_pattern:
+            raise ValueError("record_section_policy.heading_pattern is required")
+        try:
+            record_heading = re.compile(heading_pattern, flags=re.IGNORECASE)
+        except re.error as error:
+            raise ValueError(
+                f"record_section_policy.heading_pattern is invalid: {error}"
+            ) from error
+        required_fields = record_policy.get("required_fields") or {}
+        if not isinstance(required_fields, dict):
+            raise TypeError("record_section_policy.required_fields must be an object")
+        normalized_fields: Dict[str, List[str]] = {}
+        for field_name, aliases in required_fields.items():
+            if not isinstance(field_name, str):
+                raise TypeError("record_section_policy field names must be strings")
+            normalized_fields[field_name] = _strings(
+                aliases,
+                f"record_section_policy.required_fields.{field_name}",
+            )
+        matched_records = [
+            (index, title, f"{'#' * level} {title}")
+            for index, (_, level, title) in enumerate(headings)
+            if record_heading.search(title)
+        ]
+        record_sections_total = len(matched_records)
+        minimum_records = _positive_int(
+            record_policy.get("minimum_records"),
+            "record_section_policy.minimum_records",
+            1,
+        )
+        if record_sections_total < minimum_records:
+            _failure(
+                report,
+                f"record section count={record_sections_total} is below required minimum "
+                f"{minimum_records} for heading pattern {heading_pattern!r}",
+            )
+        required_record_ids = _strings(
+            record_policy.get("required_record_ids"),
+            "record_section_policy.required_record_ids",
+        )
+        matched_titles = "\n".join(title for _, title, _ in matched_records)
+        missing_record_ids = [
+            identifier for identifier in required_record_ids
+            if not _contains_identifier(matched_titles, identifier)
+        ]
+        if missing_record_ids:
+            _failure(
+                report,
+                "required record heading ID(s) missing: "
+                + ", ".join(missing_record_ids),
+            )
+        for index, title, selector in matched_records:
+            section = _fold(_section_text(lines, headings, index))
+            missing_fields = [
+                field_name
+                for field_name, aliases in normalized_fields.items()
+                if aliases and not any(_fold(alias) in section for alias in aliases)
+            ]
+            if missing_fields:
+                invalid_record_sections.append((selector, missing_fields))
+        if invalid_record_sections:
+            details = "; ".join(
+                f"{title!r} missing {', '.join(fields)}"
+                for title, fields in invalid_record_sections[:12]
+            )
+            _failure(
+                report,
+                f"{len(invalid_record_sections)} record section(s) violate the declared "
+                f"semantic schema: {details}",
+            )
 
     missing_ids = [
         identifier for identifier in required_ids if not _contains_identifier(text, identifier)
@@ -342,6 +560,34 @@ def validate_document(path: Path, constraints: Dict[str, Any]) -> ValidationRepo
     if constraints.get("forbid_external_links", False) and external_links:
         _failure(report, f"document contains {len(external_links)} external link(s)")
 
+    arithmetic_mismatches = []
+    if constraints.get("validate_arithmetic", False):
+        visible_text = _without_markdown_code(text)
+        addition_pattern = re.compile(
+            r"(?<![\d.])(\d+(?:\s*\+\s*\d+){2,})\s*=\s*(?:\*\*)?(\d+)"
+        )
+        for line in visible_text.splitlines():
+            for match in addition_pattern.finditer(line):
+                terms = [int(value) for value in re.findall(r"\d+", match.group(1))]
+                claimed = int(match.group(2))
+                actual = sum(terms)
+                if actual == claimed:
+                    continue
+                prefix = " ".join(line.strip().split())[:180]
+                arithmetic_mismatches.append({
+                    "expression": match.group(1),
+                    "claimed": claimed,
+                    "actual": actual,
+                    "paragraph_prefix": prefix,
+                })
+        if arithmetic_mismatches:
+            samples = "; ".join(
+                f"{item['expression']} equals {item['actual']}, not {item['claimed']}; "
+                f"paragraph prefix: {item['paragraph_prefix']}"
+                for item in arithmetic_mismatches[:5]
+            )
+            _failure(report, "arithmetic sum mismatch(es): " + samples)
+
     normalized_paragraphs = [
         _normalized_paragraph(paragraph)
         for paragraph in paragraphs
@@ -360,6 +606,43 @@ def validate_document(path: Path, constraints: Dict[str, Any]) -> ValidationRepo
             + "; ".join(duplicate_samples[:5]),
         )
 
+    duplicate_list_item_count = 0
+    if "max_duplicate_list_items" in constraints:
+        max_duplicate_list_items = _positive_int(
+            constraints.get("max_duplicate_list_items"),
+            "max_duplicate_list_items",
+            0,
+        )
+        list_items: List[Tuple[str, str]] = []
+        in_fence = False
+        for line in lines:
+            stripped = line.lstrip()
+            if stripped.startswith("```") or stripped.startswith("~~~"):
+                in_fence = not in_fence
+                continue
+            if in_fence:
+                continue
+            match = re.match(r"^\s*[-*+]\s+(.+?)\s*$", line)
+            if not match or len(_words(match.group(1))) < duplicate_min_words:
+                continue
+            normalized = _normalized_paragraph(match.group(1))
+            if normalized:
+                list_items.append((normalized, " ".join(line.strip().split())[:180]))
+        list_counts = Counter(key for key, _ in list_items)
+        duplicate_list_item_count = sum(
+            count - 1 for count in list_counts.values() if count > 1
+        )
+        if duplicate_list_item_count > max_duplicate_list_items:
+            duplicate_list_samples = list(dict.fromkeys(
+                sample for key, sample in list_items if list_counts[key] > 1
+            ))
+            _failure(
+                report,
+                f"document contains {duplicate_list_item_count} duplicate list item "
+                f"occurrence(s); maximum is {max_duplicate_list_items}; repeated list item "
+                "prefix(es): " + "; ".join(duplicate_list_samples[:5]),
+            )
+
     allowed_sources = {_normalize_source(source) for source in required_sources}
     cited_sources = {_normalize_source(reference["source"]) for reference in references}
     invalid_references = []
@@ -367,20 +650,74 @@ def validate_document(path: Path, constraints: Dict[str, Any]) -> ValidationRepo
     if not isinstance(raw_inventory, dict):
         raise TypeError("source_inventory must be an object")
     inventory = {_normalize_source(str(key)): value for key, value in raw_inventory.items()}
+    inventory_total_mismatches = []
+    if constraints.get("validate_arithmetic", False) and inventory:
+        expected_normalized_blocks = 0
+        for details in inventory.values():
+            if isinstance(details, int):
+                expected_normalized_blocks += int(details)
+            elif isinstance(details, dict):
+                expected_normalized_blocks += int(
+                    details.get("normalized_blocks") or details.get("blocks") or 0
+                )
+        if expected_normalized_blocks:
+            total_claim_patterns = (
+                re.compile(
+                    r"\b(?:total|corpus(?:\s+inventory)?).{0,120}?"
+                    r"(\d+)\s+(?:blocs?\s+normalises?|normalized\s+blocks?)\b"
+                ),
+                re.compile(
+                    r"\b(?:blocs?|blocks?)(?:\*{1,2})?\s+(?:sur|of)\s+(\d+)\s+"
+                    r"(?:attendus?|expected)\b"
+                ),
+            )
+            seen_claims = set()
+            for line in _without_markdown_code(text).splitlines():
+                folded_line = _fold(line)
+                for pattern in total_claim_patterns:
+                    for match in pattern.finditer(folded_line):
+                        claimed = int(match.group(1))
+                        key = (line, claimed)
+                        if key in seen_claims or claimed == expected_normalized_blocks:
+                            continue
+                        seen_claims.add(key)
+                        inventory_total_mismatches.append({
+                            "claimed": claimed,
+                            "actual": expected_normalized_blocks,
+                            "paragraph_prefix": " ".join(line.strip().split())[:180],
+                        })
+            if inventory_total_mismatches:
+                samples = "; ".join(
+                    f"expected {item['actual']} normalized blocks, not {item['claimed']}; "
+                    f"paragraph prefix: {item['paragraph_prefix']}"
+                    for item in inventory_total_mismatches[:5]
+                )
+                _failure(report, "source inventory total mismatch(es): " + samples)
     require_bounds = bool(constraints.get("require_bounded_references"))
     for reference in references:
         source = reference["source"]
         if not _is_safe_local_source(source):
-            invalid_references.append(f"unsafe or non-local source {source!r}")
+            prefix = reference.get("paragraph_prefix") or ""
+            invalid_references.append(
+                f"unsafe or non-local source {source!r}"
+                + (f"; paragraph prefix: {prefix}" if prefix else "")
+            )
             continue
         if allowed_sources and _normalize_source(source) not in allowed_sources:
-            invalid_references.append(f"undeclared local source {source!r}")
+            prefix = reference.get("paragraph_prefix") or ""
+            invalid_references.append(
+                f"undeclared local source {source!r}"
+                + (f"; paragraph prefix: {prefix}" if prefix else "")
+            )
             continue
         locator_failure = _validate_reference_locator(
             source, reference["locator"], inventory, require_bounds
         )
         if locator_failure:
-            invalid_references.append(locator_failure)
+            prefix = reference.get("paragraph_prefix") or ""
+            invalid_references.append(
+                locator_failure + (f"; paragraph prefix: {prefix}" if prefix else "")
+            )
     if invalid_references:
         _failure(report, "invalid local reference(s): " + "; ".join(invalid_references[:10]))
     missing_sources = [
@@ -483,9 +820,20 @@ def validate_document(path: Path, constraints: Dict[str, Any]) -> ValidationRepo
         "local_references": len(references),
         "cited_sources": len(cited_sources),
         "external_links": len(external_links),
+        "diagrams": len(diagram_reports),
+        "valid_diagrams": len(diagram_reports) - len(invalid_diagrams),
+        "invalid_diagrams": len(invalid_diagrams),
         "placeholder_markers": len(placeholder_hits),
         "duplicate_paragraphs": duplicate_count,
+        "duplicate_list_items": duplicate_list_item_count,
+        "duplicate_headings": duplicate_heading_count,
+        "heading_number_restarts": len(heading_number_restarts),
+        "record_sections": record_sections_total,
+        "invalid_record_sections": len(invalid_record_sections),
+        "missing_record_section_ids": len(missing_record_ids),
         "unsupported_claim_paragraphs": len(unsupported_claims),
+        "arithmetic_mismatches": len(arithmetic_mismatches),
+        "inventory_total_mismatches": len(inventory_total_mismatches),
         "required_headings_covered": len(required_headings) - len(missing_headings) - len(empty_headings),
         "required_headings_total": len(required_headings),
         "requirement_ids_covered": len(required_ids) - len(missing_ids),
