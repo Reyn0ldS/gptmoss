@@ -1070,6 +1070,94 @@ def test_profile_upgrade_replaces_vague_upstream_retry_with_current_defects(tmp_
     assert "without trusting stale conclusions" not in retry_context
 
 
+def test_resume_refreshes_stale_failed_attempt_gates_and_tool_constraint(tmp_path):
+    engine, state = _engine(tmp_path)
+    execution = state.get_execution("resume-failed-writer")
+    execution.current_plan = {
+        "steps": [{
+            "id": 0, "status": "pending", "dependencies": [],
+            "required_artifacts": ["dossier.md"],
+            "retry_context": (
+                "Previous attempt failed. Current machine gate failures: "
+                "obsolete duplicate heading defect"
+            ),
+        }],
+        "artifact_validations": [{
+            "path": "dossier.md", "validator": "document",
+            "constraints": {
+                "required_headings": ["Registre des risques"],
+                "min_section_words": 20,
+            },
+        }],
+    }
+    execution.variables["step_runtime"] = {"0": {
+        "required_next_tool": "filesystem__replace_paragraph",
+        "required_repair_issues": ["obsolete duplicate heading defect"],
+    }}
+    project = tmp_path / "projects" / "proj-default"
+    project.mkdir(parents=True)
+    (project / "dossier.md").write_text(
+        "# Dossier\n\n## Registre des risques\n\nCourt.\n",
+        encoding="utf-8",
+    )
+
+    engine._reopen_invalid_completed_steps(
+        "resume-failed-writer", execution, execution.current_plan["steps"],
+    )
+
+    refreshed = execution.current_plan["steps"][0]["retry_context"]
+    assert refreshed.startswith("A resumed specialist retry was refreshed")
+    assert "exact Markdown heading selector(s): ## Registre des risques" in refreshed
+    assert "obsolete duplicate heading defect" not in refreshed
+    assert "required_next_tool" not in execution.variables["step_runtime"]["0"]
+    assert "required_repair_issues" not in execution.variables["step_runtime"]["0"]
+
+
+@pytest.mark.asyncio
+async def test_empty_section_repair_rejects_heading_reported_for_another_defect(tmp_path):
+    engine, state = _engine(tmp_path)
+    execution = state.get_execution("guarded-empty-section")
+    execution.variables["role_key"] = "writer"
+    execution.current_plan = {
+        "steps": [{
+            "id": 0, "role": "writer", "required_artifacts": ["dossier.md"],
+            "owned_paths": ["dossier.md"],
+        }],
+        "artifact_validations": [{
+            "path": "dossier.md", "validator": "document", "constraints": {},
+        }],
+    }
+    execution.current_step = 0
+    execution.variables["step_runtime"] = {"0": {
+        "required_next_tool": "filesystem__replace_section",
+        "required_repair_issues": [
+            "empty required section(s): Registre des risques; exact Markdown "
+            "heading selector(s): # Registre des risques",
+            "duplicate heading selector(s): ### 7.1. Analyse détaillée des risques",
+        ],
+    }}
+    project = tmp_path / "projects" / "proj-default"
+    project.mkdir(parents=True)
+    target = project / "dossier.md"
+    original = (
+        "# Registre des risques\n\nCourt.\n\n"
+        "### 7.1. Analyse détaillée des risques\n\nStable.\n"
+    )
+    target.write_text(original, encoding="utf-8")
+
+    blocked = await engine._call_tool(
+        "guarded-empty-section", "filesystem", "replace_section",
+        {
+            "path": "dossier.md",
+            "heading_selector": "### 7.1. Analyse détaillée des risques",
+            "content": "Mauvaise cible.",
+        },
+    )
+
+    assert "use only a selector listed after" in blocked
+    assert target.read_text(encoding="utf-8") == original
+
+
 def test_profile_upgrade_freezes_all_existing_record_ids_before_repair(tmp_path):
     engine, state = _engine(tmp_path)
     execution = state.get_execution("resume-record-preservation")

@@ -3836,15 +3836,36 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
             normalized_issues = " ".join(
                 " ".join(issue.casefold().split()) for issue in required_repair_issues
             )
-            if not supplied_heading or supplied_heading not in normalized_issues:
+            empty_section_issues = [
+                str(issue) for issue in required_repair_issues
+                if "empty required section" in str(issue).casefold()
+            ]
+            allowed_empty_headings = set()
+            for issue in empty_section_issues:
+                if "exact Markdown heading selector(s):" not in issue:
+                    continue
+                selector_text = issue.split(
+                    "exact Markdown heading selector(s):", 1
+                )[1]
+                allowed_empty_headings.update(
+                    " ".join(match.casefold().split())
+                    for match in re.findall(r"#{1,6}\s+[^;\r\n]+", selector_text)
+                )
+            unreported_heading = not supplied_heading or supplied_heading not in normalized_issues
+            wrong_empty_heading = bool(
+                allowed_empty_headings and supplied_heading not in allowed_empty_headings
+            )
+            if unreported_heading or wrong_empty_heading:
                 self.telemetry.record(
                     "unreported_document_section_repair_blocked", execution_id,
                     heading_selector=str(arguments.get("heading_selector") or "")[:180],
                 )
                 return (
                     "Error: Section repair blocked because heading_selector was not reported "
-                    "by the active machine quality gate. Copy one exact Markdown heading "
-                    "selector from the latest gate failure."
+                    "for this defect by the active machine quality gate. Copy one exact "
+                    "Markdown heading selector from the latest gate failure; when filling "
+                    "an empty required section, use only a selector listed after "
+                    "'exact Markdown heading selector(s)'."
                 )
         normalized_path = self._normalized_workspace_path(path)
         gate_authorized_rewrite_shrinks_document = False

@@ -74,19 +74,32 @@ class ExecutionProgressMixin:
         # sending a replacement child after obsolete defects.
         for step in steps:
             retry_context = str(step.get("retry_context") or "")
+            failed_attempt_retry = "Current machine gate failures:" in retry_context
             refreshable_retry = retry_context.startswith(
                 profile_retry_prefix
-            ) or retry_context.startswith(upstream_retry_prefix)
+            ) or retry_context.startswith(upstream_retry_prefix) or failed_attempt_retry
             if step.get("status") != "pending" or not refreshable_retry:
                 continue
             current_issues = self._step_artifact_validation_issues(execution_id, step)
             if current_issues:
-                step["retry_context"] = (
-                    profile_retry_prefix
-                    + "Preserve valid content and repair these machine-observed defects:\n"
-                    + "; ".join(current_issues)
-                )[:12_000]
-            elif retry_context.startswith(profile_retry_prefix):
+                if failed_attempt_retry:
+                    step["retry_context"] = (
+                        "A resumed specialist retry was refreshed from the current durable "
+                        "artifact. Ignore obsolete defects and repair only these current "
+                        "machine gate failures:\n" + "; ".join(current_issues)
+                    )[:12_000]
+                else:
+                    step["retry_context"] = (
+                        profile_retry_prefix
+                        + "Preserve valid content and repair these machine-observed defects:\n"
+                        + "; ".join(current_issues)
+                    )[:12_000]
+                runtime = state.variables.get("step_runtime")
+                runtime = runtime.get(str(step.get("id"))) if isinstance(runtime, dict) else None
+                if isinstance(runtime, dict):
+                    runtime.pop("required_next_tool", None)
+                    runtime.pop("required_repair_issues", None)
+            elif retry_context.startswith(profile_retry_prefix) or failed_attempt_retry:
                 step.pop("retry_context", None)
 
         invalid: Dict[str, List[str]] = {}
