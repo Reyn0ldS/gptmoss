@@ -3014,6 +3014,9 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
                     )
                     if required_repair_tool:
                         runtime["required_next_tool"] = required_repair_tool
+                        runtime["required_repair_issues"] = [
+                            str(item) for item in malformed_issues if str(item).strip()
+                        ]
                     convo.messages.append({
                         "role": "system",
                         "content": (
@@ -3038,6 +3041,9 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
                     )
                     if required_repair_tool:
                         runtime["required_next_tool"] = required_repair_tool
+                        runtime["required_repair_issues"] = [
+                            str(item) for item in completion_issues if str(item).strip()
+                        ]
                     convo.messages.append({
                         "role": "system",
                         "content": (
@@ -3071,6 +3077,7 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
                 convo.messages, tool_calls, required_next_tool,
             ):
                 runtime.pop("required_next_tool", None)
+                runtime.pop("required_repair_issues", None)
 
             tool_history = state.variables.get("tool_call_history", [])
             if (self._missing_artifacts(execution_id, step) and len(tool_history) >= 8
@@ -3242,6 +3249,24 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
         return str(runtime.get("required_next_tool") or "") if isinstance(runtime, dict) else ""
 
     @staticmethod
+    def _active_required_repair_issues(state) -> List[str]:
+        """Return machine gate issues authorizing the active targeted repair."""
+        plan = state.current_plan if isinstance(state.current_plan, dict) else {}
+        steps = plan.get("steps") if isinstance(plan.get("steps"), list) else []
+        index = int(state.current_step or 0)
+        if index < 0 or index >= len(steps) or not isinstance(steps[index], dict):
+            return []
+        step_id = str(steps[index].get("id", index))
+        runtimes = state.variables.get("step_runtime")
+        runtime = runtimes.get(step_id) if isinstance(runtimes, dict) else None
+        if not isinstance(runtime, dict):
+            return []
+        return [
+            str(item) for item in runtime.get("required_repair_issues", [])
+            if str(item).strip()
+        ]
+
+    @staticmethod
     def _shell_requests_deletion(command: str) -> bool:
         return bool(re.search(
             r"(?:\b(?:del|erase|rm|rmdir|rd|remove-item)\b|\.unlink\s*\()",
@@ -3306,6 +3331,40 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
             )
         role = str(state.variables.get("role_key") or "coordinator").lower()
         required_repair_tool = self._active_required_repair_tool(state)
+        required_repair_issues = self._active_required_repair_issues(state)
+        if (
+            required_repair_tool == "filesystem__replace_paragraph"
+            and capability.lower() == "filesystem"
+            and action.lower() == "replace_paragraph"
+            and required_repair_issues
+        ):
+            supplied_prefix = " ".join(
+                str(arguments.get("paragraph_prefix") or "").casefold().split()
+            )
+            normalized_issues = " ".join(
+                " ".join(issue.casefold().split()) for issue in required_repair_issues
+            )
+            reported_prefix = supplied_prefix[:100]
+            prefix_is_reported = bool(
+                supplied_prefix
+                and (
+                    supplied_prefix in normalized_issues
+                    or (
+                        len(supplied_prefix) > len(reported_prefix)
+                        and reported_prefix in normalized_issues
+                    )
+                )
+            )
+            if not prefix_is_reported:
+                self.telemetry.record(
+                    "unreported_document_repair_blocked", execution_id,
+                    paragraph_prefix=str(arguments.get("paragraph_prefix") or "")[:180],
+                )
+                return (
+                    "Error: Targeted repair blocked because paragraph_prefix was not reported "
+                    "by the active machine quality gate. Use one exact paragraph prefix from "
+                    "the latest gate failure and change only that passage."
+                )
         normalized_path = self._normalized_workspace_path(path)
         overwrites_existing_document = (
             capability.lower() == "filesystem"

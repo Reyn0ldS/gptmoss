@@ -849,6 +849,64 @@ async def test_specialist_cannot_globally_overwrite_existing_document_without_ga
 
 
 @pytest.mark.asyncio
+async def test_targeted_repair_must_use_a_machine_reported_prefix(tmp_path):
+    engine, state = _engine(tmp_path)
+    execution = state.get_execution("guarded-targeted-repair")
+    execution.variables["role_key"] = "architect"
+    execution.current_plan = {
+        "steps": [{
+            "id": 0,
+            "role": "architect",
+            "required_artifacts": ["inventory.md"],
+            "owned_paths": ["inventory.md"],
+        }],
+        "artifact_validations": [{
+            "path": "inventory.md", "validator": "document", "constraints": {},
+        }],
+    }
+    execution.variables["step_runtime"] = {"0": {
+        "required_next_tool": "filesystem__replace_paragraph",
+        "required_repair_issues": [
+            "inventory.md: invalid local reference; paragraph prefix: "
+            "The machine-reported evidence line has invalid blocks 0-3."
+        ],
+    }}
+    project = tmp_path / "projects" / "proj-default"
+    project.mkdir(parents=True)
+    target = project / "inventory.md"
+    target.write_text(
+        "The unrelated introduction must remain unchanged.\n\n"
+        "The machine-reported evidence line has invalid blocks 0-3.\n",
+        encoding="utf-8",
+    )
+
+    blocked = await engine._call_tool(
+        "guarded-targeted-repair", "filesystem", "replace_paragraph",
+        {
+            "path": "inventory.md",
+            "paragraph_prefix": "The unrelated introduction must remain unchanged.",
+            "content": "An unrequested rewrite.",
+        },
+    )
+    allowed = await engine._call_tool(
+        "guarded-targeted-repair", "filesystem", "replace_paragraph",
+        {
+            "path": "inventory.md",
+            "paragraph_prefix": (
+                "The machine-reported evidence line has invalid blocks 0-3."
+            ),
+            "content": "The machine-reported evidence line has valid blocks 1-4.",
+        },
+    )
+
+    content = target.read_text(encoding="utf-8")
+    assert "Targeted repair blocked" in blocked
+    assert "replaced successfully" in allowed
+    assert "unrelated introduction must remain unchanged" in content
+    assert "valid blocks 1-4" in content
+
+
+@pytest.mark.asyncio
 async def test_writer_cannot_bypass_document_overwrite_guard_with_shell(tmp_path):
     engine, state = _engine(tmp_path)
     execution = state.get_execution("guarded-shell-document")
