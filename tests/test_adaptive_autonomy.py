@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from gptmoss.capabilities.filesystem import FilesystemCapability
+from gptmoss.capabilities.documents import DocumentCapability
 from gptmoss.capabilities.shell import ShellCapability
 from gptmoss.core.context import ContextEngine
 from gptmoss.core.adaptive import tool_call_fingerprint
@@ -1118,6 +1119,7 @@ def test_exhaustive_inventory_gate_requires_every_normalized_block_read(tmp_path
 
 def test_exhaustive_inventory_gate_requires_each_attached_image_presented(tmp_path):
     engine, state = _engine(tmp_path, MockLLMProvider())
+    engine.llm_provider.supports_vision = True
     store = ArtifactStore(str(tmp_path / "image-artifacts"))
     image = store.save_bytes(
         "evidence.png", b"\x89PNG\r\n\x1a\nevidence", "image/png"
@@ -1144,6 +1146,101 @@ def test_exhaustive_inventory_gate_requires_each_attached_image_presented(tmp_pa
     )[0]
     execution.variables["visualized_artifact_ids"] = [image["id"]]
     assert engine._document_coverage_issues("image-coverage-gate", step) == []
+
+
+def test_exhaustive_inventory_gate_defers_images_to_declared_vision_gap(tmp_path):
+    engine, state = _engine(tmp_path, MockLLMProvider())
+    engine.llm_provider.supports_vision = False
+    store = ArtifactStore(str(tmp_path / "no-vision-artifacts"))
+    image = store.save_bytes(
+        "evidence.png", b"\x89PNG\r\n\x1a\nevidence", "image/png"
+    )
+    engine.artifact_store = store
+    execution = state.get_execution("no-vision-coverage-gate")
+    execution.variables["attachment_ids"] = [image["id"]]
+    step = {
+        "description": "Inventory every explicit attachment and record complete coverage.",
+        "acceptance_criteria": ["All supported contents were analyzed."],
+    }
+
+    assert engine._capability_gaps(execution)[0]["capability"] == "vision"
+    assert engine._document_coverage_issues(
+        "no-vision-coverage-gate", step,
+    ) == []
+
+
+@pytest.mark.asyncio
+async def test_document_coverage_gate_forces_real_read_after_prose_promise(tmp_path):
+    class CapturingProvider(MockLLMProvider):
+        def __init__(self):
+            super().__init__()
+            self.requests = []
+
+        async def completion(self, messages, **kwargs):
+            self.requests.append({
+                "messages": [dict(message) for message in messages],
+                "tools": list(kwargs.get("tools") or []),
+                "tool_choice": kwargs.get("tool_choice"),
+            })
+            return await super().completion(messages, **kwargs)
+
+    delivery = json.dumps({
+        "summary": "complete", "artifacts": [], "evidence": ["local corpus"],
+        "risks": [], "next_action": "handoff",
+    })
+    llm = CapturingProvider()
+    llm.add_response(content=(
+        "I will now read evidence.txt from start block 0. " + delivery
+    ))
+    llm.add_response(tool_calls=[{
+        "id": "read-1", "type": "function",
+        "function": {
+            "name": "documents__read",
+            "arguments": {
+                "artifact_id": "evidence.txt", "start_block": 0,
+                "block_count": 200,
+            },
+        },
+    }])
+    llm.add_response(content=delivery)
+    engine, state = _engine(tmp_path, llm, max_iterations=8)
+    store = ArtifactStore(str(tmp_path / "forced-read-artifacts"))
+    uploaded = store.save_base64(
+        "evidence.txt", base64.b64encode(b"local evidence").decode("ascii"),
+        "text/plain",
+    )
+    engine.artifact_store = store
+    engine.register_capability("documents", DocumentCapability(store))
+    execution = state.get_execution("forced-document-read")
+    execution.variables.update({
+        "parent_execution_id": "parent", "role_key": "architect",
+        "role_name": "Local Corpus Evidence Analyst",
+        "specialist": "Local Corpus Evidence Analyst",
+        "attachment_ids": [uploaded["id"]],
+    })
+    execution.current_plan = {"steps": [{
+        "id": 0, "role": "architect",
+        "specialist": "Local Corpus Evidence Analyst",
+        "description": "Inventory every explicit attachment and record complete coverage.",
+        "operation": "inventory", "dependencies": [], "expertise": [],
+        "required_artifacts": [],
+        "acceptance_criteria": ["All normalized blocks were read."],
+        "verification_commands": [],
+    }]}
+
+    await engine.execute_task(
+        "forced-document-read", "Inventory every explicit attachment",
+    )
+
+    assert execution.status == "completed", execution.results
+    assert llm.requests[1]["tool_choice"] == "required"
+    assert [
+        item["function"]["name"] for item in llm.requests[1]["tools"]
+    ] == ["documents__read"]
+    history = execution.variables["tool_call_history"]
+    assert [(item["capability"], item["action"]) for item in history] == [
+        ("documents", "read")
+    ]
 
 
 def test_rescue_strips_prefixed_fence_and_rejects_mock_random_tests():
@@ -1392,11 +1489,14 @@ async def test_specialist_prompt_delegates_artifact_validation_to_runtime(tmp_pa
     assert execution.status == "completed"
 
 
+@pytest.mark.parametrize("tool_name", ["shell__execute", "documents__read"])
 @pytest.mark.asyncio
-async def test_repeated_malformed_text_tool_calls_trip_safe_retry_circuit(tmp_path):
+async def test_repeated_malformed_text_tool_calls_trip_safe_retry_circuit(
+    tmp_path, tool_name,
+):
     llm = MockLLMProvider()
     malformed = (
-        '```json\n{"tool_call":{"name":"shell__execute","arguments":'
+        f'```json\n{{"tool_call":{{"name":"{tool_name}","arguments":'
         '{"command": python -m pytest -q\n```'
     )
     for _ in range(5):

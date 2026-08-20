@@ -242,7 +242,12 @@ class ExecutionProgressMixin:
                 "visualized_artifact_ids", []
             ) if item
         }
-        missing_images = sorted(image_ids - visualized)
+        # When vision is unavailable, the declared capability-gap workflow owns
+        # the limitation and requires human scope approval at the parent level.
+        # Requiring a visual tool here would create an impossible child loop and
+        # could falsely imply that image content had been interpreted.
+        vision_available = bool(getattr(self.llm_provider, "supports_vision", False))
+        missing_images = sorted(image_ids - visualized) if vision_available else []
         if missing_images:
             names = []
             for artifact_id in missing_images[:20]:

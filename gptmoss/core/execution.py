@@ -766,6 +766,66 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
         )
 
     @staticmethod
+    def _document_coverage_repair_tool(issues: List[str]) -> str:
+        """Select the read-only tool required by a failed corpus coverage gate."""
+        for issue in issues:
+            normalized = str(issue or "").casefold()
+            if (
+                "read every normalized block" in normalized
+                or "prove complete document coverage" in normalized
+            ):
+                return "documents__read"
+        for issue in issues:
+            if "analyze every attached image" in str(issue or "").casefold():
+                return "documents__read_image"
+        return ""
+
+    @classmethod
+    def _document_coverage_repair_nudge(cls, issues: List[str]) -> str:
+        """Turn corpus gate failures into one bounded, executable read action."""
+        action = cls._document_coverage_repair_tool(issues)
+        if not action:
+            return ""
+        if action == "documents__read":
+            issue = next(
+                (
+                    str(item) for item in issues
+                    if "read every normalized block" in str(item).casefold()
+                ),
+                "",
+            )
+            filename_match = re.search(
+                r"read every normalized block of (.+?);", issue,
+                flags=re.IGNORECASE,
+            )
+            block_match = re.search(
+                r"missing 1-based block\(s\):\s*(\d+)", issue,
+                flags=re.IGNORECASE,
+            )
+            target = filename_match.group(1).strip() if filename_match else "the first incomplete attachment"
+            start_block = max(0, int(block_match.group(1)) - 1) if block_match else 0
+            return (
+                " Do not describe or simulate the read. Your next response must be exactly one valid "
+                f"{action} tool call for '{target}', with start_block={start_block} and a bounded "
+                "block_count no greater than 200. Use the real tool result as evidence; prose that merely "
+                "claims blocks were read does not satisfy the gate."
+            )
+        issue = next(
+            (
+                str(item) for item in issues
+                if "analyze every attached image" in str(item).casefold()
+            ),
+            "",
+        )
+        missing_match = re.search(r"missing:\s*([^,;]+)", issue, flags=re.IGNORECASE)
+        target = missing_match.group(1).strip() if missing_match else "the first missing image"
+        return (
+            " Do not describe or simulate visual inspection. Your next response must be exactly one valid "
+            f"{action} tool call for '{target}'. Use the injected image on the following model turn; prose "
+            "that merely claims the image was analyzed does not satisfy the gate."
+        )
+
+    @staticmethod
     def _schemas_for_required_tool(
         schemas: List[Dict[str, Any]], required_tool: str,
     ) -> List[Dict[str, Any]]:
@@ -2364,12 +2424,25 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
                     if requested_nudge_level > delivered_nudge_level:
                         runtime["stagnation_nudge_level"] = requested_nudge_level
                         if requested_nudge_level == 1:
-                            guidance = (
-                                "STAGNATION WARNING: repeated inspection has produced no durable quality improvement. "
-                                "Stop rereading or rerunning the same failing command. Use the latest concrete failure to "
-                                "perform the smallest requirement-preserving source correction now, preferably with "
-                                "filesystem.write, then run one targeted verification. Do not modify or weaken QA tests."
+                            coverage_issues = self._document_coverage_issues(
+                                execution_id, step,
                             )
+                            coverage_nudge = self._document_coverage_repair_nudge(
+                                coverage_issues,
+                            )
+                            if coverage_nudge:
+                                guidance = (
+                                    "STAGNATION WARNING: repeated inspection has produced no new durable corpus "
+                                    "coverage. Stop promising or narrating reads and perform the next missing bounded "
+                                    "document action now." + coverage_nudge
+                                )
+                            else:
+                                guidance = (
+                                    "STAGNATION WARNING: repeated inspection has produced no durable quality improvement. "
+                                    "Stop rereading or rerunning the same failing command. Use the latest concrete failure to "
+                                    "perform the smallest requirement-preserving source correction now, preferably with "
+                                    "filesystem.write, then run one targeted verification. Do not modify or weaken QA tests."
+                                )
                         else:
                             guidance = (
                                 "STAGNATION CRITICAL: no durable correction followed the previous warning. Either make "
@@ -2822,7 +2895,7 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
             if not tool_calls:
                 response_text = llm_response.get("content") or ""
                 if re.search(
-                    r"(?:<tool_code\b|\"?tool_call\"?\s*:|\"?name\"?\s*:\s*\"?(?:filesystem|shell|agent|devteam)__)",
+                    r"(?:<tool_code\b|\"?tool_call\"?\s*:|\"?name\"?\s*:\s*\"?(?:filesystem|documents|shell|agent|devteam)__)",
                     response_text,
                     flags=re.IGNORECASE,
                 ):
@@ -2842,10 +2915,10 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
                     )
                     required_repair_tool = self._writer_incremental_repair_tool(
                         execution_id, role_for_step, step, malformed_issues,
-                    )
+                    ) or self._document_coverage_repair_tool(malformed_issues)
                     repair_nudge = self._writer_incremental_repair_nudge(
                         execution_id, role_for_step, step, malformed_issues,
-                    )
+                    ) or self._document_coverage_repair_nudge(malformed_issues)
                     if required_repair_tool:
                         runtime["required_next_tool"] = required_repair_tool
                     convo.messages.append({
@@ -2869,10 +2942,10 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
                         return self._engine_delivery(execution_id, step)
                     repair_nudge = self._writer_incremental_repair_nudge(
                         execution_id, role_for_step, step, completion_issues,
-                    )
+                    ) or self._document_coverage_repair_nudge(completion_issues)
                     required_repair_tool = self._writer_incremental_repair_tool(
                         execution_id, role_for_step, step, completion_issues,
-                    )
+                    ) or self._document_coverage_repair_tool(completion_issues)
                     if required_repair_tool:
                         runtime["required_next_tool"] = required_repair_tool
                     convo.messages.append({
