@@ -237,6 +237,7 @@ Le plan peut déclarer un validateur `document` dans `artifact_validations`. Cha
   "claim_min_words": 24,
   "forbid_external_links": true,
   "forbid_placeholders": true,
+  "validate_arithmetic": true,
   "max_duplicate_paragraphs": 0,
   "duplicate_min_words": 14,
   "terminology": {
@@ -250,6 +251,8 @@ Le plan peut déclarer un validateur `document` dans `artifact_validations`. Cha
 Renseignez les bornes depuis le corpus réel ; ne recopiez pas les nombres de cet exemple. `required_traceability_ids` exige que chaque identifiant apparaisse dans une ligne de tableau Markdown, pas seulement quelque part dans le texte. `terminology` associe le terme canonique aux variantes interdites.
 
 Métriques disponibles : `characters`, `words`, `lines`, `headings`, `paragraphs`, `local_references`, `cited_sources`, `external_links`, `placeholder_markers`, `duplicate_paragraphs`, `unsupported_claim_paragraphs` et les compteurs de couverture des titres, exigences, lignes de traçabilité et sources.
+
+La métrique `arithmetic_mismatches` compte les additions entières explicites incohérentes. Avec `validate_arithmetic`, toute addition d'au moins trois termes est recalculée et le validateur fournit un préfixe de paragraphe pour une réparation ciblée.
 
 ## Générer et lire les rapports
 

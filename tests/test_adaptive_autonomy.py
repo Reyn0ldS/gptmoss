@@ -1243,6 +1243,29 @@ async def test_document_coverage_gate_forces_real_read_after_prose_promise(tmp_p
     ]
 
 
+def test_arithmetic_quality_failure_forces_targeted_repair_for_any_specialist(tmp_path):
+    engine, state = _engine(tmp_path, MockLLMProvider())
+    state.get_execution("arithmetic-repair")
+    project = tmp_path / "projects" / "proj-default" / "analysis"
+    project.mkdir(parents=True)
+    (project / "inventory.md").write_text(
+        "# Coverage\n\n- **Blocks read**: 4 + 10 + 97 = **101 blocks**.\n",
+        encoding="utf-8",
+    )
+    step = {"required_artifacts": ["analysis/inventory.md"]}
+    issues = [
+        "analysis/inventory.md: arithmetic sum mismatch(es): 4 + 10 + 97 "
+        "equals 111, not 101; paragraph prefix: - **Blocks read**: 4 + 10 + 97"
+    ]
+
+    assert engine._writer_incremental_repair_tool(
+        "arithmetic-repair", "architect", step, issues,
+    ) == "filesystem__replace_paragraph"
+    assert "calculated value reported by the gate" in engine._writer_incremental_repair_nudge(
+        "arithmetic-repair", "architect", step, issues,
+    )
+
+
 @pytest.mark.asyncio
 async def test_missing_specialist_artifact_forces_bounded_write_after_malformed_json(tmp_path):
     class CapturingProvider(MockLLMProvider):

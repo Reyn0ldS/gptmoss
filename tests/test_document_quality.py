@@ -86,6 +86,26 @@ def test_duplicate_failure_exposes_machine_actionable_paragraph_prefix(tmp_path)
     assert "this repeated architectural decision paragraph" in failure
 
 
+def test_professional_document_rejects_incorrect_integer_sum_with_repair_prefix(tmp_path):
+    document = tmp_path / "inventory.md"
+    document.write_text(
+        "# Coverage\n\n- **Blocks read**: 4 + 10 + 97 + 16 = **117 blocks**.\n",
+        encoding="utf-8",
+    )
+
+    report = validate_artifact(
+        document,
+        validator="document",
+        constraints={"validate_arithmetic": True},
+    )
+
+    assert not report["valid"]
+    assert report["metrics"]["arithmetic_mismatches"] == 1
+    failure = next(item for item in report["failures"] if "arithmetic sum" in item)
+    assert "equals 127, not 117" in failure
+    assert "paragraph prefix: - **Blocks read**" in failure
+
+
 def test_document_validator_accepts_complete_local_traceable_content(tmp_path):
     document = tmp_path / "architecture.md"
     document.write_text(VALID_DOCUMENT, encoding="utf-8")

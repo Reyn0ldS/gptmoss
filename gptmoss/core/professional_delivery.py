@@ -69,6 +69,7 @@ def apply_professional_profile(
             constraints = {}
             item["constraints"] = constraints
         constraints["forbid_placeholders"] = True
+        constraints["validate_arithmetic"] = True
         constraints["max_duplicate_paragraphs"] = 0
         constraints.setdefault("duplicate_min_words", 12)
         minimums = constraints.setdefault("minimums", {})

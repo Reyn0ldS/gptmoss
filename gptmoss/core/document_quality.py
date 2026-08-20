@@ -342,6 +342,34 @@ def validate_document(path: Path, constraints: Dict[str, Any]) -> ValidationRepo
     if constraints.get("forbid_external_links", False) and external_links:
         _failure(report, f"document contains {len(external_links)} external link(s)")
 
+    arithmetic_mismatches = []
+    if constraints.get("validate_arithmetic", False):
+        visible_text = _without_markdown_code(text)
+        addition_pattern = re.compile(
+            r"(?<![\d.])(\d+(?:\s*\+\s*\d+){2,})\s*=\s*(?:\*\*)?(\d+)"
+        )
+        for line in visible_text.splitlines():
+            for match in addition_pattern.finditer(line):
+                terms = [int(value) for value in re.findall(r"\d+", match.group(1))]
+                claimed = int(match.group(2))
+                actual = sum(terms)
+                if actual == claimed:
+                    continue
+                prefix = " ".join(line.strip().split())[:180]
+                arithmetic_mismatches.append({
+                    "expression": match.group(1),
+                    "claimed": claimed,
+                    "actual": actual,
+                    "paragraph_prefix": prefix,
+                })
+        if arithmetic_mismatches:
+            samples = "; ".join(
+                f"{item['expression']} equals {item['actual']}, not {item['claimed']}; "
+                f"paragraph prefix: {item['paragraph_prefix']}"
+                for item in arithmetic_mismatches[:5]
+            )
+            _failure(report, "arithmetic sum mismatch(es): " + samples)
+
     normalized_paragraphs = [
         _normalized_paragraph(paragraph)
         for paragraph in paragraphs
@@ -486,6 +514,7 @@ def validate_document(path: Path, constraints: Dict[str, Any]) -> ValidationRepo
         "placeholder_markers": len(placeholder_hits),
         "duplicate_paragraphs": duplicate_count,
         "unsupported_claim_paragraphs": len(unsupported_claims),
+        "arithmetic_mismatches": len(arithmetic_mismatches),
         "required_headings_covered": len(required_headings) - len(missing_headings) - len(empty_headings),
         "required_headings_total": len(required_headings),
         "requirement_ids_covered": len(required_ids) - len(missing_ids),

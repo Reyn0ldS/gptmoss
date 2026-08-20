@@ -696,12 +696,14 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
         issues: List[str],
     ) -> str:
         """Return the exact mutation required to repair a long writer delivery."""
-        targeted_markers = ("duplicate paragraph", "lack a local reference")
+        targeted_markers = (
+            "arithmetic sum mismatch", "duplicate paragraph", "lack a local reference",
+        )
         replacement_markers = (
             "invalid local reference", "external link", "placeholder marker",
             "reasoning tag",
         )
-        if role_key != "writer" or not any(
+        if not any(
             marker in issue
             for issue in issues
             for marker in (
@@ -743,7 +745,9 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
                 f"{action} tool call targeting '{target}'. Use a paragraph prefix reported by "
                 "the gate. For a duplicate, remove occurrence=2 with empty content. For an "
                 "unsupported claim, replace occurrence=1 with one corrected, evidence-grounded "
-                "paragraph containing a valid nearby bounded local citation. Change exactly one "
+                "paragraph containing a valid nearby bounded local citation. For an arithmetic "
+                "mismatch, preserve the paragraph and replace only the claimed result with the "
+                "calculated value reported by the gate. Change exactly one "
                 "paragraph per iteration; never rewrite or delete the whole document."
             )
         if action == "filesystem__append":
@@ -1471,6 +1475,15 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
             ))
 
         state.current_plan = normalize_plan(state.current_plan)
+        # Reapply the deterministic profile on resume so persisted plans gain
+        # newly introduced quality gates without requiring replanning or losing
+        # completed work. The operation is idempotent and preserves stricter
+        # planner/user constraints.
+        state.current_plan = apply_professional_profile(
+            state.current_plan,
+            self.artifact_store,
+            state.variables.get("attachment_ids", []),
+        )
         if "document_model_checkpoint" not in state.variables:
             self._initialize_document_state(execution_id, task, state.current_plan, state)
         if not isinstance(state.variables.get("delivery_contract"), dict):

@@ -37,6 +37,7 @@ def test_professional_profile_enforces_quality_and_attachment_inventory(tmp_path
     assert constraints["source_inventory"] == {"source.txt": {"blocks": 2}}
     assert constraints["require_claim_references"] is True
     assert constraints["require_bounded_references"] is True
+    assert constraints["validate_arithmetic"] is True
     supporting = policies["analysis/inventory.md"]["constraints"]
     assert supporting["source_inventory"] == {"source.txt": {"blocks": 2}}
     assert supporting["required_source_files"] == ["source.txt"]
