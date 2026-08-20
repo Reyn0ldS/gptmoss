@@ -1181,6 +1181,58 @@ async def test_targeted_repair_must_use_a_machine_reported_prefix(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_duplicate_heading_repair_cannot_insert_a_truncated_replacement(tmp_path):
+    engine, state = _engine(tmp_path)
+    execution = state.get_execution("guarded-duplicate-heading")
+    execution.variables["role_key"] = "architect"
+    execution.current_plan = {
+        "steps": [{
+            "id": 0, "role": "architect",
+            "required_artifacts": ["architecture.md"], "owned_paths": ["architecture.md"],
+        }],
+        "artifact_validations": [{
+            "path": "architecture.md", "validator": "document", "constraints": {},
+        }],
+    }
+    execution.variables["step_runtime"] = {"0": {
+        "required_next_tool": "filesystem__replace_paragraph",
+        "required_repair_issues": [
+            "architecture.md: duplicate heading occurrence(s); repeated Markdown "
+            "heading selector(s): ### Diagram 2"
+        ],
+    }}
+    project = tmp_path / "projects" / "proj-default"
+    project.mkdir(parents=True)
+    target = project / "architecture.md"
+    target.write_text(
+        "### Diagram 2\n\nFirst body.\n\n### Diagram 2\n\nSecond body.\n",
+        encoding="utf-8",
+    )
+
+    blocked = await engine._call_tool(
+        "guarded-duplicate-heading", "filesystem", "replace_paragraph",
+        {
+            "path": "architecture.md", "paragraph_prefix": "### Diagram 2",
+            "content": "## 4. Truncated", "occurrence": 2,
+        },
+    )
+    allowed = await engine._call_tool(
+        "guarded-duplicate-heading", "filesystem", "replace_paragraph",
+        {
+            "path": "architecture.md", "paragraph_prefix": "### Diagram 2",
+            "content": "", "occurrence": 2,
+        },
+    )
+
+    content = target.read_text(encoding="utf-8")
+    assert "Duplicate-heading repair must" in blocked
+    assert "Markdown line occurrence 2 replaced successfully" in allowed
+    assert "Truncated" not in content
+    assert content.count("### Diagram 2") == 1
+    assert "First body." in content and "Second body." in content
+
+
+@pytest.mark.asyncio
 async def test_writer_cannot_bypass_document_overwrite_guard_with_shell(tmp_path):
     engine, state = _engine(tmp_path)
     execution = state.get_execution("guarded-shell-document")

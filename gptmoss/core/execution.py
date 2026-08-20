@@ -3582,6 +3582,30 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
             and action.lower() == "replace_paragraph"
             and required_repair_issues
         ):
+            duplicate_heading_repair = any(
+                "duplicate heading" in str(issue).casefold()
+                for issue in required_repair_issues
+            )
+            if duplicate_heading_repair:
+                selector = str(arguments.get("paragraph_prefix") or "").strip()
+                try:
+                    occurrence = int(arguments.get("occurrence", 1))
+                except (TypeError, ValueError):
+                    occurrence = 0
+                if (
+                    not re.match(r"^#{1,6}\s+\S", selector)
+                    or occurrence != 2
+                    or str(arguments.get("content") or "").strip()
+                ):
+                    self.telemetry.record(
+                        "unsafe_duplicate_heading_repair_blocked", execution_id,
+                        paragraph_prefix=selector[:180], occurrence=occurrence,
+                    )
+                    return (
+                        "Error: Duplicate-heading repair must copy one reported Markdown "
+                        "heading selector, set occurrence=2, and use empty content. This "
+                        "preserves the duplicate section body under the first heading."
+                    )
             supplied_prefix = " ".join(
                 str(arguments.get("paragraph_prefix") or "").casefold().split()
             )
