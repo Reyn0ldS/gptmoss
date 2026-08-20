@@ -173,8 +173,18 @@ class FilesystemCapability:
         resolved = self._resolve_path(path, execution_id)
         key_function = self._paragraph_key
         literal_line_selector = False
+        has_local_reference = bool(re.search(
+            r"\[[^\[\]\n]+?\s+>\s+[^\[\]\n]+?\]",
+            str(paragraph_prefix or ""),
+        ))
+        if has_local_reference:
+            # The same table label or prose can legitimately occur with two
+            # different citations. Keep the reported defective citation in
+            # the selector so an already-correct occurrence is never chosen.
+            key_function = self._literal_line_key
+            literal_line_selector = True
         prefix = key_function(paragraph_prefix)
-        if len(prefix) < 24:
+        if len(prefix) < 24 and not literal_line_selector:
             # A quality-gate selector may be a short label wrapped around a
             # long bounded citation. Retain that exact citation for safe,
             # unique selection instead of rejecting an otherwise precise line.

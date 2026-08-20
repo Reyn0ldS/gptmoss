@@ -708,6 +708,47 @@ async def test_reference_led_markdown_line_uses_literal_selector_fallback(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_citation_selector_disambiguates_repeated_table_label(tmp_path):
+    engine, state = _engine(tmp_path)
+    execution = state.get_execution("citation-disambiguation")
+    execution.variables["delivery_contract"] = {
+        "steps": [{"step_id": 0, "role": "architect", "owned_paths": ["inventory.md"]}]
+    }
+    execution.variables["plan_step_id"] = 0
+    execution.variables["role_key"] = "architect"
+    project = tmp_path / "projects" / "proj-default"
+    project.mkdir(parents=True)
+    target = project / "inventory.md"
+    target.write_text(
+        "# First matrix\n\n"
+        "| DEC-003 | Deterministic validators | [quality.py > blocks 1-44] | Complete |\n\n"
+        "# Second matrix\n\n"
+        "| DEC-003 | Deterministic validators | [quality.py > blocks 0-18] | Complete |\n",
+        encoding="utf-8",
+    )
+
+    result = await engine._call_tool(
+        "citation-disambiguation", "filesystem", "replace_paragraph",
+        {
+            "path": "inventory.md",
+            "paragraph_prefix": (
+                "| DEC-003 | Deterministic validators | "
+                "[quality.py > blocks 0-18] | Complete |"
+            ),
+            "content": (
+                "| DEC-003 | Deterministic validators | "
+                "[quality.py > blocks 1-44] | Complete |"
+            ),
+        },
+    )
+
+    content = target.read_text(encoding="utf-8")
+    assert "Markdown line occurrence 1 replaced successfully" in result
+    assert "blocks 0-18" not in content
+    assert content.count("[quality.py > blocks 1-44]") == 2
+
+
+@pytest.mark.asyncio
 async def test_paragraph_repair_rejects_ambiguous_short_prefix(tmp_path):
     engine, state = _engine(tmp_path)
     state.get_execution("short-prefix")
