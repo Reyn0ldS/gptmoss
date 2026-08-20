@@ -387,6 +387,7 @@ def test_document_validator_reports_content_and_provenance_defects(tmp_path):
     failures = "\n".join(report["failures"])
     assert "missing required heading" in failures
     assert "empty required section" in failures
+    assert "exact Markdown heading selector(s): ## Executive Summary" in failures
     assert "missing requirement ID" in failures
     assert "traceability" in failures
     assert "placeholder" in failures

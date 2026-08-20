@@ -36,6 +36,7 @@ RENDER_TARGETED_MARKERS = (
 RENDER_SECTION_MARKERS = (
     "record section",
     "invalid diagram",
+    "empty required section",
 )
 RENDER_REWRITE_MARKERS = (
     "invalid local reference",
@@ -46,7 +47,6 @@ RENDER_REWRITE_MARKERS = (
 )
 RENDER_APPEND_MARKERS = (
     "words=",
-    "empty required section",
     "uncited required source",
     "cited_sources=",
     "local_references=",

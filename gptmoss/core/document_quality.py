@@ -362,6 +362,7 @@ def validate_document(path: Path, constraints: Dict[str, Any]) -> ValidationRepo
         folded_headings.setdefault(_fold(title), []).append(index)
     missing_headings = []
     empty_headings = []
+    empty_heading_selectors = []
     for title in required_headings:
         matches = folded_headings.get(_fold(title), [])
         if not matches:
@@ -375,10 +376,18 @@ def validate_document(path: Path, constraints: Dict[str, Any]) -> ValidationRepo
             section_versions.append(section)
         if not any(len(_words(section)) >= min_section_words for section in section_versions):
             empty_headings.append(title)
+            heading_index = matches[0]
+            _, level, actual_title = headings[heading_index]
+            empty_heading_selectors.append(f"{'#' * level} {actual_title}")
     if missing_headings:
         _failure(report, "missing required heading(s): " + ", ".join(missing_headings))
     if empty_headings:
-        _failure(report, "empty required section(s): " + ", ".join(empty_headings))
+        _failure(
+            report,
+            "empty required section(s): " + ", ".join(empty_headings)
+            + "; exact Markdown heading selector(s): "
+            + "; ".join(empty_heading_selectors),
+        )
 
     duplicate_heading_count = 0
     duplicate_heading_samples: List[str] = []

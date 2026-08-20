@@ -720,7 +720,7 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
             "citation-like pattern",
             "external link", "placeholder marker", "reasoning tag",
         )
-        section_markers = ("record section", "invalid diagram")
+        section_markers = ("record section", "invalid diagram", "empty required section")
         append_markers = (
             "uncited required source", "cited_sources=", "local_references=",
         )
@@ -801,6 +801,16 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
                 "paragraph per iteration; never rewrite or delete the whole document."
             )
         if action == "filesystem__replace_section":
+            if any("empty required section" in str(issue).casefold() for issue in issues):
+                return (
+                    f" Do not answer with a plan. Your next response must be exactly one valid "
+                    f"{action} tool call targeting '{target}'. Copy one exact Markdown heading "
+                    "selector reported by the gate and replace only its empty or underdeveloped "
+                    "body with 400-800 words of non-repetitive professional prose, nearby valid "
+                    "bounded local citations, and any required distinctions between fact, "
+                    "inference, and recommendation. Do not include the selected heading in "
+                    "content and do not modify any other section."
+                )
             if any("invalid diagram" in str(issue).casefold() for issue in issues):
                 return (
                     f" Do not answer with a plan. Your next response must be exactly one valid "
@@ -834,7 +844,8 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
                 chunk_size = "40-120 word"
             else:
                 continuity = (
-                    "Preserve the existing valid content and append the next missing or underdeveloped section"
+                    "Preserve the existing valid content and append only new non-repetitive "
+                    "prose under the current final section, without adding any Markdown heading"
                 )
                 chunk_size = "400-800 word"
         elif self._artifact_exists(execution_id, target):
@@ -3704,6 +3715,28 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
         role = str(state.variables.get("role_key") or "coordinator").lower()
         required_repair_tool = self._active_required_repair_tool(state)
         required_repair_issues = self._active_required_repair_issues(state)
+        if (
+            required_repair_tool == "filesystem__append"
+            and capability.lower() == "filesystem"
+            and action.lower() == "append"
+            and any("words=" in str(issue).casefold() for issue in required_repair_issues)
+        ):
+            append_content = str(arguments.get("content") or "")
+            appended_headings = [
+                line.strip() for line in append_content.splitlines()
+                if re.match(r"^\s*#{1,6}\s+\S", line)
+            ]
+            if appended_headings:
+                self.telemetry.record(
+                    "unsafe_word_count_heading_append_blocked", execution_id,
+                    headings=appended_headings[:10],
+                )
+                return (
+                    "Error: Word-count repair must extend existing content without adding "
+                    "Markdown headings. Fill an empty named section with "
+                    "filesystem.replace_section, or append only new non-repetitive prose "
+                    "under the current final section."
+                )
         if (
             required_repair_tool == "filesystem__append"
             and capability.lower() == "filesystem"

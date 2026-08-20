@@ -640,7 +640,7 @@ async def test_short_duplicate_markdown_heading_occurrence_can_be_removed(tmp_pa
     target = project / "inventory.md"
     target.write_text(
         "# Inventory\n\n## Conclusion\n\nFirst body.\n\n"
-        "## Conclusion\n\nSecond body remains.\n",
+        "Conclusion\n\n## Conclusion\n\nSecond body remains.\n",
         encoding="utf-8",
     )
 
@@ -655,6 +655,7 @@ async def test_short_duplicate_markdown_heading_occurrence_can_be_removed(tmp_pa
     content = target.read_text(encoding="utf-8")
     assert "Markdown line occurrence 2 replaced successfully" in result
     assert content.count("## Conclusion") == 1
+    assert "\nConclusion\n" in content
     assert "First body." in content
     assert "Second body remains." in content
 
@@ -1538,6 +1539,66 @@ def test_writer_record_gate_requires_one_reported_section_repair(tmp_path):
     assert "including its # markers" in nudge
     assert "one record per iteration" in nudge
     assert "every other record and section must remain untouched" in nudge
+
+
+def test_writer_empty_required_section_gate_requires_in_place_section_fill(tmp_path):
+    engine, state = _engine(tmp_path)
+    state.get_execution("writer-empty-section")
+    project = tmp_path / "projects" / "proj-default"
+    project.mkdir(parents=True)
+    (project / "dossier.md").write_text(
+        "# Dossier\n\n## Registre des risques\n\n## Conclusion\n\nStable.\n",
+        encoding="utf-8",
+    )
+    step = {"role": "writer", "required_artifacts": ["dossier.md"]}
+    issues = [
+        "dossier.md: empty required section(s): Registre des risques; "
+        "exact Markdown heading selector(s): ## Registre des risques",
+    ]
+
+    required = engine._writer_incremental_repair_tool(
+        "writer-empty-section", "writer", step, issues,
+    )
+    nudge = engine._writer_incremental_repair_nudge(
+        "writer-empty-section", "writer", step, issues,
+    )
+
+    assert required == "filesystem__replace_section"
+    assert "empty or underdeveloped body" in nudge
+    assert "do not modify any other section" in nudge
+
+
+@pytest.mark.asyncio
+async def test_word_count_append_cannot_recreate_existing_section_headings(tmp_path):
+    engine, state = _engine(tmp_path)
+    execution = state.get_execution("writer-word-count-append")
+    execution.variables["role_key"] = "writer"
+    execution.current_plan = {
+        "steps": [{
+            "id": 0, "role": "writer", "required_artifacts": ["dossier.md"],
+            "owned_paths": ["dossier.md"],
+        }],
+        "artifact_validations": [{
+            "path": "dossier.md", "validator": "document", "constraints": {},
+        }],
+    }
+    execution.current_step = 0
+    execution.variables["step_runtime"] = {"0": {
+        "required_next_tool": "filesystem__append",
+        "required_repair_issues": ["dossier.md: words=3000 is below required minimum 8750"],
+    }}
+    project = tmp_path / "projects" / "proj-default"
+    project.mkdir(parents=True)
+    target = project / "dossier.md"
+    target.write_text("# Dossier\n\nContenu stable.\n", encoding="utf-8")
+
+    blocked = await engine._call_tool(
+        "writer-word-count-append", "filesystem", "append",
+        {"path": "dossier.md", "content": "\n## Registre des risques\n\nAjout."},
+    )
+
+    assert "without adding Markdown headings" in blocked
+    assert target.read_text(encoding="utf-8") == "# Dossier\n\nContenu stable.\n"
 
 
 def test_writer_invalid_diagram_gate_requires_its_reported_section(tmp_path):

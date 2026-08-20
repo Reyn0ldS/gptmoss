@@ -106,6 +106,15 @@ def test_classify_invalid_diagram_requires_section_repair():
     assert target.required_tool == "filesystem__replace_section"
 
 
+def test_classify_empty_required_section_requires_in_place_section_repair():
+    target = classify_issue_texts([
+        "empty required section(s): Registre des risques; exact Markdown "
+        "heading selector(s): ## Registre des risques",
+    ])
+    assert target.obligation == DOCUMENT_RENDER
+    assert target.required_tool == "filesystem__replace_section"
+
+
 def test_classify_cli_smoke_keeps_debugger_fallback():
     target = classify_assurance_report({
         "passed": False, "checks": [], "failures": ["CLI smoke failed"],

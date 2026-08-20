@@ -248,10 +248,31 @@ class FilesystemCapability:
             # line, so support a bounded single-line replacement rather than
             # forcing a rewrite of the whole segment or document.
             source_lines = original.splitlines(keepends=True)
-            line_matches = [
-                index for index, line in enumerate(source_lines)
-                if key_function(line).startswith(prefix)
-            ]
+            if markdown_heading_selector:
+                selector_match = re.match(
+                    r"^\s*(#{1,6})\s+(.+?)\s*#*\s*$", str(paragraph_prefix)
+                )
+                expected_level = len(selector_match.group(1)) if selector_match else 0
+                expected_title = self._literal_line_key(
+                    selector_match.group(2) if selector_match else ""
+                )
+                line_matches = []
+                for index, line in enumerate(source_lines):
+                    heading_match = re.match(
+                        r"^\s*(#{1,6})\s+(.+?)\s*#*\s*(?:\r?\n)?$", line
+                    )
+                    if not heading_match:
+                        continue
+                    if (
+                        len(heading_match.group(1)) == expected_level
+                        and self._literal_line_key(heading_match.group(2)) == expected_title
+                    ):
+                        line_matches.append(index)
+            else:
+                line_matches = [
+                    index for index, line in enumerate(source_lines)
+                    if key_function(line).startswith(prefix)
+                ]
             if len(line_matches) >= requested_occurrence:
                 line_index = line_matches[requested_occurrence - 1]
                 old_line = source_lines[line_index]
