@@ -10,6 +10,7 @@ import os
 import re
 import shlex
 import sys
+import unicodedata
 from contextlib import AsyncExitStack
 from pathlib import Path
 from typing import Dict, Any, List, Optional
@@ -810,6 +811,7 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
                 "local citations. Do not include the selected heading in content. Repair exactly "
                 "one record per iteration; every other record and section must remain untouched."
             )
+        chunk_size = "400-800 word"
         if action == "filesystem__append":
             if any(
                 marker in str(issue).casefold()
@@ -817,14 +819,17 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
                 for marker in ("uncited required source", "cited_sources=", "local_references=")
             ):
                 continuity = (
-                    "Preserve the existing valid content and append one concise evidence-coverage "
-                    "section citing every currently missing source exactly once with a plain, "
-                    "one-based bounded locator from source_inventory"
+                    "Preserve the existing valid content and append exactly one short prose "
+                    "paragraph citing every currently missing source exactly once with a plain, "
+                    "one-based bounded locator from source_inventory. Do not add a heading, list, "
+                    "table, requirement matrix, or repeat existing content"
                 )
+                chunk_size = "40-120 word"
             else:
                 continuity = (
                     "Preserve the existing valid content and append the next missing or underdeveloped section"
                 )
+                chunk_size = "400-800 word"
         elif self._artifact_exists(execution_id, target):
             continuity = (
                 "Replace the defective document with only the first clean, complete section; "
@@ -835,7 +840,7 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
         return (
             f" Do not answer with a plan and do not send the whole document in one call. "
             f"Your next response must be exactly one valid {action} tool call targeting '{target}'. "
-            f"{continuity} in a bounded 400-800 word chunk with nearby valid local citations. "
+            f"{continuity} in a bounded {chunk_size} chunk with nearby valid local citations. "
             "Repeat with another bounded append call on later iterations until every gate passes; "
             "never create undeclared part files."
         )
@@ -3628,6 +3633,32 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
         required_repair_tool = self._active_required_repair_tool(state)
         required_repair_issues = self._active_required_repair_issues(state)
         if (
+            required_repair_tool == "filesystem__append"
+            and capability.lower() == "filesystem"
+            and action.lower() == "append"
+            and any(
+                "uncited required source" in str(issue).casefold()
+                for issue in required_repair_issues
+            )
+        ):
+            append_content = str(arguments.get("content") or "").strip()
+            append_words = re.findall(r"[^\W_]+(?:[-'][^\W_]+)*", append_content)
+            contains_structure = any(
+                re.match(r"^\s*(?:#{1,6}\s|\||[-*+]\s+)", line)
+                for line in append_content.splitlines()
+                if line.strip()
+            )
+            if not append_content or len(append_words) > 180 or contains_structure:
+                self.telemetry.record(
+                    "unsafe_source_coverage_append_blocked", execution_id,
+                    words=len(append_words), contains_structure=contains_structure,
+                )
+                return (
+                    "Error: Source-coverage append must be one concise prose paragraph of at "
+                    "most 180 words, without headings, lists, or tables. Cite only the missing "
+                    "sources with valid bounded locators and do not repeat existing sections."
+                )
+        if (
             required_repair_tool == "filesystem__replace_paragraph"
             and capability.lower() == "filesystem"
             and action.lower() == "replace_paragraph"
@@ -3657,12 +3688,16 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
                         "heading selector, set occurrence=2, and use empty content. This "
                         "preserves the duplicate section body under the first heading."
                     )
-            supplied_prefix = " ".join(
-                str(arguments.get("paragraph_prefix") or "").casefold().split()
-            )
-            normalized_issues = " ".join(
-                " ".join(issue.casefold().split()) for issue in required_repair_issues
-            )
+            def repair_prefix_key(value: Any) -> str:
+                decomposed = unicodedata.normalize("NFKD", str(value or ""))
+                folded = "".join(
+                    character for character in decomposed
+                    if not unicodedata.combining(character)
+                ).casefold()
+                return " ".join(re.findall(r"[^\W_]+", folded, flags=re.UNICODE))
+
+            supplied_prefix = repair_prefix_key(arguments.get("paragraph_prefix"))
+            normalized_issues = repair_prefix_key(" ".join(required_repair_issues))
             reported_prefix = supplied_prefix[:100]
             prefix_is_reported = bool(
                 supplied_prefix

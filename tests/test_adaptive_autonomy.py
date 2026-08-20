@@ -1822,11 +1822,11 @@ async def test_successful_required_mutation_immediately_routes_next_machine_defe
     llm.add_response(tool_calls=[{
         "id": "cite", "type": "function",
         "function": {
-            "name": "filesystem__append",
-            "arguments": {
-                "path": "report.md",
-                "content": "\n\n## Source coverage\n\nEvidence. [source.md > blocks 1-1]\n",
-            },
+                "name": "filesystem__append",
+                "arguments": {
+                    "path": "report.md",
+                    "content": "\n\nEvidence coverage. [source.md > blocks 1-1]\n",
+                },
         },
     }])
     llm.add_response(content=delivery)
@@ -1912,11 +1912,11 @@ async def test_delegated_retry_mutation_also_enters_immediate_revalidation(tmp_p
     llm.add_response(tool_calls=[{
         "id": "delegated-cite", "type": "function",
         "function": {
-            "name": "filesystem__append",
-            "arguments": {
-                "path": "report.md",
-                "content": "\n\n## Source coverage\n\nEvidence. [source.md > blocks 1-1]\n",
-            },
+                "name": "filesystem__append",
+                "arguments": {
+                    "path": "report.md",
+                    "content": "\n\nEvidence coverage. [source.md > blocks 1-1]\n",
+                },
         },
     }])
     llm.add_response(content=delivery)

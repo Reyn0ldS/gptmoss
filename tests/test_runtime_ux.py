@@ -1181,6 +1181,89 @@ async def test_targeted_repair_must_use_a_machine_reported_prefix(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_targeted_repair_accepts_gate_normalized_prefix_with_terminal_punctuation(tmp_path):
+    engine, state = _engine(tmp_path)
+    execution = state.get_execution("normalized-prefix-repair")
+    execution.variables["role_key"] = "architect"
+    execution.current_plan = {
+        "steps": [{
+            "id": 0, "role": "architect", "required_artifacts": ["inventory.md"],
+            "owned_paths": ["inventory.md"],
+        }],
+        "artifact_validations": [{
+            "path": "inventory.md", "validator": "document", "constraints": {},
+        }],
+    }
+    execution.variables["step_runtime"] = {"0": {
+        "required_next_tool": "filesystem__replace_paragraph",
+        "required_repair_issues": [
+            "inventory.md: repeated paragraph prefix(es): cette matrice trace "
+            "chaque exigence vers les preuves locales correspondantes"
+        ],
+    }}
+    project = tmp_path / "projects" / "proj-default"
+    project.mkdir(parents=True)
+    target = project / "inventory.md"
+    paragraph = "Cette matrice trace chaque exigence vers les preuves locales correspondantes."
+    target.write_text(f"{paragraph}\n\n{paragraph}\n", encoding="utf-8")
+
+    result = await engine._call_tool(
+        "normalized-prefix-repair", "filesystem", "replace_paragraph",
+        {
+            "path": "inventory.md", "paragraph_prefix": paragraph,
+            "content": "", "occurrence": 2,
+        },
+    )
+
+    assert "occurrence 2 replaced successfully" in result
+
+
+@pytest.mark.asyncio
+async def test_source_coverage_append_rejects_repeated_document_structure(tmp_path):
+    engine, state = _engine(tmp_path)
+    execution = state.get_execution("guarded-source-append")
+    execution.variables["role_key"] = "architect"
+    execution.current_plan = {
+        "steps": [{
+            "id": 0, "role": "architect", "required_artifacts": ["inventory.md"],
+            "owned_paths": ["inventory.md"],
+        }],
+        "artifact_validations": [{
+            "path": "inventory.md", "validator": "document", "constraints": {},
+        }],
+    }
+    execution.variables["step_runtime"] = {"0": {
+        "required_next_tool": "filesystem__append",
+        "required_repair_issues": [
+            "inventory.md: uncited required source file(s): architecture.md"
+        ],
+    }}
+    project = tmp_path / "projects" / "proj-default"
+    project.mkdir(parents=True)
+    target = project / "inventory.md"
+    target.write_text("# Inventory\n\nExisting evidence.\n", encoding="utf-8")
+
+    blocked = await engine._call_tool(
+        "guarded-source-append", "filesystem", "append",
+        {"path": "inventory.md", "content": "## Repeated section\n\n| A | B |"},
+    )
+    allowed = await engine._call_tool(
+        "guarded-source-append", "filesystem", "append",
+        {
+            "path": "inventory.md",
+            "content": (
+                "La source complète l'analyse locale. "
+                "[architecture.md > Architecture > blocks 1-2]"
+            ),
+        },
+    )
+
+    assert "Source-coverage append must be one concise prose paragraph" in blocked
+    assert "Content appended successfully" in allowed
+    assert "Repeated section" not in target.read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
 async def test_duplicate_heading_repair_cannot_insert_a_truncated_replacement(tmp_path):
     engine, state = _engine(tmp_path)
     execution = state.get_execution("guarded-duplicate-heading")
