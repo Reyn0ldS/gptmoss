@@ -140,6 +140,16 @@ class FilesystemCapability:
         ).casefold()
         return " ".join(re.findall(r"[^\W_]+", folded, flags=re.UNICODE))
 
+    @staticmethod
+    def _literal_line_key(value: str) -> str:
+        """Normalize a selector while retaining citation text for reference-led lines."""
+        decomposed = unicodedata.normalize("NFKD", str(value or ""))
+        folded = "".join(
+            character for character in decomposed
+            if not unicodedata.combining(character)
+        ).casefold()
+        return " ".join(re.findall(r"[^\W_]+", folded, flags=re.UNICODE))
+
     @action(
         name="replace_paragraph",
         description=(
@@ -161,7 +171,16 @@ class FilesystemCapability:
         """Atomically replace one blank-line-delimited Markdown paragraph."""
         execution_id = context.get("execution_id") if context else None
         resolved = self._resolve_path(path, execution_id)
-        prefix = self._paragraph_key(paragraph_prefix)
+        key_function = self._paragraph_key
+        literal_line_selector = False
+        prefix = key_function(paragraph_prefix)
+        if len(prefix) < 24:
+            # A quality-gate selector may be a short label wrapped around a
+            # long bounded citation. Retain that exact citation for safe,
+            # unique selection instead of rejecting an otherwise precise line.
+            key_function = self._literal_line_key
+            literal_line_selector = True
+            prefix = key_function(paragraph_prefix)
         if len(prefix) < 24:
             return "Error: paragraph_prefix must contain at least 24 normalized characters."
         try:
@@ -188,7 +207,7 @@ class FilesystemCapability:
             ):
                 body_start += 1
             body = " ".join(line.strip() for line in lines[body_start:] if line.strip())
-            if self._paragraph_key(body).startswith(prefix):
+            if not literal_line_selector and key_function(body).startswith(prefix):
                 matches.append((index, lines[:body_start]))
         if not matches:
             # Blank-line paragraph segmentation can group adjacent Markdown
@@ -198,7 +217,7 @@ class FilesystemCapability:
             source_lines = original.splitlines(keepends=True)
             line_matches = [
                 index for index, line in enumerate(source_lines)
-                if self._paragraph_key(line).startswith(prefix)
+                if key_function(line).startswith(prefix)
             ]
             if len(line_matches) >= requested_occurrence:
                 line_index = line_matches[requested_occurrence - 1]

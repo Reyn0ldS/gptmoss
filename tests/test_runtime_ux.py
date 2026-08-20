@@ -668,6 +668,46 @@ async def test_owned_plain_markdown_line_can_be_repaired_by_reported_prefix(tmp_
 
 
 @pytest.mark.asyncio
+async def test_reference_led_markdown_line_uses_literal_selector_fallback(tmp_path):
+    engine, state = _engine(tmp_path)
+    execution = state.get_execution("reference-line-repair")
+    execution.variables["delivery_contract"] = {
+        "steps": [{"step_id": 0, "role": "architect", "owned_paths": ["inventory.md"]}]
+    }
+    execution.variables["plan_step_id"] = 0
+    execution.variables["role_key"] = "architect"
+    project = tmp_path / "projects" / "proj-default"
+    project.mkdir(parents=True)
+    target = project / "inventory.md"
+    target.write_text(
+        "# Coverage\n\n"
+        "- [qualification/acceptance-criteria.txt > blocks 0-3]: Fully covered.\n"
+        "- [qualification/architecture-reference.docx > blocks 1-97]: Fully covered.\n",
+        encoding="utf-8",
+    )
+
+    result = await engine._call_tool(
+        "reference-line-repair", "filesystem", "replace_paragraph",
+        {
+            "path": "inventory.md",
+            "paragraph_prefix": (
+                "- [qualification/acceptance-criteria.txt > blocks 0-3]: Fully covered."
+            ),
+            "content": (
+                "- [qualification/acceptance-criteria.txt > blocks 1-4]: Fully covered."
+            ),
+        },
+    )
+
+    content = target.read_text(encoding="utf-8")
+    assert "Markdown line occurrence 1 replaced successfully" in result
+    assert "acceptance-criteria.txt > blocks 0-3" not in content
+    assert "acceptance-criteria.txt > blocks 1-4" in content
+    assert "architecture-reference.docx > blocks 1-97" in content
+    assert content.count("Fully covered.") == 2
+
+
+@pytest.mark.asyncio
 async def test_paragraph_repair_rejects_ambiguous_short_prefix(tmp_path):
     engine, state = _engine(tmp_path)
     state.get_execution("short-prefix")
