@@ -825,6 +825,62 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
             "that merely claims the image was analyzed does not satisfy the gate."
         )
 
+    def _required_artifact_initialization_tool(
+        self,
+        execution_id: str,
+        step: Dict[str, Any],
+        issues: List[str],
+    ) -> str:
+        """Require a bounded first write when an owned text artifact is absent."""
+        if not any(
+            "create non-empty required artifacts" in str(issue or "").casefold()
+            for issue in issues
+        ):
+            return ""
+        textual_suffixes = {
+            ".css", ".csv", ".html", ".ini", ".js", ".json", ".jsonl",
+            ".jsx", ".md", ".py", ".pyi", ".sh", ".toml", ".ts", ".tsx",
+            ".txt", ".xml", ".yaml", ".yml",
+        }
+        return "filesystem__write" if any(
+            not self._artifact_exists(execution_id, path)
+            and Path(str(path)).suffix.casefold() in textual_suffixes
+            for path in step.get("required_artifacts", [])
+        ) else ""
+
+    def _required_artifact_initialization_nudge(
+        self,
+        execution_id: str,
+        step: Dict[str, Any],
+        issues: List[str],
+    ) -> str:
+        """Constrain first artifact creation so prompt-fallback JSON stays complete."""
+        action = self._required_artifact_initialization_tool(
+            execution_id, step, issues,
+        )
+        if not action:
+            return ""
+        target = next(
+            str(path) for path in step.get("required_artifacts", [])
+            if not self._artifact_exists(execution_id, str(path))
+            and Path(str(path)).suffix.casefold() in {
+                ".css", ".csv", ".html", ".ini", ".js", ".json", ".jsonl",
+                ".jsx", ".md", ".py", ".pyi", ".sh", ".toml", ".ts", ".tsx",
+                ".txt", ".xml", ".yaml", ".yml",
+            }
+        )
+        prose_suffixes = {".html", ".md", ".txt"}
+        bounded_content = (
+            "Write one self-contained 300-500 word first section with the required nearby evidence references"
+            if Path(target).suffix.casefold() in prose_suffixes
+            else "Write one small, syntactically complete initial unit no larger than 4,000 characters"
+        )
+        return (
+            " Do not answer with a plan and do not serialize the entire artifact in one response. "
+            f"Your next response must be exactly one valid {action} tool call targeting '{target}'. "
+            f"{bounded_content}. Later turns can append further bounded sections after the first call succeeds."
+        )
+
     @staticmethod
     def _schemas_for_required_tool(
         schemas: List[Dict[str, Any]], required_tool: str,
@@ -2915,10 +2971,18 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
                     )
                     required_repair_tool = self._writer_incremental_repair_tool(
                         execution_id, role_for_step, step, malformed_issues,
-                    ) or self._document_coverage_repair_tool(malformed_issues)
+                    ) or self._document_coverage_repair_tool(
+                        malformed_issues
+                    ) or self._required_artifact_initialization_tool(
+                        execution_id, step, malformed_issues,
+                    )
                     repair_nudge = self._writer_incremental_repair_nudge(
                         execution_id, role_for_step, step, malformed_issues,
-                    ) or self._document_coverage_repair_nudge(malformed_issues)
+                    ) or self._document_coverage_repair_nudge(
+                        malformed_issues
+                    ) or self._required_artifact_initialization_nudge(
+                        execution_id, step, malformed_issues,
+                    )
                     if required_repair_tool:
                         runtime["required_next_tool"] = required_repair_tool
                     convo.messages.append({
@@ -2942,10 +3006,18 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
                         return self._engine_delivery(execution_id, step)
                     repair_nudge = self._writer_incremental_repair_nudge(
                         execution_id, role_for_step, step, completion_issues,
-                    ) or self._document_coverage_repair_nudge(completion_issues)
+                    ) or self._document_coverage_repair_nudge(
+                        completion_issues
+                    ) or self._required_artifact_initialization_nudge(
+                        execution_id, step, completion_issues,
+                    )
                     required_repair_tool = self._writer_incremental_repair_tool(
                         execution_id, role_for_step, step, completion_issues,
-                    ) or self._document_coverage_repair_tool(completion_issues)
+                    ) or self._document_coverage_repair_tool(
+                        completion_issues
+                    ) or self._required_artifact_initialization_tool(
+                        execution_id, step, completion_issues,
+                    )
                     if required_repair_tool:
                         runtime["required_next_tool"] = required_repair_tool
                     convo.messages.append({

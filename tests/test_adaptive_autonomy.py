@@ -1243,6 +1243,73 @@ async def test_document_coverage_gate_forces_real_read_after_prose_promise(tmp_p
     ]
 
 
+@pytest.mark.asyncio
+async def test_missing_specialist_artifact_forces_bounded_write_after_malformed_json(tmp_path):
+    class CapturingProvider(MockLLMProvider):
+        def __init__(self):
+            super().__init__()
+            self.requests = []
+
+        async def completion(self, messages, **kwargs):
+            self.requests.append({
+                "messages": [dict(message) for message in messages],
+                "tools": list(kwargs.get("tools") or []),
+                "tool_choice": kwargs.get("tool_choice"),
+            })
+            return await super().completion(messages, **kwargs)
+
+    delivery = json.dumps({
+        "summary": "created", "artifacts": ["analysis/inventory.md"],
+        "evidence": ["local sources"], "risks": [], "next_action": "handoff",
+    })
+    llm = CapturingProvider()
+    llm.add_response(content=(
+        '```json\n{"tool_call":{"name":"filesystem__write","arguments":'
+        '{"path":"analysis/inventory.md","content":"oversized and truncated\n```'
+    ))
+    llm.add_response(tool_calls=[{
+        "id": "write-1", "type": "function",
+        "function": {
+            "name": "filesystem__write",
+            "arguments": {
+                "path": "analysis/inventory.md",
+                "content": "# Inventory\n\nA bounded, durable local inventory section.",
+            },
+        },
+    }])
+    llm.add_response(content=delivery)
+    engine, state = _engine(tmp_path, llm, max_iterations=8)
+    execution = state.get_execution("forced-specialist-write")
+    execution.variables.update({
+        "parent_execution_id": "parent", "role_key": "architect",
+        "role_name": "Evidence Analyst", "specialist": "Evidence Analyst",
+    })
+    execution.current_plan = {"steps": [{
+        "id": 0, "role": "architect", "specialist": "Evidence Analyst",
+        "description": "Create the required local evidence inventory.",
+        "dependencies": [], "expertise": [],
+        "required_artifacts": ["analysis/inventory.md"],
+        "acceptance_criteria": ["Inventory exists"],
+        "verification_commands": [],
+    }]}
+
+    await engine.execute_task(
+        "forced-specialist-write", "Create the local evidence inventory",
+    )
+
+    assert execution.status == "completed", execution.results
+    assert llm.requests[1]["tool_choice"] == "required"
+    assert [
+        item["function"]["name"] for item in llm.requests[1]["tools"]
+    ] == ["filesystem__write"]
+    repair_prompt = next(
+        item["content"] for item in llm.requests[1]["messages"]
+        if item.get("role") == "system"
+        and "exactly one valid filesystem__write" in str(item.get("content"))
+    )
+    assert "Later turns can append" in repair_prompt
+
+
 def test_rescue_strips_prefixed_fence_and_rejects_mock_random_tests():
     raw = "tests/test_real.py\n```python\nfrom avatar3d.body import Body\n\ndef test_body():\n    assert Body\n```"
     cleaned = ExecutionEngine._strip_code_fence(raw, "tests/test_real.py")
