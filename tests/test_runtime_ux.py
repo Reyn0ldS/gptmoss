@@ -1003,6 +1003,39 @@ def test_profile_upgrade_refreshes_obsolete_pending_retry_context(tmp_path):
     assert "obsolete semantic record defect" not in retry_context
 
 
+def test_profile_upgrade_replaces_vague_upstream_retry_with_current_defects(tmp_path):
+    engine, state = _engine(tmp_path)
+    execution = state.get_execution("resume-upstream-revalidation")
+    execution.current_plan = {
+        "steps": [{
+            "id": 0, "status": "pending", "dependencies": [],
+            "required_artifacts": ["analysis/architecture.md"],
+            "retry_context": (
+                "A completed upstream artifact was reopened by stronger deterministic "
+                "quality gates. Reuse its corrected result and refresh this dependent "
+                "artifact without trusting stale conclusions."
+            ),
+        }],
+        "artifact_validations": [{
+            "path": "analysis/architecture.md", "validator": "document",
+            "constraints": {"required_headings": ["Validated architecture"]},
+        }],
+    }
+    project = tmp_path / "projects" / "proj-default" / "analysis"
+    project.mkdir(parents=True)
+    (project / "architecture.md").write_text("# Draft\n", encoding="utf-8")
+
+    reopened = engine._reopen_invalid_completed_steps(
+        "resume-upstream-revalidation", execution, execution.current_plan["steps"],
+    )
+
+    assert reopened == []
+    retry_context = execution.current_plan["steps"][0]["retry_context"]
+    assert retry_context.startswith("A deterministic profile upgrade invalidated")
+    assert "missing required heading(s): Validated architecture" in retry_context
+    assert "without trusting stale conclusions" not in retry_context
+
+
 def test_profile_upgrade_freezes_all_existing_record_ids_before_repair(tmp_path):
     engine, state = _engine(tmp_path)
     execution = state.get_execution("resume-record-preservation")

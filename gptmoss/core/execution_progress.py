@@ -65,14 +65,19 @@ class ExecutionProgressMixin:
         profile_retry_prefix = (
             "A deterministic profile upgrade invalidated this persisted artifact. "
         )
+        upstream_retry_prefix = (
+            "A completed upstream artifact was reopened by stronger deterministic "
+            "quality gates. "
+        )
         # A pause can leave a reopened step pending. Recompute its repair brief
         # after every profile upgrade so removed or narrowed gates cannot keep
         # sending a replacement child after obsolete defects.
         for step in steps:
             retry_context = str(step.get("retry_context") or "")
-            if step.get("status") != "pending" or not retry_context.startswith(
+            refreshable_retry = retry_context.startswith(
                 profile_retry_prefix
-            ):
+            ) or retry_context.startswith(upstream_retry_prefix)
+            if step.get("status") != "pending" or not refreshable_retry:
                 continue
             current_issues = self._step_artifact_validation_issues(execution_id, step)
             if current_issues:
@@ -81,7 +86,7 @@ class ExecutionProgressMixin:
                     + "Preserve valid content and repair these machine-observed defects:\n"
                     + "; ".join(current_issues)
                 )[:12_000]
-            else:
+            elif retry_context.startswith(profile_retry_prefix):
                 step.pop("retry_context", None)
 
         invalid: Dict[str, List[str]] = {}
