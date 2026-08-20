@@ -19,7 +19,7 @@ _DEFAULT_PLACEHOLDERS = (
     r"\bTODO\b",
     r"\bTBD\b",
     r"\bFIXME\b",
-    r"\bXXX\b",
+    r"(?<![\w-])XXX(?![\w-])",
     r"\blorem\s+ipsum\b",
     r"\b(?:a|à)\s+compl(?:e|é)ter\b",
     r"\[(?:insert|placeholder|complete|compl(?:e|é)ter)[^\]]*\]",

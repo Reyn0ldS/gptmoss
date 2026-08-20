@@ -179,6 +179,34 @@ def test_document_validator_reports_content_and_provenance_defects(tmp_path):
     assert "inconsistent terminology" in failures
 
 
+def test_identifier_wildcards_are_not_treated_as_xxx_placeholders(tmp_path):
+    document = tmp_path / "identifier-patterns.md"
+    document.write_text(
+        "# Identifier conventions\n\nREQ-xxx and DEC-xxx describe identifier families.\n",
+        encoding="utf-8",
+    )
+
+    accepted = validate_artifact(
+        document,
+        validator="document",
+        constraints={"forbid_placeholders": True},
+    )
+    document.write_text(
+        document.read_text(encoding="utf-8") + "\nXXX\n",
+        encoding="utf-8",
+    )
+    rejected = validate_artifact(
+        document,
+        validator="document",
+        constraints={"forbid_placeholders": True},
+    )
+
+    assert accepted["valid"]
+    assert accepted["metrics"]["placeholder_markers"] == 0
+    assert not rejected["valid"]
+    assert rejected["metrics"]["placeholder_markers"] == 1
+
+
 def test_document_validator_rejects_out_of_range_local_locator(tmp_path):
     document = tmp_path / "architecture.md"
     document.write_text(
