@@ -223,6 +223,7 @@ def apply_professional_profile(
         decision_record_policy = {
                 "heading_pattern": r"\b(?:DEC|ADR)-\d{3}\b",
                 "minimum_records": 1,
+                "preserve_existing_record_ids": True,
                 "required_fields": {
                     "context": ["contexte", "context"],
                     "drivers": ["facteurs", "drivers", "motivations", "critères"],
@@ -237,11 +238,29 @@ def apply_professional_profile(
                 },
             }
         if "decision" in owner_identity or "adr" in owner_identity:
+            existing_record_policy = constraints.get("record_section_policy")
+            if isinstance(existing_record_policy, dict):
+                existing_ids = existing_record_policy.get("required_record_ids")
+                if isinstance(existing_ids, list) and existing_ids:
+                    decision_record_policy["required_record_ids"] = list(existing_ids)
+                    decision_record_policy["minimum_records"] = max(
+                        int(decision_record_policy["minimum_records"]), len(existing_ids),
+                    )
             constraints["record_section_policy"] = decision_record_policy
-        elif constraints.get("record_section_policy") == decision_record_policy:
-            # Remove a profile-generated policy persisted by an older,
-            # overly broad classifier while preserving custom policies.
-            constraints.pop("record_section_policy", None)
+        else:
+            stale_record_policy = constraints.get("record_section_policy")
+            comparable_stale = (
+                dict(stale_record_policy) if isinstance(stale_record_policy, dict) else {}
+            )
+            comparable_current = dict(decision_record_policy)
+            comparable_stale.pop("preserve_existing_record_ids", None)
+            comparable_stale.pop("required_record_ids", None)
+            comparable_current.pop("preserve_existing_record_ids", None)
+            comparable_current.pop("required_record_ids", None)
+            if comparable_stale and comparable_stale == comparable_current:
+                # Remove profile-generated policies persisted by older,
+                # overly broad classifiers while preserving custom schemas.
+                constraints.pop("record_section_policy", None)
         if requested_diagrams and any(
             marker in owner_blob
             for marker in ("application", "integration", "data architect")

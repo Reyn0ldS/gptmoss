@@ -95,7 +95,7 @@ FEATURE_CONTRACTS = {
 }
 
 CAPABILITY_MODES = {
-    "filesystem": {"read": "sync-read", "write": "sync-mutation", "append": "sync-mutation", "replace_paragraph": "sync-mutation", "list_dir": "sync-read", "delete": "sync-mutation"},
+    "filesystem": {"read": "sync-read", "write": "sync-mutation", "append": "sync-mutation", "replace_paragraph": "sync-mutation", "replace_section": "sync-mutation", "list_dir": "sync-read", "delete": "sync-mutation"},
     "documents": {"inventory": "sync-read", "search": "sync-read", "read": "sync-read", "read_chunk": "sync-read", "read_image": "sync-read", "read_images": "sync-read"},
     "shell": {"execute": "sync-process"},
     "agent": {"spawn": "async-background", "status": "sync-observation", "execute_subtask": "async-blocking"},

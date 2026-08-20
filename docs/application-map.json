@@ -102,7 +102,7 @@
     },
     "filesystem": {
       "module": "gptmoss/capabilities/filesystem.py",
-      "actions": ["read", "write", "append", "replace_paragraph", "list_dir", "delete"]
+      "actions": ["read", "write", "append", "replace_paragraph", "replace_section", "list_dir", "delete"]
     },
     "memory": {
       "module": "gptmoss/capabilities/memory.py",

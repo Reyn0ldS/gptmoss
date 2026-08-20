@@ -18,6 +18,41 @@ from gptmoss.core.execution_plan import (
 
 
 class ExecutionProgressMixin:
+    @staticmethod
+    def _freeze_existing_record_ids(path: str, constraints: Dict[str, Any]) -> None:
+        """Persist record IDs already present before a semantic repair begins."""
+        policy = constraints.get("record_section_policy")
+        if not isinstance(policy, dict) or not policy.get("preserve_existing_record_ids"):
+            return
+        if policy.get("required_record_ids"):
+            return
+        heading_pattern = str(policy.get("heading_pattern") or "").strip()
+        if not heading_pattern:
+            return
+        try:
+            record_pattern = re.compile(heading_pattern, flags=re.IGNORECASE)
+            with open(path, "r", encoding="utf-8") as handle:
+                text = handle.read()
+        except (OSError, UnicodeError, re.error):
+            return
+        identifiers: List[str] = []
+        seen = set()
+        for line in text.splitlines():
+            heading = re.match(r"^\s*#{1,6}\s+(.+?)\s*#*\s*$", line)
+            if not heading:
+                continue
+            for match in record_pattern.finditer(heading.group(1)):
+                identifier = match.group(0).strip()
+                folded = identifier.casefold()
+                if identifier and folded not in seen:
+                    seen.add(folded)
+                    identifiers.append(identifier)
+        if identifiers:
+            policy["required_record_ids"] = identifiers
+            policy["minimum_records"] = max(
+                int(policy.get("minimum_records") or 0), len(identifiers),
+            )
+
     def _reopen_invalid_completed_steps(
         self, execution_id: str, state, steps: List[Dict[str, Any]]
     ) -> List[Dict[str, Any]]:
@@ -239,6 +274,9 @@ class ExecutionProgressMixin:
                 constraints["forbid_placeholders"] = True
             try:
                 resolved = filesystem._resolve_path(normalized, execution_id)
+                self._freeze_existing_record_ids(resolved, constraints)
+                if specification:
+                    specification["constraints"] = constraints
                 report = validate_artifact(
                     resolved, validator=validator, constraints=constraints,
                 )

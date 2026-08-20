@@ -536,6 +536,17 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
                         if alias in normalized:
                             normalized["content"] = normalized.pop(alias)
                             break
+            if action.lower() == "replace_section":
+                if "heading_selector" not in normalized:
+                    for alias in ("heading", "section_heading", "selector"):
+                        if normalized.get(alias):
+                            normalized["heading_selector"] = normalized.pop(alias)
+                            break
+                if "content" not in normalized:
+                    for alias in ("new_text", "replacement", "text", "body"):
+                        if alias in normalized:
+                            normalized["content"] = normalized.pop(alias)
+                            break
         return normalized
 
     def _fake_dependency_packages(self, execution_id: str) -> List[str]:
@@ -705,9 +716,10 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
             "lack a local reference",
         )
         replacement_markers = (
-            "citation-like pattern", "invalid diagram", "record section",
+            "citation-like pattern", "invalid diagram",
             "external link", "placeholder marker", "reasoning tag",
         )
+        section_markers = ("record section",)
         append_markers = (
             "uncited required source", "cited_sources=", "local_references=",
         )
@@ -717,6 +729,7 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
             for marker in (
                 "words=", "empty required section", "lack a local reference",
                 *targeted_markers,
+                *section_markers,
                 *replacement_markers,
                 *append_markers,
             )
@@ -728,6 +741,8 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
         target = artifacts[0]
         if any(marker in issue for issue in issues for marker in targeted_markers):
             return "filesystem__replace_paragraph"
+        if any(marker in issue for issue in issues for marker in section_markers):
+            return "filesystem__replace_section"
         if any(marker in issue for issue in issues for marker in replacement_markers):
             return "filesystem__write"
         if any(marker in issue for issue in issues for marker in append_markers):
@@ -771,6 +786,15 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
                 "reference, preserve the surrounding Markdown and correct its source plus one-based "
                 "block or slide bounds from the gate. Change exactly one "
                 "paragraph per iteration; never rewrite or delete the whole document."
+            )
+        if action == "filesystem__replace_section":
+            return (
+                f" Do not answer with a plan. Your next response must be exactly one valid "
+                f"{action} tool call targeting '{target}'. Copy one exact Markdown heading "
+                "selector (including its # markers) reported by the gate and replace only that "
+                "section body with complete required fields, evidence and nearby valid bounded "
+                "local citations. Do not include the selected heading in content. Repair exactly "
+                "one record per iteration; every other record and section must remain untouched."
             )
         if action == "filesystem__append":
             if any(
@@ -1052,7 +1076,7 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
                 (
                     item.get("capability") == "filesystem"
                     and item.get("action") in {
-                        "write", "append", "replace_paragraph", "delete",
+                        "write", "append", "replace_paragraph", "replace_section", "delete",
                     }
                     and "Error" not in str(item.get("result") or "")
                 )
@@ -2380,7 +2404,7 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
                     if (
                         item.get("capability") == "filesystem"
                         and item.get("action") in {
-                            "write", "append", "replace_paragraph", "delete",
+                            "write", "append", "replace_paragraph", "replace_section", "delete",
                         }
                         and "Error" not in str(item.get("result") or "")
                     )
@@ -2997,6 +3021,8 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
                     "its first bounded section followed by filesystem.append calls for later sections; do not create undeclared "
                     "temporary part files. When a quality gate reports the normalized prefix of one duplicate or unsupported "
                     "paragraph, repair only that occurrence with filesystem.replace_paragraph instead of rebuilding the artifact. "
+                    "When a gate reports a defective named record section, repair only its body with "
+                    "filesystem.replace_section using the exact reported Markdown heading selector. "
                     "Never invent a source, citation locator, diagram, metric, or validation result."
                 )
             else:
@@ -3489,7 +3515,7 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
         if state.status == "cancelled":
             raise asyncio.CancelledError()
         is_mutation = capability.lower() == "filesystem" and action.lower() in {
-            "write", "append", "replace_paragraph", "delete",
+            "write", "append", "replace_paragraph", "replace_section", "delete",
         }
         path = str(arguments.get("path") or "")
         if is_mutation and not path.strip():
@@ -3574,6 +3600,28 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
                     "by the active machine quality gate. Use one exact paragraph prefix from "
                     "the latest gate failure and change only that passage."
                 )
+        if (
+            required_repair_tool == "filesystem__replace_section"
+            and capability.lower() == "filesystem"
+            and action.lower() == "replace_section"
+            and required_repair_issues
+        ):
+            supplied_heading = " ".join(
+                str(arguments.get("heading_selector") or "").casefold().split()
+            )
+            normalized_issues = " ".join(
+                " ".join(issue.casefold().split()) for issue in required_repair_issues
+            )
+            if not supplied_heading or supplied_heading not in normalized_issues:
+                self.telemetry.record(
+                    "unreported_document_section_repair_blocked", execution_id,
+                    heading_selector=str(arguments.get("heading_selector") or "")[:180],
+                )
+                return (
+                    "Error: Section repair blocked because heading_selector was not reported "
+                    "by the active machine quality gate. Copy one exact Markdown heading "
+                    "selector from the latest gate failure."
+                )
         normalized_path = self._normalized_workspace_path(path)
         overwrites_existing_document = (
             capability.lower() == "filesystem"
@@ -3599,7 +3647,8 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
             return (
                 "Error: Global overwrite blocked for existing required document artifact(s): "
                 + ", ".join(denied)
-                + ". Preserve valid content with filesystem.append or filesystem.replace_paragraph. "
+                + ". Preserve valid content with filesystem.append, filesystem.replace_paragraph, "
+                "or filesystem.replace_section. "
                 "A full filesystem.write is allowed only when the automatic quality gate explicitly requires it."
             )
         empties_required_artifact = (

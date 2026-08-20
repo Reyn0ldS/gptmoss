@@ -193,6 +193,7 @@ Second section.
     assert "duplicate heading occurrence" in failures
     assert "repeated Markdown heading selector(s): ## Repeated" in failures
     assert "record section(s) violate the declared semantic schema" in failures
+    assert "'### DEC-001: Storage' missing alternatives, risks" in failures
     assert "alternatives, risks" in failures
 
 

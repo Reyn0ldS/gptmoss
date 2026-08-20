@@ -31,11 +31,13 @@ RENDER_TARGETED_MARKERS = (
     "duplicate heading",
     "lack a local reference",
 )
+RENDER_SECTION_MARKERS = (
+    "record section",
+)
 RENDER_REWRITE_MARKERS = (
     "invalid local reference",
     "invalid diagram",
     "citation-like pattern",
-    "record section",
     "external link",
     "placeholder marker",
     "reasoning tag",
@@ -85,6 +87,11 @@ def classify_issue_texts(texts: Iterable[Any]) -> FeedbackTarget:
         return FeedbackTarget(
             DOCUMENT_RENDER, "writer", "filesystem__replace_paragraph",
             "paragraph repair", ("coordinator",),
+        )
+    if any(marker in blob for marker in RENDER_SECTION_MARKERS):
+        return FeedbackTarget(
+            DOCUMENT_RENDER, "writer", "filesystem__replace_section",
+            "record section repair", ("coordinator",),
         )
     if any(marker in blob for marker in RENDER_REWRITE_MARKERS):
         return FeedbackTarget(

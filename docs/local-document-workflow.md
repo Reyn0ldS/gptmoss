@@ -160,7 +160,10 @@ Les arêtes typées (`plan.edges`) expliquent pourquoi une étape dépend d'une 
 (`produces_for`, `validates`, `repairs`, `consolidates`, `blocks`) sans changer
 l'ordonnancement. Un quality gate documentaire classifie le défaut et rouvre le
 propriétaire : inventaire si la couverture source manque, rédacteur avec
-`replace_paragraph` pour un doublon ou un paragraphe non sourcé, debugger seulement
+`replace_paragraph` pour un doublon ou un paragraphe non sourcé, et
+`replace_section` pour une fiche sémantique identifiée par son titre Markdown exact. Les
+identifiants DEC/ADR déjà présents sont figés avant réparation pour empêcher qu'une fiche
+disparaisse au lieu d'être complétée. Le debugger intervient seulement
 pour un défaut logiciel. `GET /executions/{id}/evidence-graph` projette inventaires,
 lectures, images et citations en un graphe borné unifié par SHA-256 ; ce n'est pas
 un dump de `tool_call_history`. Dans la GUI, l'onglet **Graphe** de la colonne plan

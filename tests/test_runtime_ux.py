@@ -1003,6 +1003,92 @@ def test_profile_upgrade_refreshes_obsolete_pending_retry_context(tmp_path):
     assert "obsolete semantic record defect" not in retry_context
 
 
+def test_profile_upgrade_freezes_all_existing_record_ids_before_repair(tmp_path):
+    engine, state = _engine(tmp_path)
+    execution = state.get_execution("resume-record-preservation")
+    policy = {
+        "heading_pattern": r"\bDEC-\d{3}\b",
+        "minimum_records": 1,
+        "preserve_existing_record_ids": True,
+        "required_fields": {"context": ["context"], "decision": ["decision"]},
+    }
+    execution.current_plan = {
+        "steps": [{
+            "id": 0, "status": "completed", "dependencies": [],
+            "required_artifacts": ["analysis/decisions.md"],
+        }],
+        "artifact_validations": [{
+            "path": "analysis/decisions.md", "validator": "document",
+            "constraints": {"record_section_policy": policy},
+        }],
+    }
+    project = tmp_path / "projects" / "proj-default" / "analysis"
+    project.mkdir(parents=True)
+    (project / "decisions.md").write_text(
+        "# Decisions\n\n### DEC-001: Storage\n\n- **Context:** A\n\n"
+        "### DEC-002: Runtime\n\n- **Context:** B\n",
+        encoding="utf-8",
+    )
+
+    reopened = engine._reopen_invalid_completed_steps(
+        "resume-record-preservation", execution, execution.current_plan["steps"],
+    )
+
+    frozen = execution.current_plan["artifact_validations"][0]["constraints"][
+        "record_section_policy"
+    ]
+    assert [step["id"] for step in reopened] == [0]
+    assert frozen["required_record_ids"] == ["DEC-001", "DEC-002"]
+    assert frozen["minimum_records"] == 2
+    assert "### DEC-001: Storage" in reopened[0]["retry_context"]
+    assert "### DEC-002: Runtime" in reopened[0]["retry_context"]
+
+
+@pytest.mark.asyncio
+async def test_section_repair_requires_a_machine_reported_heading(tmp_path):
+    engine, state = _engine(tmp_path)
+    execution = state.get_execution("guarded-section-repair")
+    execution.variables["role_key"] = "architect"
+    execution.current_plan = {
+        "steps": [{
+            "id": 0, "role": "architect",
+            "required_artifacts": ["decisions.md"], "owned_paths": ["decisions.md"],
+        }],
+        "artifact_validations": [{
+            "path": "decisions.md", "validator": "document", "constraints": {},
+        }],
+    }
+    execution.variables["step_runtime"] = {"0": {
+        "required_next_tool": "filesystem__replace_section",
+        "required_repair_issues": [
+            "decisions.md: '### DEC-001: Storage' missing alternatives, risks"
+        ],
+    }}
+    project = tmp_path / "projects" / "proj-default"
+    project.mkdir(parents=True)
+    target = project / "decisions.md"
+    target.write_text(
+        "### DEC-001: Storage\n\nOld.\n\n### DEC-002: Runtime\n\nStable.\n",
+        encoding="utf-8",
+    )
+
+    blocked = await engine._call_tool(
+        "guarded-section-repair", "filesystem", "replace_section",
+        {"path": "decisions.md", "heading_selector": "### DEC-002: Runtime", "content": "Wrong."},
+    )
+    allowed = await engine._call_tool(
+        "guarded-section-repair", "filesystem", "replace_section",
+        {
+            "path": "decisions.md", "heading_selector": "### DEC-001: Storage",
+            "content": "- **Alternatives:** A\n- **Risks:** B",
+        },
+    )
+
+    assert "Section repair blocked" in blocked
+    assert "Markdown section replaced successfully" in allowed
+    assert "### DEC-002: Runtime\n\nStable." in target.read_text(encoding="utf-8")
+
+
 @pytest.mark.asyncio
 async def test_targeted_repair_must_use_a_machine_reported_prefix(tmp_path):
     engine, state = _engine(tmp_path)
@@ -1226,6 +1312,31 @@ def test_writer_duplicate_heading_gate_requires_exact_second_heading(tmp_path):
     assert "including its # markers" in nudge
     assert "occurrence=2" in nudge
     assert "preserves all section body content" in nudge
+
+
+def test_writer_record_gate_requires_one_reported_section_repair(tmp_path):
+    engine, state = _engine(tmp_path)
+    state.get_execution("writer-record-repair")
+    project = tmp_path / "projects" / "proj-default"
+    project.mkdir(parents=True)
+    (project / "decisions.md").write_text("### DEC-001: Storage\n", encoding="utf-8")
+    step = {"role": "architect", "required_artifacts": ["decisions.md"]}
+    issues = [
+        "decisions.md: 1 record section(s) violate the declared semantic schema: "
+        "'### DEC-001: Storage' missing alternatives, risks"
+    ]
+
+    required = engine._writer_incremental_repair_tool(
+        "writer-record-repair", "architect", step, issues,
+    )
+    nudge = engine._writer_incremental_repair_nudge(
+        "writer-record-repair", "architect", step, issues,
+    )
+
+    assert required == "filesystem__replace_section"
+    assert "including its # markers" in nudge
+    assert "one record per iteration" in nudge
+    assert "every other record and section must remain untouched" in nudge
 
 
 def test_writer_unsupported_claim_gate_requires_cited_paragraph_repair(tmp_path):

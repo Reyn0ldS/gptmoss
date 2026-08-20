@@ -286,6 +286,79 @@ class FilesystemCapability:
             f"Paragraph occurrence {requested_occurrence} replaced successfully in {path}"
         )
 
+    @action(
+        name="replace_section",
+        description=(
+            "Replace the body of one Markdown section selected by its exact reported heading. "
+            "The heading and every other section are preserved. Use this for bounded semantic "
+            "repairs of a decision, requirement, risk, or other named record."
+        ),
+    )
+    def replace_section(
+        self,
+        path: str,
+        heading_selector: str,
+        content: str,
+        occurrence: int = 1,
+        context: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        """Atomically replace one Markdown section body without rewriting the file."""
+        execution_id = context.get("execution_id") if context else None
+        resolved = self._resolve_path(path, execution_id)
+        selector = str(heading_selector or "").strip()
+        selector_match = re.match(r"^(#{1,6})\s+(.+?)\s*#*$", selector)
+        if not selector_match:
+            return "Error: heading_selector must be one exact Markdown heading including # markers."
+        try:
+            requested_occurrence = int(occurrence)
+        except (TypeError, ValueError):
+            return "Error: occurrence must be an integer greater than or equal to 1."
+        if requested_occurrence < 1:
+            return "Error: occurrence must be an integer greater than or equal to 1."
+        if not os.path.isfile(resolved):
+            return f"Error: File not found at {path}"
+        with open(resolved, "r", encoding="utf-8") as handle:
+            original = handle.read()
+        source_lines = original.splitlines(keepends=True)
+        expected_level = len(selector_match.group(1))
+        expected_title = self._literal_line_key(selector_match.group(2))
+        matches = []
+        parsed_headings = []
+        for index, line in enumerate(source_lines):
+            match = re.match(r"^\s*(#{1,6})\s+(.+?)\s*#*\s*(?:\r?\n)?$", line)
+            if not match:
+                continue
+            level = len(match.group(1))
+            title = self._literal_line_key(match.group(2))
+            parsed_headings.append((index, level))
+            if level == expected_level and title == expected_title:
+                matches.append(index)
+        if len(matches) < requested_occurrence:
+            return (
+                f"Error: heading selector matched {len(matches)} occurrence(s), "
+                f"cannot replace occurrence {requested_occurrence}."
+            )
+        start = matches[requested_occurrence - 1]
+        end = len(source_lines)
+        for heading_index, level in parsed_headings:
+            if heading_index > start and level <= expected_level:
+                end = heading_index
+                break
+        newline_match = re.search(r"(\r?\n)$", source_lines[start])
+        newline = newline_match.group(1) if newline_match else "\n"
+        body = str(content or "").strip()
+        if body and self._literal_line_key(body.splitlines()[0]) == self._literal_line_key(selector):
+            return "Error: content must contain the section body only; the selected heading is preserved."
+        replacement = source_lines[start].rstrip("\r\n") + newline
+        if body:
+            replacement += newline + body + newline
+        source_lines[start:end] = [replacement]
+        updated = "".join(source_lines)
+        if updated == original:
+            return "Error: replacement would not change the file."
+        write_text_atomic(resolved, updated)
+        return f"Markdown section replaced successfully in {path}: {selector}"
+
     @action(name="list_dir", description="List files and directories in a path relative to the workspace.")
     def list_dir(self, path: str = ".", context: Optional[Dict[str, Any]] = None) -> str:
         """Lists directory files."""

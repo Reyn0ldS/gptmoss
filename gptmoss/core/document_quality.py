@@ -423,8 +423,8 @@ def validate_document(path: Path, constraints: Dict[str, Any]) -> ValidationRepo
                 f"record_section_policy.required_fields.{field_name}",
             )
         matched_records = [
-            (index, title)
-            for index, (_, _, title) in enumerate(headings)
+            (index, title, f"{'#' * level} {title}")
+            for index, (_, level, title) in enumerate(headings)
             if record_heading.search(title)
         ]
         record_sections_total = len(matched_records)
@@ -443,7 +443,7 @@ def validate_document(path: Path, constraints: Dict[str, Any]) -> ValidationRepo
             record_policy.get("required_record_ids"),
             "record_section_policy.required_record_ids",
         )
-        matched_titles = "\n".join(title for _, title in matched_records)
+        matched_titles = "\n".join(title for _, title, _ in matched_records)
         missing_record_ids = [
             identifier for identifier in required_record_ids
             if not _contains_identifier(matched_titles, identifier)
@@ -454,7 +454,7 @@ def validate_document(path: Path, constraints: Dict[str, Any]) -> ValidationRepo
                 "required record heading ID(s) missing: "
                 + ", ".join(missing_record_ids),
             )
-        for index, title in matched_records:
+        for index, title, selector in matched_records:
             section = _fold(_section_text(lines, headings, index))
             missing_fields = [
                 field_name
@@ -462,7 +462,7 @@ def validate_document(path: Path, constraints: Dict[str, Any]) -> ValidationRepo
                 if aliases and not any(_fold(alias) in section for alias in aliases)
             ]
             if missing_fields:
-                invalid_record_sections.append((title, missing_fields))
+                invalid_record_sections.append((selector, missing_fields))
         if invalid_record_sections:
             details = "; ".join(
                 f"{title!r} missing {', '.join(fields)}"

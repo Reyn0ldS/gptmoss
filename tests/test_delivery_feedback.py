@@ -70,12 +70,12 @@ def test_classify_missing_source_coverage_requires_append_not_ungated_edits():
     assert target.required_tool == "filesystem__append"
 
 
-def test_classify_semantically_incomplete_records_requires_clean_rewrite():
+def test_classify_semantically_incomplete_records_requires_section_repair():
     target = classify_issue_texts([
         "4 record section(s) violate the declared semantic schema",
     ])
     assert target.obligation == DOCUMENT_RENDER
-    assert target.required_tool == "filesystem__write"
+    assert target.required_tool == "filesystem__replace_section"
 
 
 def test_classify_cli_smoke_keeps_debugger_fallback():
