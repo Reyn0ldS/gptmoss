@@ -92,12 +92,10 @@ class ProviderUnavailableError(RuntimeError):
 class ProviderConfigurationError(RuntimeError):
     """A permanent provider refusal that requires a settings change before retry."""
 
-    def __init__(self, original_error: Exception):
-        super().__init__(
-            "Authentification LLM refusée (HTTP 401/403). Ouvrez Paramètres, "
-            "corrigez la clé API, utilisez Tester la connexion, puis reprenez "
-            "l'exécution parente."
-        )
+    def __init__(self, original_error: Exception, message: str | None = None):
+        from gptmoss.core.provider_recovery import configuration_message
+
+        super().__init__(message or configuration_message(original_error))
         self.original_error = original_error
 
 
@@ -224,10 +222,14 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
 
     @staticmethod
     def _is_permanent_llm_error(error: Exception) -> bool:
+        if isinstance(error, (ProviderConfigurationError, RecoveryProviderConfigurationError)):
+            return True
         return ProviderRecoveryCoordinator.is_permanent(error)
 
     @classmethod
     def _is_transient_llm_error(cls, error: Exception) -> bool:
+        if cls._is_permanent_llm_error(error):
+            return False
         return ProviderRecoveryCoordinator.is_transient(error)
 
     async def _completion_with_recovery(self, execution_id: str, **kwargs) -> Dict[str, Any]:
@@ -235,7 +237,7 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
         try:
             return await self.provider_recovery.completion(execution_id, **kwargs)
         except RecoveryProviderConfigurationError as error:
-            raise ProviderConfigurationError(error.original_error) from error
+            raise ProviderConfigurationError(error.original_error, str(error)) from error
         except RecoveryProviderUnavailableError as error:
             raise ProviderUnavailableError(str(error), error.original_error) from error
 
@@ -806,9 +808,12 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
                     f" Do not answer with a plan. Your next response must be exactly one valid "
                     f"{action} tool call targeting '{target}'. Copy the exact Markdown section "
                     "selector reported for the invalid diagram and replace only that section body "
-                    "with one complete, syntactically valid Mermaid diagram plus concise explanatory "
-                    "prose and nearby bounded local citations. Eliminate every reported semantic "
-                    "diagram defect, including self-loops, while preserving all other sections."
+                    "with one complete Mermaid diagram in the allowed subset (flowchart/graph, "
+                    "sequenceDiagram, stateDiagram-v2, or pie) plus concise explanatory "
+                    "prose and nearby bounded local citations. If the gate names an unsupported "
+                    "type, convert it; do not emit gantt, classDiagram, or another type outside "
+                    "the subset. Eliminate every reported semantic diagram defect, including "
+                    "self-loops, while preserving all other sections."
                 )
             return (
                 f" Do not answer with a plan. Your next response must be exactly one valid "
@@ -1504,6 +1509,7 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
                     state, "failed", reason="unhandled execution error", actor="runtime"
                 )
                 state.results["error"] = str(exc)
+                self.state_engine.save_to_disk()
                 self.telemetry.record("execution_failed", execution_id, error=str(exc))
                 await self.event_bus.publish(Event(
                     type="ExecutionFailed",
@@ -3007,18 +3013,19 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
                     max(0, min(4, (provider_input_tokens - 4_096) // 4_096))
                     if provider_input_tokens else 4
                 )
+                supports_vision = self._vision_is_available(state)
                 automatic_images = (
                     visual_slots if iteration == 1 and not pending_images else 0
                 )
                 context["attachments"] = self.artifact_store.context_items(
                     state.variables["attachment_ids"],
-                    getattr(self.llm_provider, "supports_vision", False),
+                    supports_vision,
                     max_text_chars=attachment_text_budget,
                     query=attachment_query,
                     max_items=max(8, min(96, attachment_text_budget // 2_000)),
                     max_images=(
                         min(visual_slots, max(automatic_images, len(pending_images)))
-                        if getattr(self.llm_provider, "supports_vision", False) else 0
+                        if supports_vision else 0
                     ),
                     max_image_bytes=min(
                         8 * 1024 * 1024,
@@ -3201,8 +3208,14 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
                     )[:8_000],
                 })
             llm_messages.extend(context["conversation_history"])
-            # Requested images are deliberately the most recent messages so
-            # provider compaction preserves them ahead of older conversation.
+            # Images stay late so provider compaction prefers them over chatter.
+            # The source digest is last: a four-image batch must not evict it.
+            # Drop-oldest pops the front, so already-visualized images go first
+            # and unseen ones stay beside the digest.
+            visual_attachments = self._visual_attachments_for_compaction(
+                visual_attachments,
+                state.variables.get("visualized_artifact_ids", []),
+            )
             for attachment in visual_attachments:
                 llm_messages.append({"role": "user", "content": [
                     {"type": "text", "text": (
@@ -3211,6 +3224,9 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
                     )},
                     {"type": "image_url", "image_url": {"url": attachment["image_url"]}},
                 ]})
+            digest = str(context.get("source_evidence_digest") or "").strip()
+            if digest:
+                llm_messages.append({"role": "system", "content": digest})
 
             await self.event_bus.publish(Event(
                 type="LLMRequest",

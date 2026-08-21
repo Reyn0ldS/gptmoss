@@ -2683,6 +2683,14 @@
             document.getElementById("settings-ssl-cert-container").style.display = verify ? "flex" : "none";
         }
 
+        function updateVisionModeHint() {
+            const mode = document.getElementById("settings-vision-mode").value;
+            const model = (document.getElementById("settings-model-name").value || "").toLowerCase();
+            const named = ["vision", "-vl", "omni", "multimodal"].some(marker => model.includes(marker));
+            const warning = document.getElementById("settings-vision-enabled-warning");
+            if (warning) warning.style.display = (mode === "enabled" && !named) ? "block" : "none";
+        }
+
         let localProjects = [];
         let availableSkills = [];
         let loadedSettings = {};
@@ -2848,6 +2856,9 @@
                 document.getElementById("settings-api-key").value = data.api_key || "";
                 document.getElementById("settings-model-name").value = data.model_name || "qwen-turbo";
                 document.getElementById("settings-vision-mode").value = data.vision_mode || "auto";
+                const llmTimeout = document.getElementById("settings-llm-timeout");
+                if (llmTimeout) llmTimeout.value = data.llm_timeout_seconds ?? 300;
+                updateVisionModeHint();
                 
                 const sslVerify = data.ssl_verify !== false;
                 document.getElementById("settings-ssl-verify").checked = sslVerify;
@@ -2919,6 +2930,7 @@
                 base_url: document.getElementById("settings-base-url").value.trim(),
                 model_name: document.getElementById("settings-model-name").value.trim(),
                 vision_mode: document.getElementById("settings-vision-mode").value,
+                llm_timeout_seconds: Math.min(3600, Math.max(10, parseInt(document.getElementById("settings-llm-timeout")?.value, 10) || 300)),
                 ssl_verify: document.getElementById("settings-ssl-verify").checked,
                 ssl_cert_path: document.getElementById("settings-ssl-cert-path").value.trim(),
                 denied_capabilities: Array.from(document.querySelectorAll("input[name='settings-deny']:checked"), cb => cb.value),
@@ -3381,16 +3393,17 @@
 
                 <div style="display: flex; flex-direction: column; gap: 4px;">
                     <label style="font-size: 11px; color: var(--text-normal);">Modèle par défaut</label>
-                    <input type="text" id="settings-model-name" class="approval-reason-input" style="margin: 0;" placeholder="qwen-turbo">
+                    <input type="text" id="settings-model-name" class="approval-reason-input" style="margin: 0;" placeholder="qwen-turbo" oninput="updateVisionModeHint()">
                 </div>
                 <div style="display: flex; flex-direction: column; gap: 4px;">
                     <label style="font-size: 11px; color: var(--text-normal);">Capacité vision</label>
-                    <select id="settings-vision-mode" class="approval-reason-input" style="margin:0">
+                    <select id="settings-vision-mode" class="approval-reason-input" style="margin:0" onchange="updateVisionModeHint()">
                         <option value="auto">Détection automatique (nom : vision, -vl, omni, multimodal)</option>
                         <option value="enabled">Activée explicitement</option>
                         <option value="disabled">Désactivée explicitement</option>
                     </select>
                     <small style="color:var(--text-muted)">auto ne sonde pas le serveur. Diagnostics affiche le flag effectif (`vision`).</small>
+                    <small id="settings-vision-enabled-warning" style="color:var(--text-muted);display:none">enabled force le flag local sans sonder le serveur. Diagnostics doit confirmer vision: true après un envoi d'image.</small>
                 </div>
 
                 <!-- SSL Certificate Settings -->
@@ -3402,7 +3415,10 @@
                 <div id="settings-ssl-cert-container" style="display: none; flex-direction: column; gap: 4px;">
                     <label style="font-size: 11px; color: var(--text-normal);">Chemin du certificat custom (Optionnel)</label>
                     <input type="text" id="settings-ssl-cert-path" class="approval-reason-input" style="margin: 0;" placeholder="C:\chemin\vers\certificat.pem">
+                    <small style="color:var(--text-muted)">gpu01 / PKI interne : coller le PEM de la CA, ne pas décocher la vérification.</small>
                 </div>
+                <label style="font-size: 11px; color: var(--text-normal); margin-top: 6px;">Délai LLM (s, 10-3600)</label>
+                <input type="number" id="settings-llm-timeout" class="approval-reason-input" style="margin: 0;" min="10" max="3600" placeholder="300">
                 <button id="settings-test-connection" class="btn-control resume" type="button" onclick="testLlmConnection()">Tester la connexion</button>
 
                 <hr style="border: 0; border-top: 1px solid var(--border-color); margin: 8px 0;">

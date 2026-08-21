@@ -2,6 +2,7 @@ import asyncio
 import base64
 import json
 import os
+import re
 import struct
 
 import pytest
@@ -77,6 +78,144 @@ def test_provider_context_compaction_preserves_instructions_and_recent_order():
     assert compacted[0]["content"] == "authoritative instructions"
     assert compacted[-3:] == messages[-3:]
     assert any("were compacted" in str(item.get("content")) for item in compacted)
+
+
+def test_provider_compaction_preserves_pinned_source_digest():
+    from gptmoss.providers.qwen_support import ContextWindowPolicy
+
+    messages = [
+        {"role": "system", "content": "authoritative " + "X" * 4000},
+        {"role": "user", "content": "old " + "y" * 2000},
+        {"role": "system", "content": (
+            "Pinned local source evidence (durable tool history; omitted conversation "
+            "messages do not erase this):\n[source.docx > blocks 1-1] MFA is required."
+        )},
+    ]
+    compacted = ContextWindowPolicy.compact(messages, 3_000)
+    digest = [item for item in compacted if "Pinned local source evidence" in str(item.get("content"))]
+    assert digest
+    assert "MFA is required" in digest[0]["content"]
+
+
+def test_context_limit_error_walks_openai_cause_chain():
+    from gptmoss.providers.qwen_support import ContextWindowPolicy
+
+    wrapped = Exception("Error code: 400")
+    wrapped.__cause__ = Exception("This model's maximum context length is 8,192 tokens")
+    assert ContextWindowPolicy.is_limit_error(wrapped)
+    assert ContextWindowPolicy.limit_tokens(wrapped) == 8192
+    assert not ContextWindowPolicy.is_limit_error(Exception("Error code: 400"))
+
+
+def test_provider_compaction_omits_huge_images_but_keeps_digest():
+    from gptmoss.providers.qwen_support import ContextWindowPolicy
+
+    digest = {
+        "role": "system",
+        "content": (
+            "Pinned local source evidence (durable tool history; omitted conversation "
+            "messages do not erase this):\n[source.docx > blocks 1-1] MFA is required."
+        ),
+    }
+    huge = {
+        "role": "user",
+        "content": [
+            {"type": "text", "text": "[artifact_id:img-1]"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64," + ("A" * 40_000)}},
+        ],
+    }
+    compacted = ContextWindowPolicy.compact(
+        [{"role": "system", "content": "sys"}, huge, digest],
+        2_000,
+    )
+    assert any(ContextWindowPolicy.DIGEST_MARK in str(item.get("content")) for item in compacted)
+    assert all(
+        not (
+            isinstance(item.get("content"), list)
+            and any(
+                isinstance(part, dict) and part.get("type") == "image_url"
+                for part in item["content"]
+            )
+        )
+        for item in compacted
+    )
+
+
+def test_compaction_keeps_unseen_image_when_visual_batch_exceeds_window():
+    from gptmoss.core.execution_progress import ExecutionProgressMixin
+    from gptmoss.providers.qwen_support import ContextWindowPolicy
+
+    digest = {
+        "role": "system",
+        "content": (
+            "Pinned local source evidence (durable tool history; omitted conversation "
+            "messages do not erase this):\n[source.docx > blocks 1-1] MFA is required."
+        ),
+    }
+
+    def image_message(artifact_id: str) -> dict:
+        return {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": f"[artifact_id:{artifact_id}]"},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,xx"}},
+            ],
+        }
+
+    attachments = [{"id": f"img-{index}"} for index in range(4)]
+    ordered = ExecutionProgressMixin._visual_attachments_for_compaction(
+        attachments, ["img-1", "img-2", "img-3"]
+    )
+    assert [item["id"] for item in ordered] == ["img-1", "img-2", "img-3", "img-0"]
+    messages = [{"role": "system", "content": "authoritative instructions"}]
+    messages.extend(image_message(item["id"]) for item in ordered)
+    messages.append(digest)
+    without_front = [messages[0], *messages[2:]]
+    target = (
+        ContextWindowPolicy.message_chars(without_front)
+        + ContextWindowPolicy.message_chars(messages)
+    ) // 2
+    compacted = ContextWindowPolicy.compact(messages, target)
+    remaining = []
+    for item in compacted:
+        content = item.get("content")
+        if isinstance(content, list):
+            text = " ".join(
+                str(part.get("text") or "")
+                for part in content
+                if isinstance(part, dict)
+            )
+            remaining.extend(
+                match for match in re.findall(r"\[artifact_id:([^\]]+)\]", text)
+            )
+    assert "img-0" in remaining
+    assert "img-1" not in remaining
+
+
+def test_provider_compaction_keeps_digest_when_four_images_follow():
+    from gptmoss.providers.qwen_support import ContextWindowPolicy
+
+    digest = {
+        "role": "system",
+        "content": (
+            "Pinned local source evidence (durable tool history; omitted conversation "
+            "messages do not erase this):\n[source.docx > blocks 1-1] MFA is required."
+        ),
+    }
+    images = [
+        {"role": "user", "content": [
+            {"type": "text", "text": f"[artifact_id:img-{index}]"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,xx"}},
+        ]}
+        for index in range(4)
+    ]
+    messages = [{"role": "system", "content": "authoritative instructions"}]
+    messages.extend({"role": "user", "content": f"old-{index}-" + "x" * 400} for index in range(12))
+    messages.extend(images)
+    messages.append(digest)
+
+    compacted = ContextWindowPolicy.compact(messages, 3_000)
+    assert any(ContextWindowPolicy.DIGEST_MARK in str(item.get("content")) for item in compacted)
 
 
 def test_provider_compacts_a_single_oversized_user_message():

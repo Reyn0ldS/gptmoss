@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from typing import Any, Awaitable, Callable, Dict
 
 from gptmoss.core.event_bus import Event, EventBus
@@ -17,14 +18,107 @@ class ProviderUnavailableError(RuntimeError):
         self.original_error = original_error
 
 
+AUTH_CONFIGURATION_MESSAGE = (
+    "Authentification LLM refusée (HTTP 401/403). Ouvrez Paramètres, "
+    "corrigez la clé API, utilisez Tester la connexion, puis reprenez "
+    "l'exécution parente."
+)
+TLS_CONFIGURATION_MESSAGE = (
+    "Vérification TLS refusée. Renseignez ssl_cert_path (CA interne) dans "
+    "Paramètres, testez la connexion, puis reprenez. Ne décochez ssl_verify "
+    "que dans un environnement contrôlé, avec confirmation."
+)
+VISION_CONFIGURATION_MESSAGE = (
+    "Le backend a refusé les parties image. Passez vision_mode à disabled "
+    "ou utilisez un modèle vision, testez la connexion, puis reprenez "
+    "l'exécution parente."
+)
+
+_TLS_MARKERS = (
+    "certificate_verify_failed",
+    "certificate verify failed",
+    "sslcertverificationerror",
+    "sslcert",
+    "ssl: certificate",
+    "cert verify",
+    "self signed certificate",
+    "self-signed certificate",
+    "unable to get local issuer",
+    "tlsv1 alert",
+    "certificate bundle",
+    "ca bundle",
+    "sslcertverification",
+)
+_VISION_MARKERS = (
+    "does not support image",
+    "doesn't support image",
+    "do not support image",
+    "unknown part type",
+    "invalid image",
+    "unsupported image",
+    "not support vision",
+    "vision is not",
+    "vision not supported",
+    "multimodal is not",
+    "multimodal not supported",
+)
+_AUTH_MARKERS = (
+    "authentication", "permissiondenied", "invalid api key",
+)
+_HTTP_STATUS = {
+    code: re.compile(rf"(?<!\d){code}(?!\d)")
+    for code in ("400", "401", "403", "429", "502", "503", "504")
+}
+
+
+def contains_http_status(text: str, code: str) -> bool:
+    pattern = _HTTP_STATUS.get(code)
+    return bool(pattern.search(text)) if pattern else False
+
+
+def _error_text(error: BaseException) -> str:
+    parts: list[str] = []
+    seen: set[int] = set()
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        parts.append(current.__class__.__name__ + " " + str(current))
+        current = current.__cause__
+    return " ".join(parts).lower()
+
+
+def configuration_kind(error: Exception) -> str | None:
+    text = _error_text(error)
+    if any(marker in text for marker in _TLS_MARKERS):
+        return "tls"
+    vision_hit = any(marker in text for marker in _VISION_MARKERS)
+    if vision_hit and "unknown part type" in text and not any(
+        marker in text for marker in ("image", "vision", "multimodal")
+    ):
+        vision_hit = False
+    if vision_hit:
+        return "vision"
+    if any(marker in text for marker in _AUTH_MARKERS):
+        return "auth"
+    if contains_http_status(text, "401") or contains_http_status(text, "403"):
+        return "auth"
+    return None
+
+
+def configuration_message(error: Exception) -> str:
+    kind = configuration_kind(error)
+    if kind == "tls":
+        return TLS_CONFIGURATION_MESSAGE
+    if kind == "vision":
+        return VISION_CONFIGURATION_MESSAGE
+    return AUTH_CONFIGURATION_MESSAGE
+
+
 class ProviderConfigurationError(RuntimeError):
-    def __init__(self, original_error: Exception):
-        super().__init__(
-            "Authentification LLM refusée (HTTP 401/403). Ouvrez Paramètres, "
-            "corrigez la clé API, utilisez Tester la connexion, puis reprenez "
-            "l'exécution parente."
-        )
+    def __init__(self, original_error: Exception, message: str | None = None):
+        super().__init__(message or configuration_message(original_error))
         self.original_error = original_error
+        self.kind = configuration_kind(original_error) or "auth"
 
 
 class ProviderRecoveryCoordinator:
@@ -43,20 +137,33 @@ class ProviderRecoveryCoordinator:
         self.jobs: Dict[str, str] = {}
 
     @staticmethod
+    def is_tls_configuration(error: Exception) -> bool:
+        return configuration_kind(error) == "tls"
+
+    @staticmethod
+    def is_vision_rejected(error: Exception) -> bool:
+        return configuration_kind(error) == "vision"
+
+    @staticmethod
     def is_permanent(error: Exception) -> bool:
-        text = (error.__class__.__name__ + " " + str(error)).lower()
-        return any(marker in text for marker in (
-            "authentication", "permissiondenied", "invalid api key", "401", "403",
-        ))
+        return configuration_kind(error) is not None
 
     @classmethod
     def is_transient(cls, error: Exception) -> bool:
-        text = (error.__class__.__name__ + " " + str(error)).lower()
+        if cls.is_permanent(error):
+            return False
+        text = _error_text(error)
         markers = (
-            "connection", "timeout", "timed out", "ratelimit", "rate limit", "429",
-            "internalserver", "server error", "502", "503", "504", "temporar", "unavailable",
+            "connection", "timeout", "timed out", "ratelimit", "rate limit",
+            "internalserver", "server error", "temporar", "unavailable",
+            "connecterror", "unexpected_eof", "networkerror", "remoteprotocol",
+            "disconnected",
         )
-        return not cls.is_permanent(error) and any(marker in text for marker in markers)
+        if any(marker in text for marker in markers):
+            return True
+        return any(
+            contains_http_status(text, code) for code in ("429", "502", "503", "504")
+        )
 
     async def completion(self, execution_id: str, **kwargs) -> Dict[str, Any]:
         consecutive_errors = 0
@@ -64,7 +171,16 @@ class ProviderRecoveryCoordinator:
             try:
                 return await self.llm_provider.completion(**kwargs)
             except Exception as error:
-                if self.is_permanent(error):
+                kind = configuration_kind(error)
+                if kind == "vision":
+                    state = self.state_engine.get_execution(execution_id)
+                    state.variables["vision_rejection"] = str(error)
+                    model_name = str(getattr(self.llm_provider, "default_model", "") or "")
+                    if hasattr(self.llm_provider, "vision_rejected_for_model"):
+                        self.llm_provider.vision_rejected_for_model = model_name
+                    else:
+                        setattr(self.llm_provider, "vision_rejected_for_model", model_name)
+                if kind is not None:
                     raise ProviderConfigurationError(error) from error
                 if not self.is_transient(error):
                     raise

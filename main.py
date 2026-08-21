@@ -85,7 +85,7 @@ def bootstrap_runtime(workspace_root: str):
     original_data: dict = {}
     if os.path.exists(config_path):
         try:
-            with open(config_path, "r", encoding="utf-8") as f:
+            with open(config_path, "r", encoding="utf-8-sig") as f:
                 config_data = json.load(f)
             if not isinstance(config_data, dict):
                 raise ValueError("config.json must contain a JSON object")
@@ -178,6 +178,7 @@ def bootstrap_runtime(workspace_root: str):
         ssl_cert_path=ssl_cert_path,
         context_window_tokens=settings.context_window_tokens,
         context_output_reserve_tokens=settings.context_output_reserve_tokens,
+        llm_timeout_seconds=settings.llm_timeout_seconds,
     )
     llm_provider.set_vision_mode(vision_mode)
 

@@ -169,6 +169,7 @@ La configuration active est `workspace/config.json`. Au démarrage, GPTMOSS la n
   "max_context_chars": 12000,
   "context_window_tokens": 0,
   "context_output_reserve_tokens": 8192,
+  "llm_timeout_seconds": 300,
   "max_upload_bytes": 104857600,
   "max_attachment_text_chars": 5000000,
   "max_transitions_per_execution": 2000,
@@ -195,7 +196,7 @@ La configuration active est `workspace/config.json`. Au démarrage, GPTMOSS la n
 | `api_key` | Jeton transmis à l'API LLM. | Le définir dans une configuration locale, jamais dans Git. |
 | `base_url` | Racine compatible OpenAI, habituellement terminée par `/v1`. | L'URL de votre fournisseur. |
 | `model_name` | Nom exact du modèle de chat. | Celui exposé par votre fournisseur. |
-| `vision_mode` | `auto` active la vision si le nom contient `vision`, `-vl`, `omni` ou `multimodal`. `enabled` / `disabled` forcent le flag local, sans interroger le serveur. | `auto`, ou `enabled` si le backend voit les images mais que le nom ne porte aucun marqueur. |
+| `vision_mode` | `auto` active la vision si le nom contient `vision`, `-vl`, `omni` ou `multimodal`. `enabled` / `disabled` forcent le flag local, sans interroger le serveur. Une image n'est comptée comme analysée que si la requête multimodale est acceptée (parties `image_url` encore présentes). | `auto`, ou `enabled` si le backend voit les images mais que le nom ne porte aucun marqueur. |
 | `ssl_verify` | Vérification TLS. | `true`. |
 | `ssl_cert_path` | Chemin d'un certificat d'autorité personnalisé. | Vide, sauf PKI interne. |
 | `denied_capabilities` | Capacités ou actions interdites. | Par ex. `['shell']` ou `['filesystem.delete']`. |
@@ -217,6 +218,7 @@ La configuration active est `workspace/config.json`. Au démarrage, GPTMOSS la n
 | `max_context_chars` | Plancher de l'historique conversationnel ; le préflight fournisseur applique toujours son plafond final. | `12000`. |
 | `context_window_tokens` | Fenêtre totale du modèle. `0` utilise une enveloppe initiale prudente puis apprend les limites exactes renvoyées par le backend. | `0`, ou `262144` si ce contrat est garanti par le serveur. |
 | `context_output_reserve_tokens` | Jetons gardés hors du prompt pour que la réponse ne tombe jamais implicitement à zéro. | `8192`. |
+| `llm_timeout_seconds` | Délai de lecture HTTP d'une requête LLM (silence avant le premier jeton et entre les chunks). La connexion reste courte (10 s). | `300` (10–3600). `0` est refusé. |
 | `max_upload_bytes` | Plafond applicatif strict d’un dépôt, validé par le contrat commun `RuntimeSettings`. | `104857600` (100 Mio). |
 | `max_attachment_text_chars` | Maximum de texte normalisé conservé par pièce jointe avant sélection contextuelle. | `5000000`. |
 | `max_transitions_per_execution` | Historique chronologique conservé par exécution ; les plus anciennes transitions sont élaguées. | `2000`. |
@@ -236,7 +238,7 @@ La configuration active est `workspace/config.json`. Au démarrage, GPTMOSS la n
 
 Les variables d'environnement `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `OPENAI_MODEL_NAME`, `DASHSCOPE_API_KEY`, `SSL_VERIFY` et `SSL_CERT_PATH` servent de valeurs de secours quand le champ équivalent n'est pas encore présent dans `config.json`. Un fichier de configuration lisible reste autoritatif. `MOSS_HOST` et `MOSS_PORT` fixent l'écoute de `main.py` et du superviseur lorsque `--host`/`--port` sont omis. `main.py` charge `.env` au démarrage. Un `config.json` illisible est mis en quarantaine (`config.json.corrupt-<horodatage>`) au lieu d'être écrasé sans copie. `config.json.template` est le preset copié à l'installation (fournisseur et modèle de votre site). Les défauts Pydantic de `RuntimeSettings` (`dashscope` / `qwen-turbo`) ne s'appliquent que si aucun fichier de configuration n'existe encore.
 
-`0` est légal seulement pour `max_delegation_depth`, `max_autonomous_skills_per_execution`, `max_parallel_plan_steps`, `context_window_tokens` et `shell_timeout_seconds`. `max_upload_bytes`, `max_attachment_text_chars` et `shell_max_output_chars` exigent un entier `≥ 1`.
+`0` est légal seulement pour `max_delegation_depth`, `max_autonomous_skills_per_execution`, `max_parallel_plan_steps`, `context_window_tokens` et `shell_timeout_seconds`. `max_upload_bytes`, `max_attachment_text_chars` et `shell_max_output_chars` exigent un entier `≥ 1`. `llm_timeout_seconds` exige un entier entre 10 et 3600.
 
 ## Moteur de documents longs et diagrammes
 
@@ -261,9 +263,11 @@ affichent l'avancement et permettent la reprise. Les tableaux Markdown deviennen
 de vrais tableaux DOCX ; les blocs `mermaid` ou `diagram` valides sont rendus en
 SVG et intégrés dans `word/media/`. Une figure invalide est explicitement
 signalée, jamais remplacée par une image trompeuse.
-Les sous-ensembles Mermaid `flowchart`, `sequenceDiagram` et `stateDiagram-v2`
-sont normalisés vers le même modèle contrôlé. Une figure isolée sans relation ne
-compte pas comme diagramme utile. Si la mission impose un nombre minimal de
+Les sous-ensembles Mermaid `flowchart`, `sequenceDiagram`, `stateDiagram-v2`
+et `pie` sont normalisés vers le même modèle contrôlé. Une figure isolée sans
+relation (hors `pie`) ne compte pas comme diagramme utile. Un type hors
+sous-ensemble (`gantt`, `classDiagram`, …) est rejeté par nom, jamais comme
+flowchart vide. Si la mission impose un nombre minimal de
 diagrammes, le Markdown et leur présence réelle dans le DOCX sont tous deux
 vérifiés avant que l'exécution puisse être déclarée terminée.
 
@@ -722,12 +726,13 @@ La mémoire durable est typée (`fact`, `decision`, `preference`, `constraint`, 
 |---|---|
 | Erreur de connexion au LLM | Vérifier `base_url`, `api_key`, `model_name`, la connectivité et le certificat TLS. Les chemins sont sensibles à la casse : utiliser le `/v1` réellement exposé par le serveur. Pour une CA privée, renseigner de préférence `ssl_cert_path`. |
 | `401 Unauthorized` pendant une tâche | Dans **Paramètres**, corriger la clé API puis utiliser **Tester la connexion**. Le test contrôle le catalogue et une inférence minimale réelle ; après succès, sélectionner l'exécution parente en échec et cliquer **Reprendre**. Les erreurs 401/403 ne sont pas retentées automatiquement. |
-| Erreur TLS | Garder `ssl_verify: true`; pour une PKI interne, fournir `ssl_cert_path`. Désactiver la vérification seulement pour un environnement explicitement contrôlé. |
+| Erreur TLS | Garder `ssl_verify: true`; pour une PKI interne, fournir `ssl_cert_path`. Un échec de certificat n'entre pas en attente fournisseur : corriger le réglage, tester la connexion, puis reprendre. Désactiver la vérification seulement pour un environnement explicitement contrôlé, avec confirmation. |
+| Génération LLM coupée trop tôt | Augmenter `llm_timeout_seconds` (défaut 300). Ce délai est distinct de `shell_timeout_seconds`. |
 | L'outil n'est pas appelé | Vérifier la politique, les skills sélectionnés et la compatibilité tool-calling du modèle. GPTMOSS normalise les balises textuelles `<tool_call>` de Qwen et utilise un repli par prompt si l'appel natif échoue. |
 | Exécution bloquée en pause | Lire l'état puis appeler `/approve` ou `/reject` si une approbation est en attente ; sinon `/resume`. |
 | Accès fichier refusé | Le chemin sort du workspace, contient une traversée ou les sous-dossiers sont désactivés. Utiliser un chemin relatif au projet. |
 | Commande shell expirée | Simplifier ou découper la commande. `shell_timeout_seconds=0` choisit 120 s (général), 900 s (tests/build) ou 1800 s (installation). |
-| Image non analysée | Vérifier Diagnostics (`vision: true`). En `auto`, le nom doit contenir `vision`, `-vl`, `omni` ou `multimodal`. Sinon passer `vision_mode` à `enabled`, ou fournir une transcription. |
+| Image non analysée | Vérifier Diagnostics (`vision: true`). En `auto`, le nom doit contenir `vision`, `-vl`, `omni` ou `multimodal`. Sinon passer `vision_mode` à `enabled` seulement si le backend accepte vraiment les images. Un refus `image_url` devient un écart de capacité, pas une couverture verte. |
 | Skill absent | Vérifier le nom, le frontmatter, l'encodage UTF-8 et redémarrer le serveur. |
 | `No module named venv` | Utiliser la dernière version complète du dépôt, qui contient le runtime préparé `python-3.13.14-embed-amd64`. Ne pas le remplacer par une archive embeddable nue. Le mode portable n'utilise pas `venv`. |
 | Dépendances absentes sur la machine hors-ligne | Le runtime n'a pas été transféré complètement. Reprendre le paquet autonome depuis Git ou exécuter `prepare-offline-source.bat` sur la machine connectée avant de transférer tout le dossier. |

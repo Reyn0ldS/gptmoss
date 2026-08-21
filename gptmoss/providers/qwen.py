@@ -25,6 +25,7 @@ class QwenProvider(LLMProvider):
         ssl_cert_path: str = "",
         context_window_tokens: int = 0,
         context_output_reserve_tokens: int = 8_192,
+        llm_timeout_seconds: int = 300,
     ):
         # Fall back to env variables or defaults
         self.api_key = api_key or os.getenv("OPENAI_API_KEY") or os.getenv("DASHSCOPE_API_KEY") or "mock-key"
@@ -35,27 +36,26 @@ class QwenProvider(LLMProvider):
         self.ssl_cert_path = ssl_cert_path or ""
         self.vision_mode = "auto"
         self.supports_vision = self._infer_vision(default_model)
+        self.vision_rejected_for_model: Optional[str] = None
         self._native_tools_supported: Optional[bool] = None
         self._learned_context_chars: Optional[int] = None
         self.context_window_tokens = max(0, int(context_window_tokens or 0))
         self.context_output_reserve_tokens = max(
             256, int(context_output_reserve_tokens or 8_192)
         )
+        self.timeout_seconds = max(10, min(3600, int(llm_timeout_seconds or 300)))
         self._learned_context_tokens: Optional[int] = None
         self._retired_clients = []
         self._close_tasks: set[asyncio.Task] = set()
         
         logger.info(f"Initializing QwenProvider calling base_url={self.base_url} with default_model={self.default_model}")
-        import httpx
         # Certificate validation is secure by default. A local/self-signed
         # endpoint can still be enabled explicitly through settings.
         verify_value = ssl_cert_path if ssl_verify and ssl_cert_path else bool(ssl_verify)
-        http_client = httpx.AsyncClient(verify=verify_value)
         # ExecutionEngine owns provider recovery and persists waiting state.
         # Hidden SDK retries multiply that policy and can make one request
         # monopolize an execution for many minutes without observable state.
-        self.client = AsyncOpenAI(api_key=self.api_key, base_url=self.base_url, http_client=http_client,
-                                  max_retries=0, timeout=90.0)
+        self.client = self._build_client(verify_value)
 
     @staticmethod
     def _infer_vision(model_name: str) -> bool:
@@ -73,14 +73,44 @@ class QwenProvider(LLMProvider):
             self._infer_vision(self.default_model)
             if normalized == "auto" else normalized == "enabled"
         )
+        self.vision_rejected_for_model = None
 
     @staticmethod
     def _log_completion_error(error: Exception):
-        text = (error.__class__.__name__ + " " + str(error)).lower()
-        if any(marker in text for marker in ("connection", "timeout", "rate limit", "429", "502", "503", "504")):
+        parts = []
+        current: BaseException | None = error
+        seen: set[int] = set()
+        while current is not None and id(current) not in seen:
+            seen.add(id(current))
+            parts.append(current.__class__.__name__ + " " + str(current))
+            current = current.__cause__
+        text = " ".join(parts).lower()
+        if any(marker in text for marker in (
+            "certificate_verify", "does not support image", "invalid image",
+            "vision not supported", "401", "403", "invalid api key",
+        )):
+            logger.error("LLM provider configuration failure (%s): %s", error.__class__.__name__, error)
+        elif any(marker in text for marker in ("connection", "timeout", "rate limit", "429", "502", "503", "504")):
             logger.warning("Temporary LLM provider failure (%s): %s", error.__class__.__name__, error)
         else:
             logger.error("Error in LLM completion: %s", error, exc_info=True)
+
+    def _http_timeout(self):
+        import httpx
+        read = float(self.timeout_seconds)
+        return httpx.Timeout(connect=10.0, read=read, write=min(60.0, read), pool=10.0)
+
+    def _build_client(self, verify_value):
+        import httpx
+        timeout = self._http_timeout()
+        http_client = httpx.AsyncClient(verify=verify_value, timeout=timeout)
+        return AsyncOpenAI(
+            api_key=self.api_key,
+            base_url=self.base_url,
+            http_client=http_client,
+            max_retries=0,
+            timeout=timeout,
+        )
 
     def _retire_client(self, client) -> None:
         if client is None:
@@ -115,7 +145,7 @@ class QwenProvider(LLMProvider):
             except Exception:
                 logger.warning("Unable to close an LLM HTTP client cleanly.", exc_info=True)
 
-    def update_config(self, api_key: str, base_url: str, ssl_verify: bool = True, ssl_cert_path: str = "", model_name: str = "qwen-turbo", context_window_tokens: int = 0, context_output_reserve_tokens: int = 8_192):
+    def update_config(self, api_key: str, base_url: str, ssl_verify: bool = True, ssl_cert_path: str = "", model_name: str = "qwen-turbo", context_window_tokens: int = 0, context_output_reserve_tokens: int = 8_192, llm_timeout_seconds: Optional[int] = None):
         self.api_key = api_key
         self.base_url = base_url
         self.default_model = model_name
@@ -125,24 +155,24 @@ class QwenProvider(LLMProvider):
             self._infer_vision(model_name)
             if self.vision_mode == "auto" else self.vision_mode == "enabled"
         )
+        self.vision_rejected_for_model = None
         self._native_tools_supported = None
         self._learned_context_chars = None
         self.context_window_tokens = max(0, int(context_window_tokens or 0))
         self.context_output_reserve_tokens = max(
             256, int(context_output_reserve_tokens or 8_192)
         )
+        if llm_timeout_seconds is not None:
+            self.timeout_seconds = max(10, min(3600, int(llm_timeout_seconds)))
         self._learned_context_tokens = None
         
-        import httpx
         if ssl_verify:
             verify_value = ssl_cert_path if ssl_cert_path else True
         else:
             verify_value = False
             
-        http_client = httpx.AsyncClient(verify=verify_value)
         previous_client = getattr(self, "client", None)
-        self.client = AsyncOpenAI(api_key=self.api_key, base_url=self.base_url, http_client=http_client,
-                                  max_retries=0, timeout=90.0)
+        self.client = self._build_client(verify_value)
         self._retire_client(previous_client)
         logger.info(f"QwenProvider config updated. base_url={self.base_url}, ssl_verify={ssl_verify}, ssl_cert_path={ssl_cert_path}")
 
@@ -304,7 +334,7 @@ class QwenProvider(LLMProvider):
                             **stream_request, stream=True
                         )
                     except Exception as stream_error:
-                        error_text = str(stream_error).lower()
+                        error_text = ContextWindowPolicy._error_text(stream_error)
                         if not any(
                             marker in error_text
                             for marker in ("stream_options", "include_usage")
@@ -435,12 +465,25 @@ class QwenProvider(LLMProvider):
                 self._native_tools_supported = False
             return parsed
         except Exception as e:
-            err_msg = str(e).lower()
+            from gptmoss.core.provider_recovery import (
+                configuration_kind,
+                contains_http_status,
+            )
+
+            # TLS / vision / auth must not demote native tools or burn a
+            # second prompt-protocol request on a configuration failure.
+            if configuration_kind(e) is not None:
+                self._log_completion_error(e)
+                raise e
+            error_text = ContextWindowPolicy._error_text(e)
             # If native tool calling fails because auto tool choice is disabled on remote server, fall back
             if (
-                "tool_choice" in err_msg or "tool-call-parser" in err_msg
-                or "tool_call" in err_msg
-                or ("400" in err_msg and not self._is_context_limit_error(e))
+                "tool_choice" in error_text or "tool-call-parser" in error_text
+                or "tool_call" in error_text
+                or (
+                    contains_http_status(error_text, "400")
+                    and not self._is_context_limit_error(e)
+                )
             ):
                 logger.warning("Native tool calling failed/not supported by remote endpoint, falling back to prompt-based tool calling.")
                 self._native_tools_supported = False

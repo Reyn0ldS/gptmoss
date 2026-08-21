@@ -11,6 +11,7 @@ from gptmoss.capabilities.documents import DocumentCapability
 from gptmoss.capabilities.filesystem import FilesystemCapability
 from gptmoss.capabilities.shell import ShellCapability
 from gptmoss.capabilities.memory import MemoryCapability
+from gptmoss.core.settings import RuntimeSettings
 from gptmoss.interfaces.capability import get_actions
 
 
@@ -121,6 +122,7 @@ CONFIGURATION_OWNERS = {
     "max_step_retries": "execution", "max_parallel_plan_steps": "execution",
     "safe_shell_mode": "shell",
     "shell_timeout_seconds": "shell", "shell_max_output_chars": "shell",
+    "llm_timeout_seconds": "llm",
     "default_skills": "execution", "projects": "api",
     "document_engine_enabled": "execution+documents",
     "document_checkpoint_enabled": "execution+persistence",
@@ -173,4 +175,5 @@ def test_every_capability_action_declares_its_execution_mode():
 def test_every_configuration_field_has_a_runtime_owner():
     template = json.loads((ROOT / "config.json.template").read_text(encoding="utf-8"))
     assert set(template) == set(CONFIGURATION_OWNERS)
+    assert set(template) == set(RuntimeSettings.model_fields)
     assert all(owner for owner in CONFIGURATION_OWNERS.values())

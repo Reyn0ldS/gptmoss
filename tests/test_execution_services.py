@@ -34,6 +34,75 @@ def test_provider_recovery_classifies_permanent_and_transient_errors():
     assert not ProviderRecoveryCoordinator.is_transient(ValueError("invalid payload"))
 
 
+def test_ssl_certificate_error_is_configuration_not_transient():
+    error = Exception(
+        "APIConnectionError [SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: "
+        "self-signed certificate"
+    )
+    assert ProviderRecoveryCoordinator.is_tls_configuration(error)
+    assert ProviderRecoveryCoordinator.is_permanent(error)
+    assert not ProviderRecoveryCoordinator.is_transient(error)
+    assert ProviderRecoveryCoordinator.is_transient(ConnectionError("provider unavailable"))
+    assert not ProviderRecoveryCoordinator.is_tls_configuration(
+        ConnectionError("provider unavailable")
+    )
+    missing_ca = Exception("SSLError: Could not find a suitable TLS CA certificate bundle")
+    assert ProviderRecoveryCoordinator.is_tls_configuration(missing_ca)
+
+
+def test_openai_wrapped_tls_error_walks_the_exception_cause():
+    wrapped = Exception("Connection error.")
+    wrapped.__cause__ = Exception(
+        "[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: self-signed certificate"
+    )
+    assert ProviderRecoveryCoordinator.is_tls_configuration(wrapped)
+    assert not ProviderRecoveryCoordinator.is_transient(wrapped)
+
+
+def test_unexpected_eof_ssl_error_is_transient_not_tls_configuration():
+    error = Exception("SSL error: UNEXPECTED_EOF_WHILE_READING")
+    assert not ProviderRecoveryCoordinator.is_tls_configuration(error)
+    assert ProviderRecoveryCoordinator.is_transient(error)
+    wrapped = Exception("Connection error.")
+    wrapped.__cause__ = Exception("SSL error: UNEXPECTED_EOF_WHILE_READING")
+    assert not ProviderRecoveryCoordinator.is_tls_configuration(wrapped)
+    assert ProviderRecoveryCoordinator.is_transient(wrapped)
+
+    class ConnectError(Exception):
+        pass
+
+    eof = ConnectError("[SSL: UNEXPECTED_EOF_WHILE_READING] unexpected eof while reading")
+    assert not ProviderRecoveryCoordinator.is_tls_configuration(eof)
+    assert ProviderRecoveryCoordinator.is_transient(eof)
+
+
+def test_http_status_markers_do_not_match_embedded_digits():
+    context = Exception("This model's maximum context length is 14016 tokens")
+    assert not ProviderRecoveryCoordinator.is_permanent(context)
+    assert not ProviderRecoveryCoordinator.is_tls_configuration(context)
+    assert ProviderRecoveryCoordinator.is_permanent(
+        Exception("Error code: 401 - Unauthorized")
+    )
+    assert ProviderRecoveryCoordinator.is_permanent(Exception("HTTP 403 forbidden"))
+    assert not ProviderRecoveryCoordinator.is_transient(
+        Exception("prompt used 4290 tokens")
+    )
+    assert ProviderRecoveryCoordinator.is_transient(Exception("HTTP 429 rate limit"))
+
+
+def test_vision_rejection_is_configuration_not_transient():
+    error = Exception("BadRequestError: this model does not support image_url content")
+    assert ProviderRecoveryCoordinator.is_vision_rejected(error)
+    assert ProviderRecoveryCoordinator.is_permanent(error)
+    assert not ProviderRecoveryCoordinator.is_transient(error)
+    timeout = Exception("APITimeoutError timed out while sending image_url payload")
+    assert not ProviderRecoveryCoordinator.is_vision_rejected(timeout)
+    assert ProviderRecoveryCoordinator.is_transient(timeout)
+    assert not ProviderRecoveryCoordinator.is_vision_rejected(
+        Exception("unknown part type in tool schema")
+    )
+
+
 @pytest.mark.asyncio
 async def test_provider_resume_schedule_is_idempotent_and_stoppable():
     state = StateEngine()

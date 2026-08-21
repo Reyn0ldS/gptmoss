@@ -13,10 +13,27 @@ class ContextWindowPolicy:
     # bytes per token is intentionally conservative and does not require a
     # model-specific tokenizer to be downloaded for offline operation.
     BYTES_PER_TOKEN = 3
+    DIGEST_MARK = "Pinned local source evidence"
+
+    @staticmethod
+    def _is_pinned(message: Dict[str, Any]) -> bool:
+        content = message.get("content")
+        return isinstance(content, str) and ContextWindowPolicy.DIGEST_MARK in content
+
+    @staticmethod
+    def _error_text(error: BaseException) -> str:
+        parts: list[str] = []
+        seen: set[int] = set()
+        current: BaseException | None = error
+        while current is not None and id(current) not in seen:
+            seen.add(id(current))
+            parts.append(current.__class__.__name__ + " " + str(current))
+            current = current.__cause__
+        return " ".join(parts).lower()
 
     @staticmethod
     def is_limit_error(error: Exception) -> bool:
-        text = (error.__class__.__name__ + " " + str(error)).lower()
+        text = ContextWindowPolicy._error_text(error)
         return any(marker in text for marker in (
             "context length", "context_length", "maximum context", "max context",
             "too many tokens", "token limit", "prompt is too long", "input length",
@@ -60,7 +77,7 @@ class ContextWindowPolicy:
 
     @staticmethod
     def limit_tokens(error: Exception) -> int | None:
-        text = str(error)
+        text = ContextWindowPolicy._error_text(error)
         patterns = (
             r"maximum context length is\s*([\d, _]+)\s*tokens",
             r"maximum context(?: length)?[^\d]{0,30}([\d, _]+)\s*tokens",
@@ -107,10 +124,17 @@ class ContextWindowPolicy:
         first = items[0] if items[0].get("role") == "system" else None
         body, omitted = (items[1:] if first else items), 0
         while len(body) > 4 and cls.message_chars(([first] if first else []) + body) > target_chars:
-            body.pop(0)
+            drop_at = next((index for index, message in enumerate(body) if not cls._is_pinned(message)), None)
+            if drop_at is None:
+                break
+            body.pop(drop_at)
             omitted += 1
-            while body and body[0].get("role") == "tool":
-                body.pop(0)
+            while (
+                drop_at < len(body)
+                and body[drop_at].get("role") == "tool"
+                and not cls._is_pinned(body[drop_at])
+            ):
+                body.pop(drop_at)
                 omitted += 1
         compacted = ([first] if first else [])
         if omitted:
@@ -125,7 +149,16 @@ class ContextWindowPolicy:
                           if message is not first and str(message.get("content") or "")]
             if not candidates:
                 break
-            _, index = max(candidates)
+            digest_candidates = [
+                item for item in candidates
+                if not cls._is_pinned(compacted[item[1]])
+            ]
+            if not digest_candidates:
+                if first is not None:
+                    break
+                _, index = max(candidates)
+            else:
+                _, index = max(digest_candidates)
             original_content = compacted[index].get("content")
             if isinstance(original_content, list):
                 compacted[index]["content"] = (

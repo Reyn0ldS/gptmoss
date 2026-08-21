@@ -336,7 +336,7 @@ def _load_runtime_config() -> Dict[str, Any]:
     if not config_path or not config_path.exists():
         return {}
     try:
-        return json.loads(config_path.read_text(encoding="utf-8"))
+        return json.loads(config_path.read_text(encoding="utf-8-sig"))
     except (OSError, json.JSONDecodeError) as exc:
         raise HTTPException(status_code=500, detail="Runtime configuration is unreadable.") from exc
 
@@ -365,7 +365,7 @@ async def get_gui():
     if not os.path.exists(GUI_FILE_PATH):
         raise HTTPException(status_code=404, detail="GUI file not found.")
     with open(GUI_FILE_PATH, "r", encoding="utf-8") as f:
-        return f.read()
+        return HTMLResponse(content=f.read(), media_type="text/html; charset=utf-8")
 
 
 @app.get("/health")
@@ -1571,6 +1571,7 @@ async def get_settings():
         config.setdefault("safe_shell_mode", True)
         config.setdefault("shell_timeout_seconds", 0)
         config.setdefault("shell_max_output_chars", 12_000)
+        config.setdefault("llm_timeout_seconds", 300)
         config.setdefault("default_skills", [])
         config.setdefault("workspace_full_autonomy", False)
         config.setdefault("continue_while_progress", True)
@@ -1639,6 +1640,7 @@ async def get_settings():
         "safe_shell_mode": bool(getattr(app_state.execution_engine.get_capability("shell"), "safe_mode", True)),
         "shell_timeout_seconds": getattr(app_state.execution_engine.get_capability("shell"), "timeout_seconds", 0),
         "shell_max_output_chars": getattr(app_state.execution_engine.get_capability("shell"), "max_output_chars", 12_000) or 12_000,
+        "llm_timeout_seconds": getattr(llm, "timeout_seconds", 300),
         "default_skills": []
     }
 
@@ -1682,6 +1684,12 @@ async def test_connection(req: SettingsRequest):
             ),
         ) from exc
     except (httpx.HTTPError, ValueError, OSError) as exc:
+        from gptmoss.core.provider_recovery import (
+            ProviderRecoveryCoordinator,
+            TLS_CONFIGURATION_MESSAGE,
+        )
+        if ProviderRecoveryCoordinator.is_tls_configuration(exc):
+            raise HTTPException(status_code=502, detail=TLS_CONFIGURATION_MESSAGE) from exc
         raise HTTPException(status_code=502, detail=f"Unable to connect to the provider: {exc}") from exc
     models = [str(item.get("id")) for item in payload.get("data", []) if isinstance(item, dict) and item.get("id")]
     return {
@@ -1787,6 +1795,7 @@ async def update_settings(req: SettingsRequest, request: Request):
         "safe_shell_mode": req.safe_shell_mode,
         "shell_timeout_seconds": req.shell_timeout_seconds,
         "shell_max_output_chars": req.shell_max_output_chars,
+        "llm_timeout_seconds": req.llm_timeout_seconds,
         "default_skills": [skill.lower() for skill in req.default_skills]
     }
     
@@ -1801,6 +1810,7 @@ async def update_settings(req: SettingsRequest, request: Request):
             "model_name": req.model_name,
             "context_window_tokens": req.context_window_tokens,
             "context_output_reserve_tokens": req.context_output_reserve_tokens,
+            "llm_timeout_seconds": req.llm_timeout_seconds,
         }
         parameters = inspect.signature(llm.update_config).parameters
         llm.update_config(**{

@@ -29,7 +29,7 @@ modules et tests est dans `application-map.json` ; le présent document apporte 
 
 | Groupe | Champs | Application effective |
 |---|---|---|
-| Fournisseur | `api_key`, `base_url`, `model_name`, `vision_mode`, `ssl_verify`, `ssl_cert_path`, `context_window_tokens`, `context_output_reserve_tokens` | QwenProvider ; préflight borné, apprentissage de limite, test catalogue et chat ; clé non réaffichée par défaut. |
+| Fournisseur | `api_key`, `base_url`, `model_name`, `vision_mode`, `ssl_verify`, `ssl_cert_path`, `context_window_tokens`, `context_output_reserve_tokens`, `llm_timeout_seconds` | QwenProvider ; préflight borné, apprentissage de limite, délai de lecture HTTP, test catalogue et chat ; clé non réaffichée par défaut. |
 | Politique | `denied_capabilities`, `approval_required_capabilities`, `workspace_full_autonomy` | `SimplePolicyProvider` avant chaque outil ; refus prioritaire sur autonomie. |
 | Orchestration | `continue_while_progress`, `adaptive_resource_management`, `max_step_iterations`, `max_step_retries`, `max_parallel_plan_steps` | Budgets de stagnation/reprise, compilation adaptative et taille de vague simultanée (`0` automatique), sans plafond sur le total du DAG. |
 | Délégation | `allow_nested_delegation`, `max_delegation_depth` | Schémas d'outils, lignée et contrôles du noyau. |

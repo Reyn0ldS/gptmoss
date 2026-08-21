@@ -180,17 +180,17 @@ volume cible, exigences, preuves et dépendances), sauvegarde chaque révision d
 validées. Cette mémoire réduit les répétitions et permet de reprendre après une
 interruption fournisseur sans recommencer les sections terminées.
 
-Les blocs `mermaid` ou `diagram` (`flowchart`, `sequenceDiagram` et
-`stateDiagram-v2`) sont convertis par le modèle canonique de diagramme,
-contrôlés (nœuds, arêtes, zones de confiance, densité, métadonnées), puis rendus en
+Les blocs `mermaid` ou `diagram` (`flowchart`, `sequenceDiagram`,
+`stateDiagram-v2` et `pie`) sont convertis par le modèle canonique de diagramme,
+contrôlés (nœuds, arêtes ou parts, zones de confiance, densité, métadonnées), puis rendus en
 SVG déterministe. Le paquet DOCX conserve la figure dans `word/media/` et relie son
-`rId` dans `document.xml`; une erreur sémantique ou une figure sans relation ne sont
-jamais masquées par un dessin vide. Quand un minimum est demandé, le nombre de figures
+`rId` dans `document.xml`; une erreur sémantique, un type hors sous-ensemble ou un
+flowchart sans relation ne sont jamais masqués par un dessin vide. Quand un minimum est demandé, le nombre de figures
 valides dans le Markdown puis le nombre de SVG réellement intégrés au DOCX sont vérifiés.
 
 L'index est lexical, accent-insensible et sans modèle à télécharger. Il est enregistré dans `workspace/uploads/document-index.json`, rechargé au redémarrage et reconstruit automatiquement si son état ne correspond plus aux documents. La représentation normalisée de chaque fichier évite de reparcourir l'archive à chaque lecture.
 
-Quand le corpus dépasse la fenêtre du modèle, GPTMOSS n'injecte pas simplement le début du premier fichier. Il recherche les passages liés à la tâche, conserve leurs titres, diversifie les sources et, sans requête assez discriminante, échantillonne le début, le milieu et la fin. Les agents paginent `documents.inventory`, relisent le texte avec `documents.search`, `documents.read` et `documents.read_chunk`, puis demandent les images précises avec `documents.read_image` ou par lots de quatre avec `documents.read_images`. Une image n'est comptée comme analysée qu'après une complétion multimodale réussie. Si une étape promet un inventaire intégral ou exhaustif, son handoff est refusé tant que l'historique ne prouve pas la lecture de chaque bloc et la présentation de chaque image de la partition ; le nombre de diapositives ne peut donc pas être confondu avec le nombre de blocs PPTX. Sa politique `require_source_coverage` vérifie séparément que l'union des plages citées couvre chaque bloc ou diapositive déclaré dans `source_inventory` : avoir lu une source sans documenter sa couverture ne suffit pas.
+Quand le corpus dépasse la fenêtre du modèle, GPTMOSS n'injecte pas simplement le début du premier fichier. Il recherche les passages liés à la tâche, conserve leurs titres, diversifie les sources et, sans requête assez discriminante, échantillonne le début, le milieu et la fin. Les agents paginent `documents.inventory`, relisent le texte avec `documents.search`, `documents.read` et `documents.read_chunk`, puis demandent les images précises avec `documents.read_image` ou par lots de quatre avec `documents.read_images`. Une image n'est comptée comme analysée qu'après une complétion multimodale réussie dont la requête acceptée contient encore les parties `image_url`. Un refus backend (modèle texte seul) est un écart de capacité, pas une couverture verte. Lorsque le compactage conversationnel omet d'anciens `documents.read`, un digest borné des citations durables est réinjecté dans le prompt ; `tool_call_history` reste la preuve machine du gate. Si une étape promet un inventaire intégral ou exhaustif, son handoff est refusé tant que l'historique ne prouve pas la lecture de chaque bloc et la présentation de chaque image de la partition ; le nombre de diapositives ne peut donc pas être confondu avec le nombre de blocs PPTX. Sa politique `require_source_coverage` vérifie séparément que l'union des plages citées couvre chaque bloc ou diapositive déclaré dans `source_inventory` : avoir lu une source sans documenter sa couverture ne suffit pas.
 
 Si le fournisseur renvoie un plan invalide ou trop petit, le fallback déterministe reconnaît une mission documentaire à partir des formats, pièces jointes, actions `documents` et objectifs de rédaction. Il conserve les noms de livrables explicitement listés, reconstruit la politique `document`, sépare analyse du corpus, exigences, décisions, architecture, sécurité, SRE, migration, rédaction, QA, réparation et audit final. Un nom comme `vision.pptx` ou le verbe « porter » dans « porter une référence » n'est pas interprété comme un projet de computer vision ou de vêtement numérique.
 

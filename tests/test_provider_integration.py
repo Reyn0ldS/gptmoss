@@ -88,6 +88,30 @@ async def test_local_openai_compatible_tool_call_round_trip():
     }
     assert response["usage"]["total_tokens"] == 12
     assert provider.client.max_retries == 0
+    assert provider.timeout_seconds == 300
+    assert float(provider.client.timeout.read) == 300.0
+    assert float(provider.client.timeout.connect) == 10.0
+
+
+@pytest.mark.asyncio
+async def test_qwen_client_uses_configured_read_timeout():
+    provider = QwenProvider(
+        api_key="local-key",
+        base_url="http://127.0.0.1:9/v1",
+        default_model="local-model",
+        llm_timeout_seconds=120,
+    )
+    try:
+        assert provider.timeout_seconds == 120
+        assert float(provider.client.timeout.read) == 120.0
+        provider.update_config(
+            "local-key", "http://127.0.0.1:9/v1",
+            model_name="local-model", llm_timeout_seconds=300,
+        )
+        assert provider.timeout_seconds == 300
+        assert float(provider.client.timeout.read) == 300.0
+    finally:
+        await provider.close()
 
 
 @pytest.mark.asyncio
@@ -150,6 +174,70 @@ async def test_native_tool_request_without_call_demotes_to_prompt_protocol():
     assert len(native_requests) == 1
     assert len(fallback_requests) == 1
     assert second["tool_calls"][0]["function"]["name"] == "filesystem__write"
+
+
+@pytest.mark.asyncio
+async def test_timeout_containing_400_does_not_disable_native_tools():
+    provider = QwenProvider(
+        api_key="local-key",
+        base_url="http://127.0.0.1:9/v1",
+        default_model="local-model",
+    )
+
+    async def timeout_response(*_args, **_kwargs):
+        raise RuntimeError("ReadTimeout after 4000ms")
+
+    provider._create_with_context_recovery = timeout_response
+    tools = [{
+        "type": "function",
+        "function": {
+            "name": "filesystem__write",
+            "description": "Write a file",
+            "parameters": {"type": "object"},
+        },
+    }]
+    try:
+        with pytest.raises(RuntimeError, match="4000"):
+            await provider.completion(
+                messages=[{"role": "user", "content": "Write the report"}],
+                tools=tools,
+            )
+        assert provider._native_tools_supported is not False
+    finally:
+        await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_vision_http_400_does_not_disable_native_tools():
+    provider = QwenProvider(
+        api_key="local-key",
+        base_url="http://127.0.0.1:9/v1",
+        default_model="local-model",
+    )
+
+    async def vision_response(*_args, **_kwargs):
+        raise RuntimeError(
+            "Error code: 400 - this model does not support image_url content"
+        )
+
+    provider._create_with_context_recovery = vision_response
+    tools = [{
+        "type": "function",
+        "function": {
+            "name": "filesystem__write",
+            "description": "Write a file",
+            "parameters": {"type": "object"},
+        },
+    }]
+    try:
+        with pytest.raises(RuntimeError, match="image_url"):
+            await provider.completion(
+                messages=[{"role": "user", "content": "Describe the image"}],
+                tools=tools,
+            )
+        assert provider._native_tools_supported is not False
+    finally:
+        await provider.close()
 
 
 @pytest.mark.asyncio
