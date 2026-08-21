@@ -8,7 +8,10 @@ import pytest
 
 from gptmoss.core.delivery_package import build_delivery_package
 from gptmoss.core.documents import parse_document
-from gptmoss.core.professional_delivery import apply_professional_profile
+from gptmoss.core.professional_delivery import (
+    apply_professional_profile,
+    should_apply_professional_profile,
+)
 
 
 def test_professional_profile_enforces_quality_and_attachment_inventory(tmp_path):
@@ -43,6 +46,61 @@ def test_professional_profile_enforces_quality_and_attachment_inventory(tmp_path
     supporting = policies["analysis/inventory.md"]["constraints"]
     assert supporting["source_inventory"] == {"source.txt": {"blocks": 2}}
     assert supporting["required_source_files"] == ["source.txt"]
+
+
+def test_professional_profile_stamps_untagged_llm_plan_from_corpus_policy(tmp_path):
+    source = tmp_path / "source.txt"
+    source.write_text("# Décision\n\nLa conservation est limitée à trente jours.", encoding="utf-8")
+
+    class Store:
+        def document(self, artifact_id):
+            return parse_document(source)
+
+    plan = {
+        "primary_artifact": "report.md",
+        "steps": [{"required_artifacts": ["report.md"]}],
+        "artifact_validations": [],
+    }
+    apply_professional_profile(
+        plan, Store(), ["a1"],
+        task="Translate this sentence into French.",
+        corpus_policy={"enabled": True, "professional_delivery": True},
+    )
+    assert plan["delivery_profile"] == "professional-local"
+    constraints = plan["artifact_validations"][0]["constraints"]
+    assert constraints["forbid_placeholders"] is True
+    assert constraints["source_inventory"] == {"source.txt": {"blocks": 2}}
+
+
+def test_professional_profile_skips_software_implementation_even_with_corpus_policy():
+    plan = {
+        "steps": [{"role": "developer", "required_artifacts": ["src/app.py", "README.md"]}],
+        "artifact_validations": [],
+    }
+    apply_professional_profile(
+        plan,
+        task="Construire une application locale avec une API et des tests.",
+        corpus_policy={"enabled": True, "professional_delivery": True},
+        workload={"attachment_count": 4, "document_count": 4},
+    )
+    assert plan.get("delivery_profile") != "professional-local"
+
+
+def test_professional_profile_skips_translation_with_loose_attachments():
+    plan = {"steps": [{"required_artifacts": ["note.txt"]}]}
+    apply_professional_profile(
+        plan,
+        task="Translate this sentence into French.",
+        corpus_policy={"enabled": True, "professional_delivery": False},
+        workload={"attachment_count": 1, "document_count": 1},
+    )
+    assert plan.get("delivery_profile") != "professional-local"
+    assert not should_apply_professional_profile(
+        plan,
+        task="Translate this sentence into French.",
+        corpus_policy={"enabled": True, "professional_delivery": False},
+        workload={"attachment_count": 1, "document_count": 1},
+    )
 
 
 def test_delivery_package_contains_docx_manifest_assurance_and_sources(tmp_path):

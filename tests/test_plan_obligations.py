@@ -9,7 +9,10 @@ from gptmoss.core.plan_obligations import (
     validate_plan_obligations,
 )
 from gptmoss.core.workload import MAX_SOURCE_PARTITIONS, compile_work_graph
-from gptmoss.planners.complexity import analyze_task_complexity
+from gptmoss.planners.complexity import (
+    analyze_task_complexity,
+    requires_software_implementation,
+)
 from gptmoss.planners.fallbacks import _step
 from gptmoss.planners.simple import SimplePlanner
 from tests.mock_llm import MockLLMProvider
@@ -127,6 +130,78 @@ def test_software_architecture_dossier_does_not_inject_implementation_work():
         item["id"] for item in plan["plan_obligations"]
     }
     assert not any(step.get("role") == "developer" for step in plan["steps"])
+
+
+def test_corpus_folder_does_not_turn_software_implementation_into_a_dossier():
+    task = (
+        "Construire une application locale et portable qui expose une API "
+        "et une interface, avec des tests complets."
+    )
+    analysis = analyze_task_complexity(task)
+    plan = SimplePlanner._fallback_plan(
+        task, analysis, "auto",
+        corpus_policy={"enabled": True, "professional_delivery": True},
+        workload_profile={"attachment_count": 4, "document_count": 4},
+    )
+    assert any(step.get("role") == "developer" for step in plan["steps"])
+    assert plan.get("delivery_profile") != "professional-local"
+    assert not any(
+        "corpus" in str(step.get("specialist") or "").casefold()
+        for step in plan["steps"]
+    )
+
+
+def test_interface_document_and_work_programme_are_not_software_implementation():
+    interface_doc = "Create an interface document from the local corpus."
+    work_programme = "Créer un programme de travail dans le dossier."
+    assert requires_software_implementation(interface_doc) is False
+    assert requires_software_implementation(work_programme) is False
+    assert not any(
+        step.get("role") == "developer"
+        for step in SimplePlanner._fallback_plan(
+            work_programme, analyze_task_complexity(work_programme), "auto",
+            workload_profile={"attachment_count": 2, "document_count": 2},
+        )["steps"]
+    )
+
+
+def test_acceptance_test_in_a_dossier_is_not_software_implementation():
+    task = "Créer un test d'acceptation dans le dossier à partir des pièces jointes."
+    analysis = analyze_task_complexity(task)
+    assert analysis["software_implementation_requested"] is False
+    plan = SimplePlanner._fallback_plan(
+        task, analysis, "auto",
+        workload_profile={"attachment_count": 3, "document_count": 3},
+    )
+    assert not any(step.get("role") == "developer" for step in plan["steps"])
+
+
+def test_french_create_application_is_software_implementation():
+    task = (
+        "Construire une application locale et portable qui expose une API "
+        "et une interface, avec des tests complets."
+    )
+    analysis = analyze_task_complexity(task)
+    assert analysis["software_implementation_requested"] is True
+    plan = SimplePlanner._fallback_plan(task, analysis, "auto")
+    assert any(step.get("role") == "developer" for step in plan["steps"])
+
+
+def test_french_project_dossier_with_attachments_is_not_a_software_dag():
+    task = "Rédige un dossier du projet à partir des pièces jointes."
+    analysis = analyze_task_complexity(task)
+    assert "software-engineering" in analysis["domains"]
+    assert analysis["software_implementation_requested"] is False
+
+    plan = SimplePlanner._fallback_plan(
+        task, analysis, "auto",
+        workload_profile={"attachment_count": 4, "document_count": 4},
+    )
+    assert not any(step.get("role") == "developer" for step in plan["steps"])
+    assert plan.get("delivery_profile") == "professional-local" or any(
+        "corpus" in str(step.get("specialist") or "").casefold()
+        for step in plan["steps"]
+    )
 
 
 @pytest.mark.parametrize("task", [

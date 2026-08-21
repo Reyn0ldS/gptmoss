@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 import re
 import unicodedata
-from typing import Any, Dict, Iterable
+from typing import Any, Dict, Iterable, Mapping
 
 
 PROFILE = "professional-local"
@@ -124,13 +124,42 @@ def _source_inventory(artifact_store: Any, attachment_ids: Iterable[str]) -> Dic
     return inventory
 
 
+def should_apply_professional_profile(
+    plan: Mapping[str, Any] | None,
+    *,
+    task: str = "",
+    corpus_policy: Mapping[str, Any] | None = None,
+    workload: Mapping[str, Any] | None = None,
+) -> bool:
+    """Activate professional floors from policy or a document task, not a planner tag."""
+    if isinstance(plan, Mapping) and plan.get("delivery_profile") == PROFILE:
+        return True
+    from gptmoss.planners.complexity import requires_software_implementation
+    if requires_software_implementation(task):
+        return False
+    policy = corpus_policy if isinstance(corpus_policy, Mapping) else {}
+    if policy.get("professional_delivery"):
+        return True
+    from gptmoss.planners.fallbacks import _document_deliverable_task
+    return _document_deliverable_task(
+        task, workload=workload, corpus_policy=policy,
+    )
+
+
 def apply_professional_profile(
     plan: Dict[str, Any], artifact_store: Any = None,
     attachment_ids: Iterable[str] = (),
+    *,
+    task: str = "",
+    corpus_policy: Mapping[str, Any] | None = None,
+    workload: Mapping[str, Any] | None = None,
 ) -> Dict[str, Any]:
     """Enforce a useful quality floor without trusting planner-generated policy."""
-    if plan.get("delivery_profile") != PROFILE:
+    if not should_apply_professional_profile(
+        plan, task=task, corpus_policy=corpus_policy, workload=workload,
+    ):
         return plan
+    plan["delivery_profile"] = PROFILE
     inventory = _source_inventory(artifact_store, attachment_ids)
     source_files = list(inventory)
     requirements_text = _requirement_text(plan)

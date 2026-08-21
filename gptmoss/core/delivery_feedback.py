@@ -19,7 +19,7 @@ from gptmoss.core.plan_obligations import (
 INVENTORY_MARKERS = (
     "read every normalized block",
     "analyze every attached image",
-    "incomplete source coverage",
+    "prove complete document coverage",
     "corpus policy lacks machine evidence",
     "no documents.read",
     "no documents.read_image",
@@ -32,17 +32,18 @@ RENDER_TARGETED_MARKERS = (
     "duplicate heading",
     "heading numbering restart",
     "lack a local reference",
+    "invalid local reference",
+    "arithmetic sum mismatch",
+    "source inventory total mismatch",
 )
 RENDER_SECTION_MARKERS = (
     "record section",
     "invalid diagram",
     "empty required section",
 )
-RENDER_REWRITE_MARKERS = (
-    "invalid local reference",
-    "citation-like pattern",
-    "external link",
+RENDER_LOCAL_MARKERS = (
     "placeholder marker",
+    "external link",
     "reasoning tag",
 )
 RENDER_APPEND_MARKERS = (
@@ -50,6 +51,8 @@ RENDER_APPEND_MARKERS = (
     "uncited required source",
     "cited_sources=",
     "local_references=",
+    "citation-like pattern",
+    "incomplete source coverage",
 )
 SOFTWARE_MARKERS = (
     "static integration",
@@ -77,6 +80,30 @@ def _blob(items: Iterable[Any]) -> str:
     return "\n".join(str(item or "") for item in items).casefold()
 
 
+def required_repair_kind(issues: Iterable[Any]) -> str:
+    """Return the winning repair class; callers must not re-scan markers in another order."""
+    blob = _blob(issues)
+    if any(marker in blob for marker in RENDER_TARGETED_MARKERS):
+        return "targeted_paragraph"
+    if any(marker in blob for marker in RENDER_SECTION_MARKERS):
+        return "section"
+    if any(marker in blob for marker in RENDER_APPEND_MARKERS):
+        return "append"
+    if any(marker in blob for marker in RENDER_LOCAL_MARKERS):
+        return "local_paragraph"
+    return ""
+
+
+def required_repair_tool(issues: Iterable[Any]) -> str:
+    """Select one bounded mutation for document defects; never a global rewrite."""
+    return {
+        "targeted_paragraph": "filesystem__replace_paragraph",
+        "section": "filesystem__replace_section",
+        "append": "filesystem__append",
+        "local_paragraph": "filesystem__replace_paragraph",
+    }.get(required_repair_kind(issues), "")
+
+
 def classify_issue_texts(texts: Iterable[Any]) -> FeedbackTarget:
     """Map existing gate fragments to one delivery obligation."""
     blob = _blob(texts)
@@ -85,25 +112,19 @@ def classify_issue_texts(texts: Iterable[Any]) -> FeedbackTarget:
             SOURCE_INVENTORY, "architect", None, "source coverage",
             ("writer", "coordinator"),
         )
-    if any(marker in blob for marker in RENDER_TARGETED_MARKERS):
+    tool = required_repair_tool(texts)
+    if tool == "filesystem__replace_paragraph":
         return FeedbackTarget(
-            DOCUMENT_RENDER, "writer", "filesystem__replace_paragraph",
-            "paragraph repair", ("coordinator",),
+            DOCUMENT_RENDER, "writer", tool, "paragraph repair", ("coordinator",),
         )
-    if any(marker in blob for marker in RENDER_SECTION_MARKERS):
+    if tool == "filesystem__replace_section":
         return FeedbackTarget(
-            DOCUMENT_RENDER, "writer", "filesystem__replace_section",
-            "record section repair", ("coordinator",),
+            DOCUMENT_RENDER, "writer", tool, "record section repair",
+            ("coordinator",),
         )
-    if any(marker in blob for marker in RENDER_APPEND_MARKERS):
+    if tool == "filesystem__append":
         return FeedbackTarget(
-            DOCUMENT_RENDER, "writer", "filesystem__append",
-            "document append", ("coordinator",),
-        )
-    if any(marker in blob for marker in RENDER_REWRITE_MARKERS):
-        return FeedbackTarget(
-            DOCUMENT_RENDER, "writer", "filesystem__write",
-            "document rewrite", ("coordinator",),
+            DOCUMENT_RENDER, "writer", tool, "document append", ("coordinator",),
         )
     if any(marker in blob for marker in SOFTWARE_MARKERS):
         return FeedbackTarget(

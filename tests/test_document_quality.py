@@ -425,6 +425,24 @@ def test_identifier_wildcards_are_not_treated_as_xxx_placeholders(tmp_path):
     assert accepted["metrics"]["placeholder_markers"] == 0
     assert not rejected["valid"]
     assert rejected["metrics"]["placeholder_markers"] == 1
+    assert "paragraph prefix: XXX" in "\n".join(rejected["failures"])
+
+
+def test_placeholder_and_external_link_failures_report_a_paragraph_prefix(tmp_path):
+    document = tmp_path / "local-defects.md"
+    document.write_text(
+        "# Dossier\n\nTODO complete the risk register.\n\nSee https://example.test/doc\n",
+        encoding="utf-8",
+    )
+    report = validate_artifact(
+        document,
+        validator="document",
+        constraints={"forbid_placeholders": True, "forbid_external_links": True},
+    )
+    failures = "\n".join(report["failures"])
+    assert not report["valid"]
+    assert "placeholder marker(s); paragraph prefix: TODO complete the risk register." in failures
+    assert "external link(s); paragraph prefix: See https://example.test/doc" in failures
 
 
 def test_document_validator_rejects_out_of_range_local_locator(tmp_path):

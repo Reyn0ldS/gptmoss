@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import os
 import re
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Mapping
 
 from gptmoss.core.delivery import extract_requirements
 from gptmoss.core.document_planning import adapt_document_steps, estimate_document_work
-from gptmoss.planners.complexity import analyze_task_complexity
+from gptmoss.planners.complexity import (
+    analyze_task_complexity,
+    requires_software_implementation,
+)
 
 _ARTIFACT_NAME = re.compile(
     r"(?<![\w./-])([A-Za-z0-9][A-Za-z0-9_.-]*\.(?:md|json|txt|html|docx|pptx))"
@@ -17,8 +20,18 @@ _ARTIFACT_NAME = re.compile(
 )
 
 
-def _document_deliverable_task(task: str) -> bool:
+def _document_deliverable_task(
+    task: str,
+    *,
+    workload: Mapping[str, Any] | None = None,
+    corpus_policy: Mapping[str, Any] | None = None,
+) -> bool:
     """Distinguish source-grounded writing from generic software documentation."""
+    policy = corpus_policy if isinstance(corpus_policy, Mapping) else {}
+    if requires_software_implementation(task):
+        return False
+    if policy.get("professional_delivery"):
+        return True
     text = str(task or "")
     lowered = text.casefold()
     formats = {
@@ -28,12 +41,13 @@ def _document_deliverable_task(task: str) -> bool:
     source_signals = sum(
         marker in lowered
         for marker in (
-            "corpus", "pièces jointes", "pieces jointes", "attached files",
-            "fichiers locaux", "local files", "documents.inventory", "documents.search",
+            "corpus", "pièces jointes", "pieces jointes", "pièce jointe", "piece jointe",
+            "attached files", "fichiers locaux", "fichiers joints", "fichier joint",
+            "local files", "documents.inventory", "documents.search",
         )
     )
     writing_signal = any(
-        marker in lowered
+        re.search(rf"(?<!\w){re.escape(marker)}(?!\w)", lowered)
         for marker in (
             "rédige", "redige", "rédaction", "redaction", "dossier", "rapport",
             "synthèse", "synthese", "livrable", "long-form", "write a", "produce a",
@@ -44,7 +58,16 @@ def _document_deliverable_task(task: str) -> bool:
         r"document-analysis|document quality)",
         text,
     ))
-    return explicit_validator or (writing_signal and (len(formats) >= 2 or source_signals >= 2))
+    workload_sources = 0
+    if isinstance(workload, Mapping):
+        workload_sources = max(
+            int(workload.get("attachment_count") or 0),
+            int(workload.get("document_count") or 0),
+        )
+    return explicit_validator or (
+        writing_signal
+        and (len(formats) >= 1 or source_signals >= 1 or workload_sources > 0)
+    )
 
 
 def _requested_output_artifacts(task: str) -> List[str]:

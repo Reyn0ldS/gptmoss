@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -883,7 +884,7 @@ async def test_specialist_cannot_globally_overwrite_existing_document_without_ga
 
 
 @pytest.mark.asyncio
-async def test_retry_child_can_rewrite_code_wrapped_citations_reported_by_gate(
+async def test_retry_child_appends_code_wrapped_citations_reported_by_gate(
     tmp_path,
 ):
     engine, state = _engine(tmp_path)
@@ -913,22 +914,28 @@ async def test_retry_child_can_rewrite_code_wrapped_citations_reported_by_gate(
     project = tmp_path / "projects" / "proj-default"
     project.mkdir(parents=True)
     target = project / "dossier.md"
-    target.write_text(
-        "Evidence: `[source.md > Scope > blocks 1-2]`", encoding="utf-8",
-    )
+    original = "Evidence: `[source.md > Scope > blocks 1-2]`"
+    target.write_text(original, encoding="utf-8")
 
-    allowed = await engine._call_tool(
+    blocked = await engine._call_tool(
         "citation-retry", "filesystem", "write",
         {
             "path": "dossier.md",
             "content": "Evidence: [source.md > Scope > blocks 1-2]",
         },
     )
+    assert "Global overwrite blocked" in blocked
+    assert target.read_text(encoding="utf-8") == original
 
-    assert "written successfully" in allowed
-    assert target.read_text(encoding="utf-8") == (
-        "Evidence: [source.md > Scope > blocks 1-2]"
+    allowed = await engine._call_tool(
+        "citation-retry", "filesystem", "append",
+        {
+            "path": "dossier.md",
+            "content": " The source is cited. [source.md > Scope > blocks 1-2]",
+        },
     )
+    assert "appended successfully" in allowed
+    assert "[source.md > Scope > blocks 1-2]" in target.read_text(encoding="utf-8")
 
 
 @pytest.mark.asyncio
@@ -1759,6 +1766,79 @@ def test_missing_source_gate_requires_one_bounded_append(tmp_path):
     assert "one-based bounded locator" in nudge
 
 
+def test_writer_mixed_duplicate_and_placeholder_keeps_duplicate_nudge(tmp_path):
+    engine, state = _engine(tmp_path)
+    state.get_execution("writer-mixed-repair")
+    project = tmp_path / "projects" / "proj-default"
+    project.mkdir(parents=True)
+    (project / "dossier.md").write_text("TODO complete this\n\nDuplicated.\n\nDuplicated.\n", encoding="utf-8")
+    step = {"role": "writer", "required_artifacts": ["dossier.md"]}
+    issues = [
+        "dossier.md: document contains 23 duplicate paragraph occurrence(s)",
+        "dossier.md: document contains 1 placeholder marker(s); paragraph prefix: TODO complete this",
+    ]
+
+    required = engine._writer_incremental_repair_tool(
+        "writer-mixed-repair", "writer", step, issues,
+    )
+    nudge = engine._writer_incremental_repair_nudge(
+        "writer-mixed-repair", "writer", step, issues,
+    )
+
+    assert required == "filesystem__replace_paragraph"
+    assert "occurrence=2" in nudge
+    assert "placeholder" not in nudge.casefold()
+
+
+def test_writer_placeholder_gate_requires_one_targeted_paragraph_repair(tmp_path):
+    engine, state = _engine(tmp_path)
+    state.get_execution("writer-placeholder-repair")
+    project = tmp_path / "projects" / "proj-default"
+    project.mkdir(parents=True)
+    (project / "dossier.md").write_text("TODO complete this section\n", encoding="utf-8")
+    step = {"role": "writer", "required_artifacts": ["dossier.md"]}
+    issues = [
+        "dossier.md: document contains 1 placeholder marker(s); "
+        "paragraph prefix: TODO complete this section",
+    ]
+
+    required = engine._writer_incremental_repair_tool(
+        "writer-placeholder-repair", "writer", step, issues,
+    )
+    nudge = engine._writer_incremental_repair_nudge(
+        "writer-placeholder-repair", "writer", step, issues,
+    )
+
+    assert required == "filesystem__replace_paragraph"
+    assert "exactly one valid filesystem__replace_paragraph" in nudge
+    assert "never rewrite or delete the whole document" in nudge
+    assert "first clean, complete section" not in nudge
+
+
+def test_writer_code_wrapped_citations_require_append_not_global_write(tmp_path):
+    engine, state = _engine(tmp_path)
+    state.get_execution("writer-code-citations")
+    project = tmp_path / "projects" / "proj-default"
+    project.mkdir(parents=True)
+    (project / "dossier.md").write_text("Evidence: `[source.md > blocks 1-2]`\n", encoding="utf-8")
+    step = {"role": "writer", "required_artifacts": ["dossier.md"]}
+    issues = [
+        "dossier.md: 2 citation-like pattern(s) inside Markdown code do not count as evidence; "
+        "write actual citations without backticks or code fences",
+    ]
+
+    required = engine._writer_incremental_repair_tool(
+        "writer-code-citations", "writer", step, issues,
+    )
+    nudge = engine._writer_incremental_repair_nudge(
+        "writer-code-citations", "writer", step, issues,
+    )
+
+    assert required == "filesystem__append"
+    assert "exactly one valid filesystem__append" in nudge
+    assert "first clean, complete section" not in nudge
+
+
 def test_missing_source_gate_precedes_code_example_rewrite(tmp_path):
     engine, state = _engine(tmp_path)
     state.get_execution("writer-source-code-example")
@@ -1928,6 +2008,67 @@ def test_bootstrap_runtime_honors_first_run_tls_environment(tmp_path, monkeypatc
     persisted = json.loads((tmp_path / "config.json").read_text(encoding="utf-8"))
     assert persisted["ssl_verify"] is False
     assert persisted["ssl_cert_path"] == "internal-ca.pem"
+
+
+def test_bootstrap_runtime_honors_first_run_openai_endpoint(tmp_path, monkeypatch):
+    """Documented OPENAI_* endpoint env vars must configure a new workspace."""
+    import json
+
+    from main import bootstrap_runtime
+
+    monkeypatch.setenv("OPENAI_BASE_URL", "http://127.0.0.1:9/v1")
+    monkeypatch.setenv("OPENAI_MODEL_NAME", "site-qwen")
+
+    _, engine, _, _ = bootstrap_runtime(str(tmp_path))
+
+    assert engine.llm_provider.base_url == "http://127.0.0.1:9/v1"
+    assert engine.llm_provider.default_model == "site-qwen"
+    persisted = json.loads((tmp_path / "config.json").read_text(encoding="utf-8"))
+    assert persisted["base_url"] == "http://127.0.0.1:9/v1"
+    assert persisted["model_name"] == "site-qwen"
+    bootstrap = (Path(__file__).resolve().parents[1] / "main.py").read_text(encoding="utf-8")
+    assert 'os.getenv("OPENAI_BASE_URL")' in bootstrap
+    assert 'os.getenv("SSL_VERIFY")' in bootstrap
+
+
+def test_bootstrap_runtime_keeps_persisted_endpoint_over_environment(tmp_path, monkeypatch):
+    """A saved GUI endpoint remains authoritative after a restart."""
+    import json
+
+    from main import bootstrap_runtime
+
+    (tmp_path / "config.json").write_text(
+        json.dumps({
+            "base_url": "https://gpu01.quartz.moss/general/v1",
+            "model_name": "Qwen/Qwen3.6-35B",
+        }),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("OPENAI_BASE_URL", "http://127.0.0.1:9/v1")
+    monkeypatch.setenv("OPENAI_MODEL_NAME", "env-model")
+
+    _, engine, _, _ = bootstrap_runtime(str(tmp_path))
+
+    assert engine.llm_provider.base_url == "https://gpu01.quartz.moss/general/v1"
+    assert engine.llm_provider.default_model == "Qwen/Qwen3.6-35B"
+
+
+def test_bootstrap_runtime_quarantines_unreadable_config(tmp_path, monkeypatch):
+    import json
+
+    from main import bootstrap_runtime
+
+    monkeypatch.setenv("OPENAI_BASE_URL", "http://127.0.0.1:9/v1")
+    (tmp_path / "config.json").write_text("{not-json", encoding="utf-8")
+
+    _, engine, _, _ = bootstrap_runtime(str(tmp_path))
+
+    sidecars = list(tmp_path.glob("config.json.corrupt-*"))
+    assert sidecars
+    assert sidecars[0].read_text(encoding="utf-8") == "{not-json"
+    persisted = json.loads((tmp_path / "config.json").read_text(encoding="utf-8"))
+    assert persisted["base_url"] == "http://127.0.0.1:9/v1"
+    assert engine.llm_provider.base_url == "http://127.0.0.1:9/v1"
 
 
 def test_bootstrap_runtime_keeps_persisted_tls_settings_over_environment(

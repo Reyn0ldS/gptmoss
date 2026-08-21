@@ -31,7 +31,11 @@ if !errorlevel! neq 0 (
 )
 
 if not defined GPTMOSS_CONTROL_PORT set "GPTMOSS_CONTROL_PORT=8765"
-echo [INFO] Launching supervised server (application default: http://127.0.0.1:8000)...
+if not defined MOSS_HOST set "MOSS_HOST=127.0.0.1"
+if "!MOSS_HOST!"=="" set "MOSS_HOST=127.0.0.1"
+if not defined MOSS_PORT set "MOSS_PORT=8000"
+if "!MOSS_PORT!"=="" set "MOSS_PORT=8000"
+echo [INFO] Launching supervised server (application default: http://!MOSS_HOST!:!MOSS_PORT!)...
 echo [INFO] Server controls: http://127.0.0.1:!GPTMOSS_CONTROL_PORT!
 "!GPTMOSS_PYTHON!" -B "%~dp0scripts\server_supervisor.py" --python "!GPTMOSS_PYTHON!" --main "%~dp0main.py" --control-port "!GPTMOSS_CONTROL_PORT!" -- %*
 set "exit_code=!errorlevel!"

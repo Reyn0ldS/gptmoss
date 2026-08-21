@@ -36,6 +36,8 @@ from gptmoss.core.adaptive import AdaptiveRuntimePolicy, tool_call_fingerprint
 from gptmoss.core.delivery_feedback import (
     classify_assurance_report,
     classify_issue_texts,
+    required_repair_kind,
+    required_repair_tool,
     select_reopen_step,
     steps_to_reopen,
 )
@@ -711,49 +713,23 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
         issues: List[str],
     ) -> str:
         """Return the exact mutation required to repair a long writer delivery."""
-        targeted_markers = (
-            "arithmetic sum mismatch", "source inventory total mismatch",
-            "duplicate paragraph", "duplicate list item", "duplicate heading", "invalid local reference",
-            "heading numbering restart", "lack a local reference",
-        )
-        replacement_markers = (
-            "citation-like pattern",
-            "external link", "placeholder marker", "reasoning tag",
-        )
-        section_markers = ("record section", "invalid diagram", "empty required section")
-        append_markers = (
-            "uncited required source", "cited_sources=", "local_references=",
-        )
-        if not any(
-            marker in issue
-            for issue in issues
-            for marker in (
-                "words=", "empty required section", "lack a local reference",
-                *targeted_markers,
-                *section_markers,
-                *replacement_markers,
-                *append_markers,
-            )
-        ):
-            return ""
-        artifacts = [str(path).strip() for path in step.get("required_artifacts", []) if str(path).strip()]
+        artifacts = [
+            str(path).strip()
+            for path in step.get("required_artifacts", [])
+            if str(path).strip()
+        ]
         if not artifacts:
             return ""
-        target = artifacts[0]
-        if any(marker in issue for issue in issues for marker in targeted_markers):
-            return "filesystem__replace_paragraph"
-        if any(marker in issue for issue in issues for marker in section_markers):
-            return "filesystem__replace_section"
-        # Missing real evidence takes precedence over citation examples that
-        # happen to be wrapped in Markdown code.  Appending the missing plain
-        # bounded citation can satisfy both observations without destroying a
-        # valid document merely to remove harmless syntax examples.
-        if any(marker in issue for issue in issues for marker in append_markers):
-            return "filesystem__append"
-        if any(marker in issue for issue in issues for marker in replacement_markers):
+        tool = required_repair_tool(issues)
+        if not tool:
+            return ""
+        # Word-count growth on a missing file is still first-time creation.
+        if (
+            tool == "filesystem__append"
+            and not self._artifact_exists(execution_id, artifacts[0])
+        ):
             return "filesystem__write"
-        exists = self._artifact_exists(execution_id, target)
-        return "filesystem__append" if exists else "filesystem__write"
+        return tool
 
     def _writer_incremental_repair_nudge(
         self,
@@ -770,8 +746,11 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
             return ""
         artifacts = [str(path).strip() for path in step.get("required_artifacts", []) if str(path).strip()]
         target = artifacts[0]
+        kind = required_repair_kind(issues)
         if action == "filesystem__replace_paragraph":
-            if any("heading numbering restart" in str(issue).casefold() for issue in issues):
+            if kind == "targeted_paragraph" and any(
+                "heading numbering restart" in str(issue).casefold() for issue in issues
+            ):
                 return (
                     f" Do not answer with a plan. Your next response must be exactly one valid "
                     f"{action} tool call targeting '{target}'. Copy the exact restarted Markdown "
@@ -779,7 +758,9 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
                     "occurrence=1, and set content to an empty string. Remove exactly that "
                     "appended heading line; never rewrite or delete the whole document."
                 )
-            if any("duplicate heading" in str(issue).casefold() for issue in issues):
+            if kind == "targeted_paragraph" and any(
+                "duplicate heading" in str(issue).casefold() for issue in issues
+            ):
                 return (
                     f" Do not answer with a plan. Your next response must be exactly one valid "
                     f"{action} tool call targeting '{target}'. Copy one exact Markdown heading "
@@ -787,6 +768,15 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
                     "and set content to an empty string. This removes only the repeated heading "
                     "line and preserves all section body content. Change exactly one heading "
                     "occurrence per iteration; never rewrite or delete the whole document."
+                )
+            if kind == "local_paragraph":
+                return (
+                    f" Do not answer with a plan. Your next response must be exactly one valid "
+                    f"{action} tool call targeting '{target}'. Copy the paragraph prefix "
+                    "reported by the gate, set occurrence=1, and replace only that paragraph. "
+                    "Remove the reported placeholder, external URL, or reasoning tag while "
+                    "preserving surrounding evidence. Change exactly one paragraph per "
+                    "iteration; never rewrite or delete the whole document."
                 )
             return (
                 f" Do not answer with a plan. Your next response must be exactly one valid "
@@ -833,7 +823,10 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
             if any(
                 marker in str(issue).casefold()
                 for issue in issues
-                for marker in ("uncited required source", "cited_sources=", "local_references=")
+                for marker in (
+                    "uncited required source", "cited_sources=", "local_references=",
+                    "citation-like pattern", "incomplete source coverage",
+                )
             ):
                 continuity = (
                     "Preserve the existing valid content and append exactly one short prose "
@@ -848,11 +841,6 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
                     "prose under the current final section, without adding any Markdown heading"
                 )
                 chunk_size = "400-800 word"
-        elif self._artifact_exists(execution_id, target):
-            continuity = (
-                "Replace the defective document with only the first clean, complete section; "
-                "later turns will append the remaining non-duplicated sections"
-            )
         else:
             continuity = "Create only the first complete section"
         return (
@@ -1690,6 +1678,9 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
                 plan_result,
                 self.artifact_store,
                 state.variables.get("attachment_ids", []),
+                task=task,
+                corpus_policy=state.variables.get("corpus_policy"),
+                workload=state.variables.get("workload_profile"),
             )
             plan_result = optimize_professional_document_dag(plan_result)
             plan_result["corpus_policy"] = dict(
@@ -1735,6 +1726,9 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
             state.current_plan,
             self.artifact_store,
             state.variables.get("attachment_ids", []),
+            task=task,
+            corpus_policy=state.variables.get("corpus_policy"),
+            workload=state.variables.get("workload_profile"),
         )
         state.current_plan = optimize_professional_document_dag(state.current_plan)
         self._initialize_document_state(execution_id, task, state.current_plan, state)
@@ -3742,8 +3736,13 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
             and capability.lower() == "filesystem"
             and action.lower() == "append"
             and any(
-                "uncited required source" in str(issue).casefold()
+                marker in str(issue).casefold()
                 for issue in required_repair_issues
+                for marker in (
+                    "uncited required source",
+                    "incomplete source coverage",
+                    "citation-like pattern",
+                )
             )
         ):
             append_content = str(arguments.get("content") or "").strip()

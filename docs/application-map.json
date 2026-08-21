@@ -310,7 +310,7 @@
     },
     {
       "id": "planning-execution-lifecycle",
-      "tests": ["tests/test_execution.py", "tests/test_lifecycle_chronology.py", "tests/test_planning_modes.py", "tests/test_plan_obligations.py", "tests/test_plan_graph.py", "tests/test_delivery_feedback.py", "tests/test_evidence_graph.py", "tests/test_generic_planning_and_context.py", "tests/test_general_runtime_adaptation.py", "tests/test_adaptive_autonomy.py", "tests/test_execution_services.py", "tests/test_scheduler_and_legacy_state.py", "tests/test_state_durability.py", "tests/test_runtime_ux.py"]
+      "tests": ["tests/test_execution.py", "tests/test_lifecycle_chronology.py", "tests/test_planning_modes.py", "tests/test_plan_obligations.py", "tests/test_plan_graph.py", "tests/test_delivery_feedback.py", "tests/test_evidence_graph.py", "tests/test_generic_planning_and_context.py", "tests/test_general_runtime_adaptation.py", "tests/test_adaptive_autonomy.py", "tests/test_execution_services.py", "tests/test_scheduler_and_legacy_state.py", "tests/test_state_durability.py", "tests/test_runtime_ux.py", "tests/test_anticipated_failure_modes.py"]
     },
     {
       "id": "provider-recovery",
@@ -330,7 +330,7 @@
     },
     {
       "id": "document-quality-delivery",
-      "tests": ["tests/test_document_quality.py", "tests/test_document_planner_fallback.py", "tests/test_professional_delivery.py", "tests/test_delivery_assurance.py", "tests/test_delivery_benchmarks.py", "tests/test_quality_benchmarks.py", "tests/test_corpus.py", "tests/test_long_document_engine.py", "tests/test_diagrams_and_docx.py"]
+      "tests": ["tests/test_document_quality.py", "tests/test_document_planner_fallback.py", "tests/test_professional_delivery.py", "tests/test_delivery_assurance.py", "tests/test_delivery_benchmarks.py", "tests/test_quality_benchmarks.py", "tests/test_corpus.py", "tests/test_long_document_engine.py", "tests/test_diagrams_and_docx.py", "tests/test_anticipated_failure_modes.py"]
     },
     {
       "id": "skills-evolution",

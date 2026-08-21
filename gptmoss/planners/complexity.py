@@ -54,19 +54,40 @@ def requires_software_implementation(
     mutation = (
         r"(?:implement|develop|fix|repair|debug|modify|update|refactor|"
         r"add|remove|configure|deploy|migrate|integrate|build|create|"
-        r"implemente|developpe|coder|corrige|repare|modifie|mets?\s+a\s+jour|"
-        r"refactorise|ajoute|supprime|configure|deploie|migre|integre|cree)"
+        r"implemente|developpe|developper|coder|corrige|repare|modifie|"
+        r"mets?\s+a\s+jour|refactorise|ajoute|supprime|configure|deploie|"
+        r"migre|integre|cree|creer|construire)"
     )
-    target = (
-        r"(?:software|application|api|gui|interface|code|source|runtime|server|"
-        r"service|module|package|feature|function|endpoint|script|test|repository|"
-        r"repo|project|logic|pipeline|workflow|import|export|logiciel|serveur|"
-        r"fonctionnalite|fonction|projet|depot)"
+    strong_target = (
+        r"(?:software|application|api|gui|code|runtime|server|"
+        r"service|module|package|endpoint|script|repository|repo|"
+        r"pipeline|logiciel|serveur|fonctionnalite|"
+        r"plateforme|platform)"
     )
-    return bool(
-        re.search(rf"\b{mutation}\b[^.\n;:]{{0,96}}\b{target}\b", text)
-        or re.search(rf"\b{target}\b[^.\n;:]{{0,48}}\b{mutation}\b", text)
+    weak_target = (
+        r"(?:test|project|projet|source|import|export|feature|function|"
+        r"logic|depot|fonction|interface|workflow|programme|program|console)"
     )
+    strong = bool(
+        re.search(rf"\b{mutation}\b[^.\n;:]{{0,96}}\b{strong_target}\b", text)
+        or re.search(rf"\b{strong_target}\b[^.\n;:]{{0,48}}\b{mutation}\b", text)
+    )
+    if strong:
+        return True
+    weak = bool(
+        re.search(rf"\b{mutation}\b[^.\n;:]{{0,96}}\b{weak_target}\b", text)
+        or re.search(rf"\b{weak_target}\b[^.\n;:]{{0,48}}\b{mutation}\b", text)
+    )
+    if not weak:
+        return False
+    writing = any(
+        re.search(rf"(?<!\w){re.escape(marker)}(?!\w)", text)
+        for marker in (
+            "redige", "redaction", "dossier", "rapport", "synthese", "livrable",
+            "long-form", "write a", "produce a", "document",
+        )
+    )
+    return not writing
 
 
 def analyze_task_complexity(

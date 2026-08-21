@@ -47,6 +47,10 @@ superviseur avec son jeton. Un port occupé est signalé avant de démarrer l'en
    partitionne la charge réelle et rejoint les résultats par consolidation. Le domaine
    logiciel reste un contexte d'analyse large, mais une porte d'implémentation n'est
    ajoutée que si une action de modification vise explicitement un élément logiciel.
+   Le fallback déterministe suit la même règle : un dossier rédigé à partir de pièces
+   jointes n'est pas transformé en DAG développeur/pytest parce que le mot « projet »
+   apparaît. Le profil `professional-local` est timbré depuis la politique corpus ou
+   une mission de rédaction sourcée, même si le plan LLM a omis le tag.
 7. Une réduction de périmètre requiert `ScopeApprovalRequested` avant toute exécution.
 
 ## Ordonnancement et exécution d'une étape

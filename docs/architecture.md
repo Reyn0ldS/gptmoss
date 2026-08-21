@@ -78,7 +78,7 @@ local dans la colonne plan, sans script distant.
 
 | Capacité | Actions | Frontière principale |
 |---|---|---|
-| `filesystem` | `read`, `write`, `append`, `replace_paragraph`, `list_dir`, `delete` | Résolution dans le workspace de l'exécution ; écriture incrémentale et remplacement atomique d'un paragraphe ciblé sur son chemin déclaré ; sous-dossiers et suppression configurables. |
+| `filesystem` | `read`, `write`, `append`, `replace_paragraph`, `replace_section`, `list_dir`, `delete` | Résolution dans le workspace de l'exécution ; écriture incrémentale, remplacement atomique d'un paragraphe ou du corps d'une section Markdown sur son chemin déclaré ; sous-dossiers et suppression configurables. |
 | `documents` | `inventory`, `search`, `read`, `read_chunk`, `read_image`, `read_images` | Pièces explicitement jointes uniquement ; texte normalisé et images sélectionnées par lots multimodaux bornés. |
 | `memory` | `search`, `propose` | Lecture validée du projet ; une proposition agent reste non validée et non globale. |
 | `shell` | `execute` | Répertoire du projet, blocage destructif, timeout, sortie bornée et approbation selon politique. |
@@ -87,17 +87,22 @@ local dans la colonne plan, sans script distant.
 
 Les quality gates pilotent aussi le protocole d'outils. Si un rédacteur doit
 réparer un document long déjà créé, l'itération suivante ne reçoit que le schéma
-`filesystem__append` et impose un appel ; pour un artefact absent, le même mécanisme
+de la mutation bornée exigée (`filesystem__append`, `filesystem__replace_paragraph`
+ou `filesystem__replace_section`) ; pour un artefact absent, le même mécanisme
 emploie `filesystem__write`. Le filtrage est temporaire et levé après la mutation,
 ce qui garantit un progrès durable sans figer le nombre d'itérations du plan.
 Quand le serveur compatible OpenAI utilise le protocole textuel de secours, le
 nom de l'unique outil obligatoire est répété dans le dernier message transmis ;
 il ne peut ainsi être masqué par un long historique de réparations.
-Un défaut global qui exige de retirer du contenu (référence invalide, lien externe
-ou placeholder) bascule explicitement vers une reconstruction incrémentale : un
-premier `filesystem__write` borné initialise la version propre, puis les tours
-suivants emploient `filesystem__append`.
-Les doublons et les affirmations non sourcées utilisent plutôt
+Un placeholder, un lien externe ou une balise de raisonnement est corrigé
+par `filesystem__replace_paragraph` à partir du préfixe émis par le validateur.
+Les citations présentes seulement dans un fence Markdown, comme une source
+encore non citée, exigent `filesystem__append` d'un paragraphe de preuve, jamais
+une réécriture globale. Une référence locale invalide utilise le même
+`replace_paragraph` ciblé. `delivery_feedback.required_repair_tool` et le moteur
+partagent cette table ; un `write` n'est plus un chemin nominal sur un livrable
+obligatoire existant.
+Les doublons et les affirmations non sourcées utilisent
 `filesystem__replace_paragraph` : le validateur fournit un préfixe normalisé,
 l'outil remplace une seule occurrence et publie atomiquement le fichier. Chaque
 correction produit ainsi un progrès mesurable sans réécriture globale.

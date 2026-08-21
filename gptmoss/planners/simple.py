@@ -13,7 +13,12 @@ from gptmoss.core.document_planning import adapt_document_steps
 from gptmoss.core.domains import ProjectDomainRegistry
 from gptmoss.core.plan_obligations import attach_plan_obligations, collect_plan_obligations
 from gptmoss.core.workload import planning_profile
-from gptmoss.planners.complexity import analyze_task_complexity, normalize_planning_mode
+from gptmoss.core.professional_delivery import should_apply_professional_profile
+from gptmoss.planners.complexity import (
+    analyze_task_complexity,
+    normalize_planning_mode,
+    requires_software_implementation,
+)
 from gptmoss.planners.fallbacks import (
     _assign_document_requirements,
     _document_deliverable_task,
@@ -283,6 +288,7 @@ class SimplePlanner(PlannerProvider):
         analysis: Dict[str, Any] | None = None,
         planning_mode: str | None = None,
         corpus_policy: Dict[str, Any] | None = None,
+        workload_profile: Dict[str, Any] | None = None,
     ) -> Dict[str, Any]:
         analysis = analysis or analyze_task_complexity(task)
         mode = normalize_planning_mode(planning_mode)
@@ -291,16 +297,21 @@ class SimplePlanner(PlannerProvider):
             return {"analysis": analysis,
                     "steps": [_step(0, "coordinator", "Task Specialist", f"Perform the user task: {task}", [], list(domains) or ["general"], [], ["The requested outcome is delivered."])],
                     "rationale": "Explicit direct planning mode."}
-        if (
-            _document_deliverable_task(task)
-            or bool((corpus_policy or {}).get("professional_delivery"))
+        if _document_deliverable_task(
+            task, workload=workload_profile, corpus_policy=corpus_policy,
         ):
             return SimplePlanner._document_fallback(task, analysis)
-        if mode == "full_team" and "software-engineering" in domains:
+        software = requires_software_implementation(task, analysis)
+        if mode == "full_team" and software:
             analysis = {**analysis, "level": "high" if analysis["level"] in {"low", "moderate"} else analysis["level"]}
-        if mode != "short_team" and analysis["level"] in {"high", "very_high"} and len(domains) >= 3:
+        if (
+            software
+            and mode != "short_team"
+            and analysis["level"] in {"high", "very_high"}
+            and len(domains) >= 3
+        ):
             return SimplePlanner._cross_domain_fallback(task, analysis)
-        if "software-engineering" in domains:
+        if software:
             if mode != "short_team" and analysis["level"] in {"high", "very_high"}:
                 steps = [
                     _step(0, "architect", "Requirements & Feasibility Analyst", "Analyze requirements, constraints, assumptions, risks, and acceptance criteria.", [], ["requirements engineering"], ["specs/requirements.md"], ["Requested outcomes are testable."]),
@@ -612,7 +623,9 @@ class SimplePlanner(PlannerProvider):
                 corpus_auto_workflow=corpus_auto_workflow,
                 corpus_policy=corpus_policy,
             )
-            if _document_deliverable_task(task):
+            if should_apply_professional_profile(
+                plan_data, task=task, corpus_policy=corpus_policy, workload=workload,
+            ):
                 plan_data["delivery_profile"] = "professional-local"
             plan_data["planning_mode"] = planning_mode
             plan_data["corpus_policy"] = corpus_policy
@@ -620,7 +633,8 @@ class SimplePlanner(PlannerProvider):
         except Exception as exc:
             logger.warning("Error or incomplete LLM plan; using adaptive fallback: %s", exc)
             fallback = self._fallback_plan(
-                task, analysis, planning_mode, corpus_policy=corpus_policy
+                task, analysis, planning_mode,
+                corpus_policy=corpus_policy, workload_profile=workload,
             )
             fallback["planning_mode"] = planning_mode
             fallback["corpus_policy"] = corpus_policy

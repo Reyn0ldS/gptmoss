@@ -745,6 +745,48 @@ def test_api_settings_preserve_secret_and_context_budget(tmp_path):
     assert len(state_engine.executions) == execution_count
 
 
+def test_partial_settings_post_keeps_omitted_fields(tmp_path):
+    event_bus = EventBus()
+    state_engine = StateEngine()
+    memory = RAMMemoryProvider()
+    context_engine = ContextEngine(state_engine, memory)
+    mock_llm = MockLLMProvider()
+    exec_engine = ExecutionEngine(
+        event_bus=event_bus,
+        state_engine=state_engine,
+        context_engine=context_engine,
+        llm_provider=mock_llm,
+        planner=SimplePlanner(mock_llm),
+        policy_provider=SimplePolicyProvider(),
+    )
+    from gptmoss.capabilities.filesystem import FilesystemCapability
+    exec_engine.register_capability("filesystem", FilesystemCapability(str(tmp_path)))
+    kernel = RuntimeKernel(
+        event_bus=event_bus, state_engine=state_engine, execution_engine=exec_engine,
+    )
+    (tmp_path / "config.json").write_text(json.dumps({
+        "api_key": "secret-key",
+        "base_url": "https://example.test/v1",
+        "model_name": "keep-me",
+        "max_step_iterations": 40,
+        "ssl_verify": True,
+        "restrict_to_workspace": True,
+        "safe_shell_mode": True,
+        "approval_required_capabilities": ["shell"],
+        "workspace_path": str(tmp_path),
+    }), encoding="utf-8")
+    init_app(kernel, exec_engine, state_engine, event_bus)
+    client = ASGIClient(app)
+
+    response = client.post("/api/settings", json={"model_name": "renamed-model"})
+    assert response.status_code == 200
+    assert exec_engine.max_step_iterations == 40
+    persisted = json.loads((tmp_path / "config.json").read_text(encoding="utf-8"))
+    assert persisted["max_step_iterations"] == 40
+    assert persisted["model_name"] == "renamed-model"
+    assert persisted["api_key"] == "secret-key"
+
+
 def test_gui_uses_sanitized_markdown_renderer():
     from pathlib import Path
 

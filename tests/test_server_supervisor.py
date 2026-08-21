@@ -78,6 +78,22 @@ def make_controller(tmp_path):
     return controller, processes
 
 
+def test_controller_listens_on_moss_host_port_environment(tmp_path, monkeypatch):
+    monkeypatch.setenv("MOSS_HOST", "127.0.0.1")
+    monkeypatch.setenv("MOSS_PORT", "9055")
+    python = tmp_path / "python.exe"
+    main = tmp_path / "main.py"
+    python.touch()
+    main.write_text("", encoding="utf-8")
+    controller = RuntimeController(
+        python, main, tmp_path, ["--workspace", "workspace"],
+        popen_factory=lambda *args, **kwargs: FakeProcess(args, **kwargs),
+        health_probe=lambda _host, _port: True,
+    )
+    assert controller.host == "127.0.0.1"
+    assert controller.port == 9055
+
+
 def test_argument_helpers_preserve_unrelated_application_options():
     arguments = ["--workspace", "space", "--port=8000", "--host", "127.0.0.1"]
 

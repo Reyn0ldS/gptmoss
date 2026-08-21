@@ -107,8 +107,10 @@ class RuntimeController:
         self.main_script = main_script.resolve()
         self.project_root = project_root.resolve()
         self.app_arguments = list(app_arguments)
-        self.host = option_value(self.app_arguments, "--host", DEFAULT_APP_HOST)
-        self.port = valid_port(option_value(self.app_arguments, "--port", str(DEFAULT_APP_PORT)))
+        env_host = os.getenv("MOSS_HOST") or DEFAULT_APP_HOST
+        env_port = os.getenv("MOSS_PORT") or str(DEFAULT_APP_PORT)
+        self.host = option_value(self.app_arguments, "--host", env_host)
+        self.port = valid_port(option_value(self.app_arguments, "--port", env_port))
         self.control_url = ""
         self.control_token = ""
         self.process: subprocess.Popen | None = None

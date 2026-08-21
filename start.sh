@@ -17,7 +17,9 @@ echo "[INFO] Activating virtual environment..."
 source venv/bin/activate
 
 CONTROL_PORT="${GPTMOSS_CONTROL_PORT:-8765}"
-echo "[INFO] Launching supervised server (application: http://127.0.0.1:8000)..."
+MOSS_HOST="${MOSS_HOST:-127.0.0.1}"
+MOSS_PORT="${MOSS_PORT:-8000}"
+echo "[INFO] Launching supervised server (application: http://${MOSS_HOST}:${MOSS_PORT})..."
 echo "[INFO] Server controls: http://127.0.0.1:${CONTROL_PORT}"
 python -B scripts/server_supervisor.py \
     --python "$(command -v python)" \
