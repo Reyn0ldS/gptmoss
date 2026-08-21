@@ -361,6 +361,48 @@ async def test_qwen_stream_retries_without_optional_usage_extension():
     }
 
 
+@pytest.mark.asyncio
+async def test_qwen_stream_options_rejection_walks_openai_cause_chain():
+    provider = QwenProvider(api_key="mock", base_url="http://127.0.0.1:9/v1")
+    calls = []
+
+    class _Stream:
+        def __init__(self):
+            self.done = False
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            if self.done:
+                raise StopAsyncIteration
+            self.done = True
+            return SimpleNamespace(
+                choices=[SimpleNamespace(delta=SimpleNamespace(
+                    content="ok", tool_calls=None
+                ))],
+                usage=None,
+            )
+
+    async def fake_create(**kwargs):
+        calls.append(kwargs)
+        if "stream_options" in kwargs:
+            wrapped = Exception("Error code: 400")
+            wrapped.__cause__ = Exception("unknown field: stream_options")
+            raise wrapped
+        return _Stream()
+
+    provider.client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=fake_create))
+    )
+    result = await provider.completion(
+        messages=[{"role": "user", "content": "hi"}], on_text_delta=lambda _: None
+    )
+
+    assert len(calls) == 2
+    assert result["content"] == "ok"
+
+
 def test_state_schema_v2_writes_sidecars_and_reloads(tmp_path):
     path = tmp_path / "state_store.json"
     state = StateEngine(str(path))

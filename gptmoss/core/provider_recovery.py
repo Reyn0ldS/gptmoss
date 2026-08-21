@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from typing import Any, Awaitable, Callable, Dict
 
 from gptmoss.core.event_bus import Event, EventBus
@@ -39,7 +40,6 @@ _TLS_MARKERS = (
     "sslcertverificationerror",
     "sslcert",
     "ssl: certificate",
-    "ssl error",
     "cert verify",
     "self signed certificate",
     "self-signed certificate",
@@ -63,8 +63,17 @@ _VISION_MARKERS = (
     "multimodal not supported",
 )
 _AUTH_MARKERS = (
-    "authentication", "permissiondenied", "invalid api key", "401", "403",
+    "authentication", "permissiondenied", "invalid api key",
 )
+_HTTP_STATUS = {
+    code: re.compile(rf"(?<!\d){code}(?!\d)")
+    for code in ("400", "401", "403", "429", "502", "503", "504")
+}
+
+
+def contains_http_status(text: str, code: str) -> bool:
+    pattern = _HTTP_STATUS.get(code)
+    return bool(pattern.search(text)) if pattern else False
 
 
 def _error_text(error: BaseException) -> str:
@@ -90,6 +99,8 @@ def configuration_kind(error: Exception) -> str | None:
     if vision_hit:
         return "vision"
     if any(marker in text for marker in _AUTH_MARKERS):
+        return "auth"
+    if contains_http_status(text, "401") or contains_http_status(text, "403"):
         return "auth"
     return None
 
@@ -143,10 +154,16 @@ class ProviderRecoveryCoordinator:
             return False
         text = _error_text(error)
         markers = (
-            "connection", "timeout", "timed out", "ratelimit", "rate limit", "429",
-            "internalserver", "server error", "502", "503", "504", "temporar", "unavailable",
+            "connection", "timeout", "timed out", "ratelimit", "rate limit",
+            "internalserver", "server error", "temporar", "unavailable",
+            "connecterror", "unexpected_eof", "networkerror", "remoteprotocol",
+            "disconnected",
         )
-        return any(marker in text for marker in markers)
+        if any(marker in text for marker in markers):
+            return True
+        return any(
+            contains_http_status(text, code) for code in ("429", "502", "503", "504")
+        )
 
     async def completion(self, execution_id: str, **kwargs) -> Dict[str, Any]:
         consecutive_errors = 0

@@ -59,6 +59,37 @@ def test_openai_wrapped_tls_error_walks_the_exception_cause():
     assert not ProviderRecoveryCoordinator.is_transient(wrapped)
 
 
+def test_unexpected_eof_ssl_error_is_transient_not_tls_configuration():
+    error = Exception("SSL error: UNEXPECTED_EOF_WHILE_READING")
+    assert not ProviderRecoveryCoordinator.is_tls_configuration(error)
+    assert ProviderRecoveryCoordinator.is_transient(error)
+    wrapped = Exception("Connection error.")
+    wrapped.__cause__ = Exception("SSL error: UNEXPECTED_EOF_WHILE_READING")
+    assert not ProviderRecoveryCoordinator.is_tls_configuration(wrapped)
+    assert ProviderRecoveryCoordinator.is_transient(wrapped)
+
+    class ConnectError(Exception):
+        pass
+
+    eof = ConnectError("[SSL: UNEXPECTED_EOF_WHILE_READING] unexpected eof while reading")
+    assert not ProviderRecoveryCoordinator.is_tls_configuration(eof)
+    assert ProviderRecoveryCoordinator.is_transient(eof)
+
+
+def test_http_status_markers_do_not_match_embedded_digits():
+    context = Exception("This model's maximum context length is 14016 tokens")
+    assert not ProviderRecoveryCoordinator.is_permanent(context)
+    assert not ProviderRecoveryCoordinator.is_tls_configuration(context)
+    assert ProviderRecoveryCoordinator.is_permanent(
+        Exception("Error code: 401 - Unauthorized")
+    )
+    assert ProviderRecoveryCoordinator.is_permanent(Exception("HTTP 403 forbidden"))
+    assert not ProviderRecoveryCoordinator.is_transient(
+        Exception("prompt used 4290 tokens")
+    )
+    assert ProviderRecoveryCoordinator.is_transient(Exception("HTTP 429 rate limit"))
+
+
 def test_vision_rejection_is_configuration_not_transient():
     error = Exception("BadRequestError: this model does not support image_url content")
     assert ProviderRecoveryCoordinator.is_vision_rejected(error)

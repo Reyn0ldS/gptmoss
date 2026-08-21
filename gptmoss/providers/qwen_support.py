@@ -18,18 +18,22 @@ class ContextWindowPolicy:
     @staticmethod
     def _is_pinned(message: Dict[str, Any]) -> bool:
         content = message.get("content")
-        if isinstance(content, str) and ContextWindowPolicy.DIGEST_MARK in content:
-            return True
-        if isinstance(content, list):
-            return any(
-                isinstance(part, dict) and part.get("type") == "image_url"
-                for part in content
-            )
-        return False
+        return isinstance(content, str) and ContextWindowPolicy.DIGEST_MARK in content
+
+    @staticmethod
+    def _error_text(error: BaseException) -> str:
+        parts: list[str] = []
+        seen: set[int] = set()
+        current: BaseException | None = error
+        while current is not None and id(current) not in seen:
+            seen.add(id(current))
+            parts.append(current.__class__.__name__ + " " + str(current))
+            current = current.__cause__
+        return " ".join(parts).lower()
 
     @staticmethod
     def is_limit_error(error: Exception) -> bool:
-        text = (error.__class__.__name__ + " " + str(error)).lower()
+        text = ContextWindowPolicy._error_text(error)
         return any(marker in text for marker in (
             "context length", "context_length", "maximum context", "max context",
             "too many tokens", "token limit", "prompt is too long", "input length",
@@ -73,7 +77,7 @@ class ContextWindowPolicy:
 
     @staticmethod
     def limit_tokens(error: Exception) -> int | None:
-        text = str(error)
+        text = ContextWindowPolicy._error_text(error)
         patterns = (
             r"maximum context length is\s*([\d, _]+)\s*tokens",
             r"maximum context(?: length)?[^\d]{0,30}([\d, _]+)\s*tokens",

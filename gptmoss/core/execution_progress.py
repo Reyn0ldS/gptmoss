@@ -37,6 +37,18 @@ class ExecutionProgressMixin:
         return bool(state.variables.get("vision_rejection") and rejected_for is not None)
 
     @staticmethod
+    def _visual_attachments_for_compaction(
+        attachments: List[Dict[str, Any]],
+        visualized_ids: List[Any] | None,
+    ) -> List[Dict[str, Any]]:
+        """Drop-oldest removes from the front; keep unseen images next to the digest."""
+        seen = {str(item) for item in (visualized_ids or []) if item}
+        return sorted(
+            list(attachments),
+            key=lambda item: str(item.get("id") or "") not in seen,
+        )
+
+    @staticmethod
     def _freeze_existing_record_ids(path: str, constraints: Dict[str, Any]) -> None:
         """Persist record IDs already present before a semantic repair begins."""
         policy = constraints.get("record_section_policy")

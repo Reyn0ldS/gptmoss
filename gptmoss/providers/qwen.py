@@ -334,7 +334,7 @@ class QwenProvider(LLMProvider):
                             **stream_request, stream=True
                         )
                     except Exception as stream_error:
-                        error_text = str(stream_error).lower()
+                        error_text = ContextWindowPolicy._error_text(stream_error)
                         if not any(
                             marker in error_text
                             for marker in ("stream_options", "include_usage")
@@ -465,12 +465,25 @@ class QwenProvider(LLMProvider):
                 self._native_tools_supported = False
             return parsed
         except Exception as e:
-            err_msg = str(e).lower()
+            from gptmoss.core.provider_recovery import (
+                configuration_kind,
+                contains_http_status,
+            )
+
+            # TLS / vision / auth must not demote native tools or burn a
+            # second prompt-protocol request on a configuration failure.
+            if configuration_kind(e) is not None:
+                self._log_completion_error(e)
+                raise e
+            error_text = ContextWindowPolicy._error_text(e)
             # If native tool calling fails because auto tool choice is disabled on remote server, fall back
             if (
-                "tool_choice" in err_msg or "tool-call-parser" in err_msg
-                or "tool_call" in err_msg
-                or ("400" in err_msg and not self._is_context_limit_error(e))
+                "tool_choice" in error_text or "tool-call-parser" in error_text
+                or "tool_call" in error_text
+                or (
+                    contains_http_status(error_text, "400")
+                    and not self._is_context_limit_error(e)
+                )
             ):
                 logger.warning("Native tool calling failed/not supported by remote endpoint, falling back to prompt-based tool calling.")
                 self._native_tools_supported = False

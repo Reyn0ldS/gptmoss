@@ -3210,6 +3210,12 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
             llm_messages.extend(context["conversation_history"])
             # Images stay late so provider compaction prefers them over chatter.
             # The source digest is last: a four-image batch must not evict it.
+            # Drop-oldest pops the front, so already-visualized images go first
+            # and unseen ones stay beside the digest.
+            visual_attachments = self._visual_attachments_for_compaction(
+                visual_attachments,
+                state.variables.get("visualized_artifact_ids", []),
+            )
             for attachment in visual_attachments:
                 llm_messages.append({"role": "user", "content": [
                     {"type": "text", "text": (
