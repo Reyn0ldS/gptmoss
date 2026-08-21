@@ -96,6 +96,37 @@ def test_provider_compaction_preserves_pinned_source_digest():
     assert "MFA is required" in digest[0]["content"]
 
 
+def test_provider_compaction_keeps_digest_when_four_images_follow():
+    from gptmoss.providers.qwen_support import ContextWindowPolicy
+
+    digest = {
+        "role": "system",
+        "content": (
+            "Pinned local source evidence (durable tool history; omitted conversation "
+            "messages do not erase this):\n[source.docx > blocks 1-1] MFA is required."
+        ),
+    }
+    images = [
+        {"role": "user", "content": [
+            {"type": "text", "text": f"[artifact_id:img-{index}]"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,xx"}},
+        ]}
+        for index in range(4)
+    ]
+    messages = [{"role": "system", "content": "authoritative instructions"}]
+    messages.extend({"role": "user", "content": f"old-{index}-" + "x" * 400} for index in range(12))
+    messages.extend(images)
+    messages.append(digest)
+
+    compacted = ContextWindowPolicy.compact(messages, 3_000)
+    assert any(ContextWindowPolicy.DIGEST_MARK in str(item.get("content")) for item in compacted)
+    assert any(
+        isinstance(item.get("content"), list)
+        and any(part.get("type") == "image_url" for part in item["content"] if isinstance(part, dict))
+        for item in compacted
+    )
+
+
 def test_provider_compacts_a_single_oversized_user_message():
     messages = [
         {"role": "system", "content": "authoritative"},

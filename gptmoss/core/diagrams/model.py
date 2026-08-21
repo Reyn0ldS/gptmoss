@@ -60,8 +60,8 @@ _EDGE_RE = re.compile(
     r"\s*[-.=]+>\s*(?:\|(?P<label>[^|]+)\|\s*)?"
     r"(?P<target>[A-Za-z0-9_-]+)(?:\[\"?(?P<target_label>[^\]\"]+)\"?\])?"
 )
-_PIE_SLICE_RE = re.compile(r'^"([^"]+)"\s*:\s*(-?\d+(?:\.\d+)?)%?\s*$')
-_PIE_BARE_SLICE_RE = re.compile(r'^([^:]{1,80}?)\s*:\s*(-?\d+(?:\.\d+)?)%?\s*$')
+_PIE_SLICE_RE = re.compile(r'^"([^"]+)"\s*:\s*(-?\d+(?:[.,]\d+)?)%?\s*$')
+_PIE_BARE_SLICE_RE = re.compile(r'^([^:]{1,80}?)\s*:\s*(-?\d+(?:[.,]\d+)?)%?\s*$')
 _UNSUPPORTED_RE = re.compile(
     r"(?i)^(gantt|classDiagram|erDiagram|gitGraph|mindmap|journey|"
     r"sankey(?:-beta)?|xychart-beta|quadrantChart|timeline|"
@@ -102,11 +102,12 @@ def parse_mermaid(source: str, diagram_id: str = "diagram-1", title: str = "Arch
             continue
         if line.startswith("%%"):
             continue
-        header = re.match(r"(?i)^(?:graph|flowchart)\s+(TB|TD|LR|RL|BT)\b", line)
+        header = re.match(r"(?i)^(?:graph|flowchart)(?:\s+(TB|TD|LR|RL|BT))?\s*$", line)
         if header:
             kind = "flowchart"
             declared = True
-            direction = "TB" if header.group(1).upper() == "TD" else header.group(1).upper()
+            token = header.group(1)
+            direction = "TB" if not token or token.upper() == "TD" else token.upper()
             continue
         if re.match(r"(?i)^sequenceDiagram\b", line):
             kind = "sequence"
@@ -145,7 +146,7 @@ def parse_mermaid(source: str, diagram_id: str = "diagram-1", title: str = "Arch
                 label, raw = slice_match.groups()
                 node_id = f"slice-{len(nodes) + 1}"
                 nodes[node_id] = DiagramNode(
-                    node_id, label.strip(), kind="slice", value=float(raw)
+                    node_id, label.strip(), kind="slice", value=float(raw.replace(",", "."))
                 )
             continue
         if kind == "sequence":

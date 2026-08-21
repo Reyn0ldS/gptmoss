@@ -3208,11 +3208,8 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
                     )[:8_000],
                 })
             llm_messages.extend(context["conversation_history"])
-            digest = str(context.get("source_evidence_digest") or "").strip()
-            if digest:
-                llm_messages.append({"role": "system", "content": digest})
-            # Requested images are deliberately the most recent messages so
-            # provider compaction preserves them ahead of older conversation.
+            # Images stay late so provider compaction prefers them over chatter.
+            # The source digest is last: a four-image batch must not evict it.
             for attachment in visual_attachments:
                 llm_messages.append({"role": "user", "content": [
                     {"type": "text", "text": (
@@ -3221,6 +3218,9 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
                     )},
                     {"type": "image_url", "image_url": {"url": attachment["image_url"]}},
                 ]})
+            digest = str(context.get("source_evidence_digest") or "").strip()
+            if digest:
+                llm_messages.append({"role": "system", "content": digest})
 
             await self.event_bus.publish(Event(
                 type="LLMRequest",

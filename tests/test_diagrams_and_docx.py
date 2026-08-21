@@ -90,6 +90,21 @@ def test_mermaid_pie_accepts_percent_suffix_and_draws_a_full_circle():
     assert "A (100)" in svg
 
 
+def test_mermaid_pie_accepts_french_decimal_comma():
+    spec = parse_mermaid('pie title Parts\n"A" : 40,5\n"B" : 59,5')
+    assert spec.kind == "pie"
+    assert validate_diagram(spec)["valid"]
+    values = sorted(float(node.value or 0) for node in spec.nodes)
+    assert values == [40.5, 59.5]
+
+
+def test_flowchart_without_direction_is_not_hijacked_by_gantt_node():
+    spec = parse_mermaid("flowchart\nA[Start] --> B[End]\ngantt[Phase]")
+    assert spec.kind == "flowchart"
+    assert validate_diagram(spec)["valid"]
+    assert {node.node_id for node in spec.nodes} >= {"A", "B", "gantt"}
+
+
 def test_mermaid_pie_with_one_slice_is_invalid():
     spec = parse_mermaid('pie title Only\n"A" : 1')
     assert validate_diagram(spec)["valid"] is False

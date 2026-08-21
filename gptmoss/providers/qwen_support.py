@@ -13,6 +13,19 @@ class ContextWindowPolicy:
     # bytes per token is intentionally conservative and does not require a
     # model-specific tokenizer to be downloaded for offline operation.
     BYTES_PER_TOKEN = 3
+    DIGEST_MARK = "Pinned local source evidence"
+
+    @staticmethod
+    def _is_pinned(message: Dict[str, Any]) -> bool:
+        content = message.get("content")
+        if isinstance(content, str) and ContextWindowPolicy.DIGEST_MARK in content:
+            return True
+        if isinstance(content, list):
+            return any(
+                isinstance(part, dict) and part.get("type") == "image_url"
+                for part in content
+            )
+        return False
 
     @staticmethod
     def is_limit_error(error: Exception) -> bool:
@@ -107,10 +120,17 @@ class ContextWindowPolicy:
         first = items[0] if items[0].get("role") == "system" else None
         body, omitted = (items[1:] if first else items), 0
         while len(body) > 4 and cls.message_chars(([first] if first else []) + body) > target_chars:
-            body.pop(0)
+            drop_at = next((index for index, message in enumerate(body) if not cls._is_pinned(message)), None)
+            if drop_at is None:
+                break
+            body.pop(drop_at)
             omitted += 1
-            while body and body[0].get("role") == "tool":
-                body.pop(0)
+            while (
+                drop_at < len(body)
+                and body[drop_at].get("role") == "tool"
+                and not cls._is_pinned(body[drop_at])
+            ):
+                body.pop(drop_at)
                 omitted += 1
         compacted = ([first] if first else [])
         if omitted:
@@ -127,7 +147,7 @@ class ContextWindowPolicy:
                 break
             digest_candidates = [
                 item for item in candidates
-                if "Pinned local source evidence" not in str(compacted[item[1]].get("content") or "")
+                if not cls._is_pinned(compacted[item[1]])
             ]
             if not digest_candidates:
                 if first is not None:
