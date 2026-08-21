@@ -714,6 +714,69 @@ async def test_provider_authentication_error_is_actionable_and_never_retried(tmp
 
 
 @pytest.mark.asyncio
+async def test_tls_certificate_error_is_actionable_and_never_retried(tmp_path):
+    class TlsLLM(MockLLMProvider):
+        def __init__(self):
+            super().__init__()
+            self.calls = 0
+
+        async def completion(self, *args, **kwargs):
+            self.calls += 1
+            raise RuntimeError(
+                "APIConnectionError [SSL: CERTIFICATE_VERIFY_FAILED] "
+                "certificate verify failed: self-signed certificate"
+            )
+
+    llm = TlsLLM()
+    engine, _ = _engine(tmp_path, llm)
+
+    with pytest.raises(ProviderConfigurationError, match="ssl_cert_path"):
+        await engine._completion_with_recovery("tls-failure", messages=[])
+
+    assert llm.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_vision_rejection_is_actionable_and_records_gap(tmp_path):
+    class VisionLLM(MockLLMProvider):
+        def __init__(self):
+            super().__init__()
+            self.calls = 0
+
+        async def completion(self, *args, **kwargs):
+            self.calls += 1
+            raise RuntimeError("BadRequestError: this model does not support image_url content")
+
+    llm = VisionLLM()
+    engine, state = _engine(tmp_path, llm)
+    state.get_execution("vision-failure")
+
+    with pytest.raises(ProviderConfigurationError, match="vision_mode"):
+        await engine._completion_with_recovery("vision-failure", messages=[])
+
+    assert llm.calls == 1
+    assert state.get_execution("vision-failure").variables.get("vision_rejection")
+
+
+@pytest.mark.asyncio
+async def test_vision_rejection_is_copied_to_parent_execution(tmp_path):
+    class VisionLLM(MockLLMProvider):
+        async def completion(self, *args, **kwargs):
+            raise RuntimeError("BadRequestError: this model does not support image_url content")
+
+    engine, state = _engine(tmp_path, VisionLLM())
+    parent = state.get_execution("vision-parent")
+    child = state.get_execution("vision-child")
+    child.variables["parent_execution_id"] = "vision-parent"
+
+    with pytest.raises(ProviderConfigurationError, match="vision_mode"):
+        await engine._completion_with_recovery("vision-child", messages=[])
+
+    assert parent.variables.get("vision_rejection")
+    assert child.variables.get("vision_rejection")
+
+
+@pytest.mark.asyncio
 async def test_unauthorized_specialist_is_not_replaced_by_an_identical_retry(tmp_path):
     class UnauthorizedLLM(MockLLMProvider):
         async def completion(self, *args, **kwargs):
@@ -1232,6 +1295,31 @@ def test_exhaustive_inventory_gate_defers_images_to_declared_vision_gap(tmp_path
     assert engine._document_coverage_issues(
         "no-vision-coverage-gate", step,
     ) == []
+
+
+def test_vision_rejection_defers_image_coverage_even_if_flag_is_enabled(tmp_path):
+    engine, state = _engine(tmp_path, MockLLMProvider())
+    engine.llm_provider.supports_vision = True
+    store = ArtifactStore(str(tmp_path / "rejected-vision-artifacts"))
+    image = store.save_bytes(
+        "evidence.png", b"\x89PNG\r\n\x1a\nevidence", "image/png"
+    )
+    engine.artifact_store = store
+    execution = state.get_execution("rejected-vision-coverage-gate")
+    execution.variables["attachment_ids"] = [image["id"]]
+    execution.variables["vision_rejection"] = "does not support image_url"
+    step = {
+        "description": "Inventory every explicit attachment and record complete coverage.",
+        "acceptance_criteria": ["All images were analyzed."],
+    }
+
+    gaps = engine._capability_gaps(execution)
+    assert gaps[0]["capability"] == "vision"
+    assert "rejected image parts" in gaps[0]["resolution"]
+    assert engine._document_coverage_issues(
+        "rejected-vision-coverage-gate", step,
+    ) == []
+    assert execution.variables.get("visualized_artifact_ids", []) == []
 
 
 @pytest.mark.asyncio

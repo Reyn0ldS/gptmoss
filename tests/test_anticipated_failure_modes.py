@@ -231,6 +231,31 @@ def test_pptx_cannot_be_cited_with_normalized_blocks_when_inventory_is_slides(tm
 
 
 def test_unsupported_mermaid_subset_is_not_a_useful_diagram(tmp_path):
+    document = tmp_path / "gantt.md"
+    document.write_text(
+        """# Dossier
+
+```mermaid
+gantt
+title Schedule
+section Work
+Task :done, 2024-01-01, 1d
+```
+""",
+        encoding="utf-8",
+    )
+    report = validate_artifact(
+        document,
+        validator="document",
+        constraints={"reject_invalid_diagrams": True, "minimums": {"valid_diagrams": 1}},
+    )
+    assert not report["valid"]
+    assert report["metrics"]["valid_diagrams"] == 0
+    assert report["metrics"]["invalid_diagrams"] >= 1
+    assert any("unsupported mermaid diagram type 'gantt'" in item for item in report["failures"])
+
+
+def test_mermaid_pie_counts_as_a_valid_document_diagram(tmp_path):
     document = tmp_path / "pie.md"
     document.write_text(
         """# Dossier
@@ -248,9 +273,9 @@ pie title Parts
         validator="document",
         constraints={"reject_invalid_diagrams": True, "minimums": {"valid_diagrams": 1}},
     )
-    assert not report["valid"]
-    assert report["metrics"]["valid_diagrams"] == 0
-    assert report["metrics"]["invalid_diagrams"] >= 1
+    assert report["valid"]
+    assert report["metrics"]["valid_diagrams"] >= 1
+    assert report["metrics"]["invalid_diagrams"] == 0
 
 
 def test_gui_settings_payload_covers_every_runtime_settings_field():

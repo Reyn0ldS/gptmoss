@@ -52,6 +52,9 @@ class RuntimeSettings(BaseModel):
     # output reserve is always kept outside the prompt budget.
     context_window_tokens: int = Field(default=0, ge=0)
     context_output_reserve_tokens: int = Field(default=8_192, ge=256)
+    # Read timeout for a single LLM HTTP request. Connect stays short.
+    # Zero is refused: an unbounded wait hides provider failures.
+    llm_timeout_seconds: int = Field(default=300, ge=10, le=3600)
     max_upload_bytes: int = Field(default=DEFAULT_MAX_UPLOAD_BYTES, ge=1)
     max_attachment_text_chars: int = Field(
         default=DEFAULT_MAX_ATTACHMENT_TEXT_CHARS, ge=1

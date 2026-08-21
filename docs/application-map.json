@@ -253,6 +253,7 @@
     "safe_shell_mode",
     "shell_timeout_seconds",
     "shell_max_output_chars",
+    "llm_timeout_seconds",
     "default_skills",
     "projects",
     "document_engine_enabled",

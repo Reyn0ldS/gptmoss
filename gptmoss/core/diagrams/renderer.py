@@ -9,6 +9,8 @@ from gptmoss.core.diagrams.model import DiagramSpec
 
 
 def render_svg(spec: DiagramSpec) -> str:
+    if spec.kind == "pie":
+        return _render_pie(spec)
     columns = max(1, math.ceil(math.sqrt(max(1, len(spec.nodes)))))
     cell_w, cell_h = 240, 130
     positions = {}
@@ -40,3 +42,40 @@ def render_svg(spec: DiagramSpec) -> str:
             out.append(f'<text x="{x + 90}" y="{y + 53}" text-anchor="middle" font-family="Arial" font-size="11" fill="#475569">{html.escape(node.zone[:36])}</text>')
     out.append(f'<text x="40" y="{height - 24}" font-family="Arial" font-size="12" fill="#475569">{html.escape(spec.caption)}</text></svg>')
     return "".join(out)
+
+
+def _render_pie(spec: DiagramSpec) -> str:
+    slices = [node for node in spec.nodes if (node.value or 0) > 0]
+    total = sum(float(node.value or 0) for node in slices) or 1.0
+    width = max(spec.width, 720)
+    height = max(spec.height, 420)
+    cx, cy, radius = 220.0, 230.0, 140.0
+    colors = ["#0369a1", "#0f766e", "#b45309", "#7c3aed", "#be123c", "#15803d"]
+    parts = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}" role="img" aria-label="{html.escape(spec.alt_text)}">',
+        f'<rect width="100%" height="100%" fill="#f8fafc"/><text x="40" y="32" font-family="Arial" font-size="22" font-weight="bold" fill="#0f172a">{html.escape(spec.title)}</text>',
+    ]
+    angle = -math.pi / 2
+    for index, node in enumerate(slices):
+        sweep = 2 * math.pi * (float(node.value or 0) / total)
+        next_angle = angle + sweep
+        x1 = cx + radius * math.cos(angle)
+        y1 = cy + radius * math.sin(angle)
+        x2 = cx + radius * math.cos(next_angle)
+        y2 = cy + radius * math.sin(next_angle)
+        large = 1 if sweep > math.pi else 0
+        color = colors[index % len(colors)]
+        parts.append(
+            f'<path d="M {cx:.1f} {cy:.1f} L {x1:.1f} {y1:.1f} A {radius} {radius} 0 {large} 1 {x2:.1f} {y2:.1f} Z" '
+            f'fill="{color}" stroke="#f8fafc" stroke-width="2"/>'
+        )
+        parts.append(
+            f'<rect x="420" y="{80 + index * 28}" width="14" height="14" fill="{color}"/>'
+            f'<text x="442" y="{92 + index * 28}" font-family="Arial" font-size="14" fill="#0f172a">'
+            f'{html.escape(node.label[:48])} ({float(node.value or 0):g})</text>'
+        )
+        angle = next_angle
+    parts.append(
+        f'<text x="40" y="{height - 24}" font-family="Arial" font-size="12" fill="#475569">{html.escape(spec.caption)}</text></svg>'
+    )
+    return "".join(parts)

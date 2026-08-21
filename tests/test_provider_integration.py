@@ -88,6 +88,30 @@ async def test_local_openai_compatible_tool_call_round_trip():
     }
     assert response["usage"]["total_tokens"] == 12
     assert provider.client.max_retries == 0
+    assert provider.timeout_seconds == 300
+    assert float(provider.client.timeout.read) == 300.0
+    assert float(provider.client.timeout.connect) == 10.0
+
+
+@pytest.mark.asyncio
+async def test_qwen_client_uses_configured_read_timeout():
+    provider = QwenProvider(
+        api_key="local-key",
+        base_url="http://127.0.0.1:9/v1",
+        default_model="local-model",
+        llm_timeout_seconds=120,
+    )
+    try:
+        assert provider.timeout_seconds == 120
+        assert float(provider.client.timeout.read) == 120.0
+        provider.update_config(
+            "local-key", "http://127.0.0.1:9/v1",
+            model_name="local-model", llm_timeout_seconds=300,
+        )
+        assert provider.timeout_seconds == 300
+        assert float(provider.client.timeout.read) == 300.0
+    finally:
+        await provider.close()
 
 
 @pytest.mark.asyncio

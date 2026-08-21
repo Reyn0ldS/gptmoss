@@ -642,6 +642,7 @@ def test_api_settings_preserve_secret_and_context_budget(tmp_path):
         "safe_shell_mode": False,
         "shell_timeout_seconds": 45,
         "shell_max_output_chars": 20000,
+        "llm_timeout_seconds": 180,
         "default_skills": ["code-review"],
         "confirm_sensitive": True,
     }
@@ -654,6 +655,7 @@ def test_api_settings_preserve_secret_and_context_budget(tmp_path):
     assert public_settings["context_output_reserve_tokens"] == 16384
     assert public_settings["safe_shell_mode"] is False
     assert public_settings["shell_timeout_seconds"] == 45
+    assert public_settings["llm_timeout_seconds"] == 180
     assert public_settings["default_skills"] == ["code-review"]
     assert public_settings["vision_mode"] == "disabled"
     assert public_settings["denied_capabilities"] == ["documents.read_chunk"]

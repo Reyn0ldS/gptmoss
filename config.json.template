@@ -36,6 +36,7 @@
   "safe_shell_mode": true,
   "shell_timeout_seconds": 0,
   "shell_max_output_chars": 12000,
+  "llm_timeout_seconds": 300,
   "default_skills": [],
   "document_engine_enabled": true,
   "document_checkpoint_enabled": true,

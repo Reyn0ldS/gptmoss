@@ -24,10 +24,126 @@ def test_runtime_settings_enforce_secure_bounded_defaults():
     assert settings.max_attachment_text_chars == 5_000_000
     assert settings.max_transitions_per_execution == 2_000
     assert settings.shell_max_output_chars == 12_000
+    assert settings.llm_timeout_seconds == 300
     with pytest.raises(ValidationError):
         RuntimeSettings(max_upload_bytes=0)
     with pytest.raises(ValidationError):
         RuntimeSettings(shell_max_output_chars=0)
+    with pytest.raises(ValidationError):
+        RuntimeSettings(llm_timeout_seconds=0)
+    with pytest.raises(ValidationError):
+        RuntimeSettings(llm_timeout_seconds=9)
+
+
+@pytest.mark.asyncio
+async def test_compact_history_keeps_document_read_digest(tmp_path):
+    from gptmoss.core.context import DIGEST_PREFIX
+
+    state = StateEngine()
+    conversation = state.get_conversation("digest-test")
+    read_payload = json.dumps({
+        "artifact_id": "src-1",
+        "filename": "source.docx",
+        "returned_blocks": 3,
+        "blocks": [
+            {
+                "order": 0,
+                "text": "Access control requires MFA.",
+                "citation": "[source.docx > Security > blocks 1-1]",
+            }
+        ],
+    })
+    conversation.messages = [
+        {"role": "user", "content": "old-" + "x" * 400},
+        {"role": "tool", "content": read_payload},
+        {"role": "assistant", "content": "recent"},
+    ]
+    execution = state.get_execution("digest-test")
+    execution.variables["tool_call_history"] = [{
+        "capability": "documents",
+        "action": "read",
+        "result": read_payload,
+    }]
+    context = await ContextEngine(
+        state, RAMMemoryProvider(), max_history_chars=120, max_tool_output_chars=40,
+        adaptive=False,
+    ).compile_context("digest-test", "digest-test", "default", [])
+
+    assert context["conversation_history"][-1]["content"] == "recent"
+    assert DIGEST_PREFIX in context["source_evidence_digest"]
+    assert "src-1" in context["source_evidence_digest"] or "[source.docx > Security > blocks 1-1]" in context["source_evidence_digest"]
+    assert "Access control requires MFA." in context["source_evidence_digest"]
+
+
+@pytest.mark.asyncio
+async def test_source_evidence_digest_uses_tool_history_without_conversation():
+    from gptmoss.core.context import DIGEST_PREFIX
+
+    state = StateEngine()
+    state.get_conversation("digest-history")
+    execution = state.get_execution("digest-history")
+    execution.variables["tool_call_history"] = [{
+        "capability": "documents",
+        "action": "read",
+        "result": json.dumps({
+            "artifact_id": "only-history",
+            "filename": "brief.pdf",
+            "blocks": [{
+                "order": 0,
+                "text": "Budget is 12k euros.",
+                "citation": "[brief.pdf > Finance > blocks 1-1]",
+            }],
+        }),
+    }]
+    context = await ContextEngine(
+        state, RAMMemoryProvider(), max_history_chars=120, adaptive=False,
+    ).compile_context("digest-history", "digest-history", "default", [])
+
+    assert DIGEST_PREFIX in context["source_evidence_digest"]
+    assert "[brief.pdf > Finance > blocks 1-1]" in context["source_evidence_digest"]
+
+
+@pytest.mark.asyncio
+async def test_source_evidence_digest_includes_matching_sibling_reads():
+    from gptmoss.core.context import DIGEST_PREFIX
+
+    state = StateEngine()
+    parent = state.get_execution("parent-digest")
+    parent.variables["project_id"] = "proj-default"
+    sibling = state.get_execution("sibling-digest")
+    sibling.variables.update({
+        "parent_execution_id": "parent-digest",
+        "plan_step_id": "inventory",
+        "project_id": "proj-default",
+        "attachment_ids": ["src-1"],
+        "tool_call_history": [{
+            "capability": "documents",
+            "action": "read",
+            "result": json.dumps({
+                "artifact_id": "src-1",
+                "filename": "policy.docx",
+                "blocks": [{
+                    "order": 0,
+                    "text": "MFA is mandatory.",
+                    "citation": "[policy.docx > Access > blocks 1-1]",
+                }],
+            }),
+        }],
+    })
+    retry = state.get_execution("retry-digest")
+    retry.variables.update({
+        "parent_execution_id": "parent-digest",
+        "plan_step_id": "inventory",
+        "project_id": "proj-default",
+        "attachment_ids": ["src-1"],
+    })
+    state.get_conversation("retry-digest")
+    context = await ContextEngine(
+        state, RAMMemoryProvider(), max_history_chars=120, adaptive=False,
+    ).compile_context("retry-digest", "retry-digest", "default", [])
+
+    assert DIGEST_PREFIX in context["source_evidence_digest"]
+    assert "[policy.docx > Access > blocks 1-1]" in context["source_evidence_digest"]
 
 
 @pytest.mark.asyncio

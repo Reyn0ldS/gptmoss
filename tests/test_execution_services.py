@@ -34,6 +34,30 @@ def test_provider_recovery_classifies_permanent_and_transient_errors():
     assert not ProviderRecoveryCoordinator.is_transient(ValueError("invalid payload"))
 
 
+def test_ssl_certificate_error_is_configuration_not_transient():
+    error = Exception(
+        "APIConnectionError [SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: "
+        "self-signed certificate"
+    )
+    assert ProviderRecoveryCoordinator.is_tls_configuration(error)
+    assert ProviderRecoveryCoordinator.is_permanent(error)
+    assert not ProviderRecoveryCoordinator.is_transient(error)
+    assert ProviderRecoveryCoordinator.is_transient(ConnectionError("provider unavailable"))
+    assert not ProviderRecoveryCoordinator.is_tls_configuration(
+        ConnectionError("provider unavailable")
+    )
+
+
+def test_vision_rejection_is_configuration_not_transient():
+    error = Exception("BadRequestError: this model does not support image_url content")
+    assert ProviderRecoveryCoordinator.is_vision_rejected(error)
+    assert ProviderRecoveryCoordinator.is_permanent(error)
+    assert not ProviderRecoveryCoordinator.is_transient(error)
+    timeout = Exception("APITimeoutError timed out while sending image_url payload")
+    assert not ProviderRecoveryCoordinator.is_vision_rejected(timeout)
+    assert ProviderRecoveryCoordinator.is_transient(timeout)
+
+
 @pytest.mark.asyncio
 async def test_provider_resume_schedule_is_idempotent_and_stoppable():
     state = StateEngine()

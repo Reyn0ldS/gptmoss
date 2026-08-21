@@ -21,6 +21,8 @@ Un audit ou un quality gate rouvre le propriétaire de l'obligation fautive :
 - paragraphe dupliqué, non sourcé, placeholder, lien externe ou référence invalide → rédacteur et `replace_paragraph` ;
 - source non citée ou citations seulement dans un fence → rédacteur et `append` ;
 - fiche sémantique, section vide ou diagramme invalide → rédacteur et `replace_section` ;
+  un `pie` Mermaid bien formé compte comme diagramme valide ; un type hors sous-ensemble
+  est nommé (`gantt`, `classDiagram`, …) et doit être converti ;
 - défaut logiciel d'intégration ou de commande → debugger déjà prévu ;
 - si aucune cible n'est classée, le dernier debugger reste le repli.
 

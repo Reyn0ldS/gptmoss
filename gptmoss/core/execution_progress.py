@@ -430,7 +430,9 @@ class ExecutionProgressMixin:
         # the limitation and requires human scope approval at the parent level.
         # Requiring a visual tool here would create an impossible child loop and
         # could falsely imply that image content had been interpreted.
-        vision_available = bool(getattr(self.llm_provider, "supports_vision", False))
+        vision_available = bool(
+            getattr(self.llm_provider, "supports_vision", False)
+        ) and not state.variables.get("vision_rejection")
         missing_images = sorted(image_ids - visualized) if vision_available else []
         if missing_images:
             names = []
@@ -497,7 +499,10 @@ class ExecutionProgressMixin:
                 continue
             if str(metadata.get("content_type") or "").startswith("image/"):
                 image_attachments.append(metadata.get("filename"))
-        if image_attachments and not getattr(self.llm_provider, "supports_vision", False):
+        vision_available = bool(
+            getattr(self.llm_provider, "supports_vision", False)
+        ) and not state.variables.get("vision_rejection")
+        if image_attachments and not vision_available:
             gaps.append({
                 "capability": "vision",
                 "required_for": "Interpret attached image content",
@@ -506,6 +511,9 @@ class ExecutionProgressMixin:
                 "resolution": (
                     "Configure a vision-capable provider, or restrict execution to "
                     "documented adapters, configuration, routines, and validators."
+                    if not state.variables.get("vision_rejection") else
+                    "The provider rejected image parts. Set vision_mode to disabled "
+                    "or switch to a vision model before retrying image analysis."
                 ),
             })
         return gaps

@@ -1,7 +1,126 @@
+import json
 from typing import Dict, Any, List
+
 from gptmoss.core.state import StateEngine
 from gptmoss.interfaces.memory import MemoryProvider
 from gptmoss.core.adaptive import AdaptiveRuntimePolicy
+
+
+DIGEST_PREFIX = (
+    "Pinned local source evidence (durable tool history; omitted conversation "
+    "messages do not erase this):"
+)
+
+
+def document_tool_stub(content: str) -> str | None:
+    """Keep citation metadata when a documents.* tool body cannot fit."""
+    try:
+        payload = json.loads(content)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    if not any(key in payload for key in ("blocks", "citation", "results")):
+        return None
+    citations: list[str] = []
+    for block in payload.get("blocks") or []:
+        if isinstance(block, dict) and block.get("citation"):
+            citations.append(str(block["citation"]))
+    if payload.get("citation"):
+        citations.append(str(payload["citation"]))
+    for result in payload.get("results") or []:
+        if isinstance(result, dict) and result.get("citation"):
+            citations.append(str(result["citation"]))
+    stub = json.dumps(
+        {
+            "artifact_id": payload.get("artifact_id"),
+            "filename": payload.get("filename"),
+            "returned_blocks": payload.get("returned_blocks"),
+            "citations": citations[:12],
+            "stub": True,
+        },
+        ensure_ascii=False,
+    )
+    return stub[:400]
+
+
+def _digest_lines(payload: dict[str, Any]) -> list[str]:
+    lines: list[str] = []
+    filename = str(payload.get("filename") or payload.get("artifact_id") or "")
+    for block in payload.get("blocks") or []:
+        if not isinstance(block, dict):
+            continue
+        citation = str(block.get("citation") or "").strip()
+        text = " ".join(str(block.get("text") or "").split())[:200]
+        if citation or text:
+            lines.append(f"{citation} {text}".strip())
+    if payload.get("citation"):
+        text = " ".join(str(payload.get("text") or payload.get("content") or "").split())[:200]
+        lines.append(f"{payload['citation']} {text}".strip())
+    for result in payload.get("results") or []:
+        if not isinstance(result, dict):
+            continue
+        citation = str(result.get("citation") or "").strip()
+        text = " ".join(str(result.get("text") or "").split())[:200]
+        if citation or text:
+            lines.append(f"{citation} {text}".strip() if citation else f"{filename}: {text}")
+    return lines
+
+
+def build_source_evidence_digest(history: list, *, budget: int) -> str:
+    """Bounded prompt digest of durable documents.read evidence."""
+    groups: dict[str, list[str]] = {}
+    order: list[str] = []
+    for item in history:
+        if str(item.get("capability") or "").lower() != "documents":
+            continue
+        if str(item.get("action") or "").lower() not in {"read", "read_chunk", "search"}:
+            continue
+        try:
+            payload = json.loads(str(item.get("result") or ""))
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        lines = _digest_lines(payload)
+        if not lines:
+            continue
+        key = str(payload.get("artifact_id") or payload.get("filename") or "source")
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].extend(lines)
+    if not groups:
+        return ""
+    limit = max(200, int(budget))
+    header = DIGEST_PREFIX + "\n"
+    selected: list[str] = []
+    used = len(header)
+    queues = {key: list(values) for key, values in groups.items()}
+    progressed = True
+    while progressed:
+        progressed = False
+        for key in order:
+            if not queues[key]:
+                continue
+            line = queues[key][0]
+            extra = len(line) + 1
+            if selected and used + extra > limit:
+                continue
+            if not selected and used + extra > limit:
+                line = line[: max(0, limit - used - 1)]
+                extra = len(line) + 1
+            queues[key].pop(0)
+            selected.append(line)
+            used += extra
+            progressed = True
+            if used >= limit:
+                progressed = False
+                break
+    if not selected:
+        return ""
+    return header + "\n".join(selected)
+
 
 class ContextEngine:
     """
@@ -31,17 +150,50 @@ class ContextEngine:
         for message in reversed(messages):
             item = dict(message)
             content = str(item.get("content") or "")
+            stub = document_tool_stub(content) if item.get("role") == "tool" else None
             if item.get("role") == "tool" and len(content) > tool_output_budget:
-                item["content"] = content[:tool_output_budget] + "\n… [tool output compacted]"
+                item["content"] = stub or (content[:tool_output_budget] + "\n… [tool output compacted]")
             size = len(str(item.get("content") or ""))
             if used + size > history_budget:
-                omitted += 1
+                if stub and used + len(stub) <= history_budget:
+                    item["content"] = stub
+                    compacted.append(item)
+                    used += len(stub)
+                else:
+                    omitted += 1
                 continue
             compacted.append(item)
             used += size
         compacted.reverse()
         summary = f"{omitted} earlier messages omitted to respect the context budget." if omitted else ""
         return compacted, summary
+
+    def _coverage_tool_history(self, execution_id: str, exec_state) -> list:
+        """Reuse the same sibling evidence the coverage gate accepts."""
+        history = list(exec_state.variables.get("tool_call_history") or [])
+        parent_id = exec_state.variables.get("parent_execution_id")
+        plan_step_id = exec_state.variables.get("plan_step_id")
+        project_id = exec_state.variables.get("project_id")
+        attached = {
+            str(item) for item in exec_state.variables.get("attachment_ids", []) if item
+        }
+        if parent_id is None or plan_step_id is None:
+            return history
+        for sibling in self.state_engine.executions.values():
+            if sibling.execution_id == execution_id:
+                continue
+            variables = sibling.variables
+            if (
+                variables.get("parent_execution_id") != parent_id
+                or variables.get("plan_step_id") != plan_step_id
+                or variables.get("project_id") != project_id
+                or {
+                    str(item) for item in variables.get("attachment_ids", []) if item
+                } != attached
+            ):
+                continue
+            history.extend(variables.get("tool_call_history") or [])
+        return history
 
     async def compile_context(
         self,
@@ -71,7 +223,6 @@ class ContextEngine:
                 project_id=exec_state.variables.get("project_id"),
                 include_global=False,
             )
-            import json
             memory_summary = json.dumps(
                 [
                     {
@@ -99,9 +250,14 @@ class ContextEngine:
         history, history_summary = self._compact_history(
             convo_state.messages, history_budget
         )
+        digest = build_source_evidence_digest(
+            self._coverage_tool_history(execution_id, exec_state),
+            budget=min(4_000, max(200, history_budget // 3)),
+        )
         context = {
             "execution_id": execution_id,
             "conversation_history": history,
+            "source_evidence_digest": digest,
             "context_summary": history_summary,
             "context_budget_chars": history_budget,
             "current_plan": exec_state.current_plan,

@@ -1716,7 +1716,7 @@ def test_writer_invalid_diagram_gate_requires_its_reported_section(tmp_path):
     )
 
     assert required == "filesystem__replace_section"
-    assert "one complete, syntactically valid Mermaid diagram" in nudge
+    assert "allowed subset" in nudge
     assert "including self-loops" in nudge
     assert "preserving all other sections" in nudge
 

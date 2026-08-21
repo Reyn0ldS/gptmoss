@@ -42,6 +42,50 @@ def test_mermaid_parser_rejects_missing_or_empty_nodes():
     assert not validate_diagram(parse_mermaid("graph TD"))["valid"]
 
 
+def test_mermaid_pie_with_two_slices_is_valid_and_embeds_in_docx():
+    spec = parse_mermaid('pie title Parts\n"A" : 40\n"B" : 60')
+    report = validate_diagram(spec)
+    assert spec.kind == "pie"
+    assert report["valid"]
+    assert {node.label for node in spec.nodes} == {"A", "B"}
+    first = render_svg(spec)
+    assert first == render_svg(spec)
+    assert "Parts" in first
+    assert "A (40)" in first
+    markdown = """# Dossier
+
+```mermaid
+pie title Parts
+"A" : 40
+"B" : 60
+```
+"""
+    payload = render_docx(markdown, title="Dossier")
+    with ZipFile(BytesIO(payload)) as archive:
+        assert "word/media/diagram-1.svg" in archive.namelist()
+        assert "Parts" in archive.read("word/media/diagram-1.svg").decode("utf-8")
+
+
+def test_unsupported_gantt_diagram_is_named_not_empty_flowchart():
+    spec = parse_mermaid("gantt\ntitle Schedule\nsection Work\nTask :done, 2024-01-01, 1d")
+    report = validate_diagram(spec)
+    assert spec.kind == "unsupported"
+    assert report["valid"] is False
+    assert "unsupported mermaid diagram type 'gantt'" in report["issues"][0]
+
+
+def test_flowchart_node_named_pie_does_not_hijack_diagram_kind():
+    spec = parse_mermaid("graph TD\npie[Slice node]\npie --> Store")
+    assert spec.kind == "flowchart"
+    assert validate_diagram(spec)["valid"]
+    assert {node.node_id for node in spec.nodes} == {"pie", "Store"}
+
+
+def test_mermaid_pie_with_one_slice_is_invalid():
+    spec = parse_mermaid('pie title Only\n"A" : 1')
+    assert validate_diagram(spec)["valid"] is False
+
+
 def test_mermaid_parser_supports_useful_sequence_and_state_diagrams():
     sequence = parse_mermaid(
         "sequenceDiagram\nparticipant User as Utilisateur\nUser->>API: requête\nAPI-->>User: réponse"

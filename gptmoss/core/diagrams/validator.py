@@ -7,14 +7,47 @@ from typing import Any
 from gptmoss.core.diagrams.model import DiagramSpec
 
 
+ALLOWED_MERMAID_TYPES = "flowchart, sequenceDiagram, stateDiagram-v2, pie"
+
+
 def validate_diagram(spec: DiagramSpec, *, max_nodes: int = 80, max_edges: int = 160) -> dict[str, Any]:
     issues: list[str] = []
     node_ids = [node.node_id for node in spec.nodes]
     node_set = set(node_ids)
+    if spec.kind == "unsupported":
+        named = spec.unsupported_type or "unknown"
+        issues.append(
+            f"unsupported mermaid diagram type {named!r}; allowed: {ALLOWED_MERMAID_TYPES}"
+        )
+        return {
+            "valid": False,
+            "issues": issues,
+            "node_count": len(spec.nodes),
+            "edge_count": len(spec.edges),
+            "density": 0,
+        }
     if not spec.diagram_id.strip():
         issues.append("diagram_id is required")
     if not spec.title.strip() or not spec.caption.strip() or not spec.alt_text.strip():
         issues.append("title, caption and alt_text are required")
+    if spec.kind == "pie":
+        if len(spec.nodes) < 2:
+            issues.append("pie diagram must contain at least two slices")
+        if any(not node.label.strip() for node in spec.nodes):
+            issues.append("pie slice labels are required")
+        if any(node.value is None or float(node.value) < 0 for node in spec.nodes):
+            issues.append("pie slice values must be non-negative numbers")
+        elif sum(float(node.value or 0) for node in spec.nodes) <= 0:
+            issues.append("pie diagram values must sum to more than zero")
+        if spec.width <= 0 or spec.height <= 0:
+            issues.append("diagram dimensions must be positive")
+        return {
+            "valid": not issues,
+            "issues": issues,
+            "node_count": len(spec.nodes),
+            "edge_count": 0,
+            "density": 0,
+        }
     if not spec.nodes:
         issues.append("diagram must contain at least one node")
     elif len(spec.nodes) < 2:

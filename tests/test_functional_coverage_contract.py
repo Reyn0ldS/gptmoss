@@ -121,6 +121,7 @@ CONFIGURATION_OWNERS = {
     "max_step_retries": "execution", "max_parallel_plan_steps": "execution",
     "safe_shell_mode": "shell",
     "shell_timeout_seconds": "shell", "shell_max_output_chars": "shell",
+    "llm_timeout_seconds": "llm",
     "default_skills": "execution", "projects": "api",
     "document_engine_enabled": "execution+documents",
     "document_checkpoint_enabled": "execution+persistence",

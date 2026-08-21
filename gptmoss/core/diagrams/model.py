@@ -13,6 +13,7 @@ class DiagramNode:
     label: str
     kind: str = "component"
     zone: str = ""
+    value: float | None = None
     x: int | None = None
     y: int | None = None
 
@@ -39,6 +40,8 @@ class DiagramSpec:
     caption: str
     alt_text: str
     direction: str = "TB"
+    kind: str = "flowchart"
+    unsupported_type: str = ""
     nodes: list[DiagramNode] = field(default_factory=list)
     edges: list[DiagramEdge] = field(default_factory=list)
     width: int = 1200
@@ -57,14 +60,24 @@ _EDGE_RE = re.compile(
     r"\s*[-.=]+>\s*(?:\|(?P<label>[^|]+)\|\s*)?"
     r"(?P<target>[A-Za-z0-9_-]+)(?:\[\"?(?P<target_label>[^\]\"]+)\"?\])?"
 )
+_PIE_SLICE_RE = re.compile(r'^"([^"]+)"\s*:\s*(-?\d+(?:\.\d+)?)\s*$')
+_PIE_BARE_SLICE_RE = re.compile(r'^([^:]{1,80}?)\s*:\s*(-?\d+(?:\.\d+)?)\s*$')
+_UNSUPPORTED_RE = re.compile(
+    r"(?i)^(gantt|classDiagram|erDiagram|gitGraph|mindmap|journey|"
+    r"sankey(?:-beta)?|xychart-beta|quadrantChart|timeline|"
+    r"C4Context|C4Container|C4Component|block-beta|requirementDiagram|"
+    r"architecture-beta|packet-beta|kanban|radar-beta)\b"
+)
 
 
 def parse_mermaid(source: str, diagram_id: str = "diagram-1", title: str = "Architecture diagram") -> DiagramSpec:
-    """Parse the bounded flowchart, sequence and state subsets emitted by GPTMOSS."""
+    """Parse the bounded flowchart, sequence, state and pie subsets emitted by GPTMOSS."""
     direction = "TB"
     nodes: dict[str, DiagramNode] = {}
     edges: list[DiagramEdge] = []
     kind = "flowchart"
+    unsupported_type = ""
+    declared = False
     start_counter = 0
     end_counter = 0
 
@@ -92,15 +105,48 @@ def parse_mermaid(source: str, diagram_id: str = "diagram-1", title: str = "Arch
         header = re.match(r"(?i)^(?:graph|flowchart)\s+(TB|TD|LR|RL|BT)\b", line)
         if header:
             kind = "flowchart"
+            declared = True
             direction = "TB" if header.group(1).upper() == "TD" else header.group(1).upper()
             continue
         if re.match(r"(?i)^sequenceDiagram\b", line):
             kind = "sequence"
+            declared = True
             direction = "LR"
             continue
         if re.match(r"(?i)^stateDiagram(?:-v2)?\b", line):
             kind = "state"
+            declared = True
             direction = "TB"
+            continue
+        pie_header = re.match(r"(?i)^pie(?:\s+showData)?(?:\s+title\s+(.+))?$", line)
+        if pie_header and not declared:
+            kind = "pie"
+            declared = True
+            if pie_header.group(1):
+                title = pie_header.group(1).strip() or title
+            continue
+        unsupported = _UNSUPPORTED_RE.match(line)
+        if unsupported and not declared:
+            kind = "unsupported"
+            unsupported_type = unsupported.group(1)
+            declared = True
+            continue
+        if kind == "unsupported":
+            continue
+        if kind == "pie":
+            if re.match(r"(?i)^showData\b", line):
+                continue
+            title_line = re.match(r"(?i)^title\s+(.+)$", line)
+            if title_line:
+                title = title_line.group(1).strip() or title
+                continue
+            slice_match = _PIE_SLICE_RE.match(line) or _PIE_BARE_SLICE_RE.match(line)
+            if slice_match:
+                label, raw = slice_match.groups()
+                node_id = f"slice-{len(nodes) + 1}"
+                nodes[node_id] = DiagramNode(
+                    node_id, label.strip(), kind="slice", value=float(raw)
+                )
             continue
         if kind == "sequence":
             participant = re.match(
@@ -162,12 +208,20 @@ def parse_mermaid(source: str, diagram_id: str = "diagram-1", title: str = "Arch
             data = node.groupdict()
             label = (data.get("label") or data.get("round") or data["id"]).strip()
             nodes[data["id"]] = DiagramNode(data["id"], label)
+    if kind == "unsupported":
+        alt_text = f"{title}: unsupported mermaid diagram type {unsupported_type!r}."
+    elif kind == "pie":
+        alt_text = f"{title}: {len(nodes)} slices."
+    else:
+        alt_text = f"{title}: {len(nodes)} nodes and {len(edges)} relationships."
     return DiagramSpec(
         diagram_id=diagram_id,
         title=title,
         caption=title,
-        alt_text=f"{title}: {len(nodes)} nodes and {len(edges)} relationships.",
+        alt_text=alt_text,
         direction=direction,
+        kind=kind,
+        unsupported_type=unsupported_type,
         nodes=list(nodes.values()),
         edges=edges,
     )

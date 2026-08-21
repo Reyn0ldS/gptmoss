@@ -25,6 +25,7 @@ class QwenProvider(LLMProvider):
         ssl_cert_path: str = "",
         context_window_tokens: int = 0,
         context_output_reserve_tokens: int = 8_192,
+        llm_timeout_seconds: int = 300,
     ):
         # Fall back to env variables or defaults
         self.api_key = api_key or os.getenv("OPENAI_API_KEY") or os.getenv("DASHSCOPE_API_KEY") or "mock-key"
@@ -41,21 +42,19 @@ class QwenProvider(LLMProvider):
         self.context_output_reserve_tokens = max(
             256, int(context_output_reserve_tokens or 8_192)
         )
+        self.timeout_seconds = max(10, min(3600, int(llm_timeout_seconds or 300)))
         self._learned_context_tokens: Optional[int] = None
         self._retired_clients = []
         self._close_tasks: set[asyncio.Task] = set()
         
         logger.info(f"Initializing QwenProvider calling base_url={self.base_url} with default_model={self.default_model}")
-        import httpx
         # Certificate validation is secure by default. A local/self-signed
         # endpoint can still be enabled explicitly through settings.
         verify_value = ssl_cert_path if ssl_verify and ssl_cert_path else bool(ssl_verify)
-        http_client = httpx.AsyncClient(verify=verify_value)
         # ExecutionEngine owns provider recovery and persists waiting state.
         # Hidden SDK retries multiply that policy and can make one request
         # monopolize an execution for many minutes without observable state.
-        self.client = AsyncOpenAI(api_key=self.api_key, base_url=self.base_url, http_client=http_client,
-                                  max_retries=0, timeout=90.0)
+        self.client = self._build_client(verify_value)
 
     @staticmethod
     def _infer_vision(model_name: str) -> bool:
@@ -77,10 +76,32 @@ class QwenProvider(LLMProvider):
     @staticmethod
     def _log_completion_error(error: Exception):
         text = (error.__class__.__name__ + " " + str(error)).lower()
-        if any(marker in text for marker in ("connection", "timeout", "rate limit", "429", "502", "503", "504")):
+        if any(marker in text for marker in (
+            "certificate_verify", "does not support image", "invalid image",
+            "vision not supported", "401", "403", "invalid api key",
+        )):
+            logger.error("LLM provider configuration failure (%s): %s", error.__class__.__name__, error)
+        elif any(marker in text for marker in ("connection", "timeout", "rate limit", "429", "502", "503", "504")):
             logger.warning("Temporary LLM provider failure (%s): %s", error.__class__.__name__, error)
         else:
             logger.error("Error in LLM completion: %s", error, exc_info=True)
+
+    def _http_timeout(self):
+        import httpx
+        read = float(self.timeout_seconds)
+        return httpx.Timeout(connect=10.0, read=read, write=min(60.0, read), pool=10.0)
+
+    def _build_client(self, verify_value):
+        import httpx
+        timeout = self._http_timeout()
+        http_client = httpx.AsyncClient(verify=verify_value, timeout=timeout)
+        return AsyncOpenAI(
+            api_key=self.api_key,
+            base_url=self.base_url,
+            http_client=http_client,
+            max_retries=0,
+            timeout=timeout,
+        )
 
     def _retire_client(self, client) -> None:
         if client is None:
@@ -115,7 +136,7 @@ class QwenProvider(LLMProvider):
             except Exception:
                 logger.warning("Unable to close an LLM HTTP client cleanly.", exc_info=True)
 
-    def update_config(self, api_key: str, base_url: str, ssl_verify: bool = True, ssl_cert_path: str = "", model_name: str = "qwen-turbo", context_window_tokens: int = 0, context_output_reserve_tokens: int = 8_192):
+    def update_config(self, api_key: str, base_url: str, ssl_verify: bool = True, ssl_cert_path: str = "", model_name: str = "qwen-turbo", context_window_tokens: int = 0, context_output_reserve_tokens: int = 8_192, llm_timeout_seconds: Optional[int] = None):
         self.api_key = api_key
         self.base_url = base_url
         self.default_model = model_name
@@ -131,18 +152,17 @@ class QwenProvider(LLMProvider):
         self.context_output_reserve_tokens = max(
             256, int(context_output_reserve_tokens or 8_192)
         )
+        if llm_timeout_seconds is not None:
+            self.timeout_seconds = max(10, min(3600, int(llm_timeout_seconds)))
         self._learned_context_tokens = None
         
-        import httpx
         if ssl_verify:
             verify_value = ssl_cert_path if ssl_cert_path else True
         else:
             verify_value = False
             
-        http_client = httpx.AsyncClient(verify=verify_value)
         previous_client = getattr(self, "client", None)
-        self.client = AsyncOpenAI(api_key=self.api_key, base_url=self.base_url, http_client=http_client,
-                                  max_retries=0, timeout=90.0)
+        self.client = self._build_client(verify_value)
         self._retire_client(previous_client)
         logger.info(f"QwenProvider config updated. base_url={self.base_url}, ssl_verify={ssl_verify}, ssl_cert_path={ssl_cert_path}")
 
