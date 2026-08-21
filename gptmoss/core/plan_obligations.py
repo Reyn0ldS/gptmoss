@@ -190,7 +190,9 @@ def collect_plan_obligations(
         "software-engineering" in domains
         and requires_software_implementation(task, analysis)
     )
-    document_task = _document_deliverable_task(task)
+    document_task = _document_deliverable_task(
+        task, workload=workload_profile, corpus_policy=corpus_policy,
+    )
     has_sources = _count(
         workload_profile, "attachment_count", "document_count", "image_count"
     ) > 0

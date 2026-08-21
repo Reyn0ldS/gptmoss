@@ -1,8 +1,11 @@
 import argparse
 import asyncio
-import os
-import sys
+import json
 import logging
+import os
+import shutil
+import sys
+import time
 import uvicorn
 from dotenv import load_dotenv
 
@@ -14,6 +17,7 @@ sys.path.insert(0, PROJECT_ROOT)
 from gptmoss.core import (EventBus, StateEngine, ContextEngine, ExecutionEngine, RuntimeKernel, Event,
                           DEFAULT_SYSTEM_PROMPT, TraceRecorder, SkillRegistry, ArtifactStore,
                           AgentProfileRegistry, AutonomousSkillLifecycle, RuntimeSettings)
+from gptmoss.core.durable_io import write_text_atomic
 from gptmoss.providers import QwenProvider
 from gptmoss.memory import JSONMemoryProvider
 from gptmoss.capabilities import (
@@ -76,14 +80,27 @@ def bootstrap_runtime(workspace_root: str):
     context_engine = ContextEngine(state_engine, memory_provider)
 
     # 2. Load or initialize config.json
-    import json
     config_path = os.path.join(workspace_root, "config.json")
+    loaded_ok = False
+    original_data: dict = {}
     if os.path.exists(config_path):
         try:
             with open(config_path, "r", encoding="utf-8") as f:
                 config_data = json.load(f)
+            if not isinstance(config_data, dict):
+                raise ValueError("config.json must contain a JSON object")
+            original_data = dict(config_data)
+            loaded_ok = True
         except Exception as e:
             logger.error(f"Error loading config.json: {e}")
+            quarantine = os.path.join(
+                workspace_root, f"config.json.corrupt-{int(time.time())}"
+            )
+            try:
+                shutil.copy2(config_path, quarantine)
+                logger.error("Quarantined unreadable config.json to %s", quarantine)
+            except OSError:
+                logger.error("Unable to quarantine unreadable config.json")
             config_data = {}
     else:
         config_data = {}
@@ -144,10 +161,11 @@ def bootstrap_runtime(workspace_root: str):
     context_engine.max_history_chars = max_context_chars
 
     config_data = settings.model_dump()
-    
+    persisted = {**original_data, **config_data} if loaded_ok else config_data
     try:
-        with open(config_path, "w", encoding="utf-8") as f:
-            json.dump(config_data, f, indent=2)
+        write_text_atomic(
+            config_path, json.dumps(persisted, indent=2, ensure_ascii=False) + "\n",
+        )
     except Exception as e:
         logger.error(f"Error saving config.json: {e}")
 
@@ -283,12 +301,29 @@ async def run_cli_mode(task: str, workspace_root: str):
             logger.info(f"Task finished with status: {state.status}")
             break
 
+def _listen_port() -> int:
+    try:
+        port = int(os.getenv("MOSS_PORT") or 8000)
+    except (TypeError, ValueError):
+        return 8000
+    return port if 1 <= port <= 65535 else 8000
+
+
 def main():
     load_dotenv(os.path.join(PROJECT_ROOT, ".env"))
     
     parser = argparse.ArgumentParser(description="MOSS Agent Runtime Platform")
-    parser.add_argument("--host", default="127.0.0.1", help="API server host")
-    parser.add_argument("--port", type=int, default=8000, help="API server port")
+    parser.add_argument(
+        "--host",
+        default=os.getenv("MOSS_HOST") or "127.0.0.1",
+        help="API server host",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=_listen_port(),
+        help="API server port",
+    )
     parser.add_argument(
         "--workspace",
         default=os.path.join(PROJECT_ROOT, "workspace"),

@@ -32,17 +32,18 @@ RENDER_TARGETED_MARKERS = (
     "duplicate heading",
     "heading numbering restart",
     "lack a local reference",
+    "invalid local reference",
+    "arithmetic sum mismatch",
+    "source inventory total mismatch",
 )
 RENDER_SECTION_MARKERS = (
     "record section",
     "invalid diagram",
     "empty required section",
 )
-RENDER_REWRITE_MARKERS = (
-    "invalid local reference",
-    "citation-like pattern",
-    "external link",
+RENDER_LOCAL_MARKERS = (
     "placeholder marker",
+    "external link",
     "reasoning tag",
 )
 RENDER_APPEND_MARKERS = (
@@ -50,6 +51,7 @@ RENDER_APPEND_MARKERS = (
     "uncited required source",
     "cited_sources=",
     "local_references=",
+    "citation-like pattern",
 )
 SOFTWARE_MARKERS = (
     "static integration",
@@ -77,6 +79,20 @@ def _blob(items: Iterable[Any]) -> str:
     return "\n".join(str(item or "") for item in items).casefold()
 
 
+def required_repair_tool(issues: Iterable[Any]) -> str:
+    """Select one bounded mutation for document defects; never a global rewrite."""
+    blob = _blob(issues)
+    if any(marker in blob for marker in RENDER_TARGETED_MARKERS):
+        return "filesystem__replace_paragraph"
+    if any(marker in blob for marker in RENDER_SECTION_MARKERS):
+        return "filesystem__replace_section"
+    if any(marker in blob for marker in RENDER_APPEND_MARKERS):
+        return "filesystem__append"
+    if any(marker in blob for marker in RENDER_LOCAL_MARKERS):
+        return "filesystem__replace_paragraph"
+    return ""
+
+
 def classify_issue_texts(texts: Iterable[Any]) -> FeedbackTarget:
     """Map existing gate fragments to one delivery obligation."""
     blob = _blob(texts)
@@ -85,25 +101,19 @@ def classify_issue_texts(texts: Iterable[Any]) -> FeedbackTarget:
             SOURCE_INVENTORY, "architect", None, "source coverage",
             ("writer", "coordinator"),
         )
-    if any(marker in blob for marker in RENDER_TARGETED_MARKERS):
+    tool = required_repair_tool(texts)
+    if tool == "filesystem__replace_paragraph":
         return FeedbackTarget(
-            DOCUMENT_RENDER, "writer", "filesystem__replace_paragraph",
-            "paragraph repair", ("coordinator",),
+            DOCUMENT_RENDER, "writer", tool, "paragraph repair", ("coordinator",),
         )
-    if any(marker in blob for marker in RENDER_SECTION_MARKERS):
+    if tool == "filesystem__replace_section":
         return FeedbackTarget(
-            DOCUMENT_RENDER, "writer", "filesystem__replace_section",
-            "record section repair", ("coordinator",),
+            DOCUMENT_RENDER, "writer", tool, "record section repair",
+            ("coordinator",),
         )
-    if any(marker in blob for marker in RENDER_APPEND_MARKERS):
+    if tool == "filesystem__append":
         return FeedbackTarget(
-            DOCUMENT_RENDER, "writer", "filesystem__append",
-            "document append", ("coordinator",),
-        )
-    if any(marker in blob for marker in RENDER_REWRITE_MARKERS):
-        return FeedbackTarget(
-            DOCUMENT_RENDER, "writer", "filesystem__write",
-            "document rewrite", ("coordinator",),
+            DOCUMENT_RENDER, "writer", tool, "document append", ("coordinator",),
         )
     if any(marker in blob for marker in SOFTWARE_MARKERS):
         return FeedbackTarget(

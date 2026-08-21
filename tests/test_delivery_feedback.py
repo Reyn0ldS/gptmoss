@@ -60,14 +60,31 @@ def test_classify_heading_number_restart_targets_bounded_heading_removal():
     assert target.required_tool == "filesystem__replace_paragraph"
 
 
-def test_classify_code_wrapped_citations_authorizes_document_rewrite():
+def test_classify_code_wrapped_citations_requires_append_not_rewrite():
     target = classify_issue_texts([
         "48 citation-like pattern(s) inside Markdown code do not count as evidence; "
         "write actual citations without backticks or code fences",
     ])
     assert target.obligation == DOCUMENT_RENDER
-    assert target.required_tool == "filesystem__write"
+    assert target.required_tool == "filesystem__append"
     assert select_reopen_step(_plan(), target)["role"] == "writer"
+
+
+def test_classify_placeholder_requires_paragraph_repair():
+    target = classify_issue_texts([
+        "document contains 2 placeholder marker(s); paragraph prefix: TODO complete this",
+    ])
+    assert target.obligation == DOCUMENT_RENDER
+    assert target.required_tool == "filesystem__replace_paragraph"
+
+
+def test_classify_invalid_local_reference_requires_paragraph_repair():
+    target = classify_issue_texts([
+        "invalid local reference(s): reference to 'vision.pptx' uses blocks but its "
+        "inventory has no blocks count; paragraph prefix: La présentation est bornée",
+    ])
+    assert target.obligation == DOCUMENT_RENDER
+    assert target.required_tool == "filesystem__replace_paragraph"
 
 
 def test_classify_missing_source_coverage_requires_append_not_ungated_edits():

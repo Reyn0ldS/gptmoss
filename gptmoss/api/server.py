@@ -1692,7 +1692,7 @@ async def test_connection(req: SettingsRequest):
     }
 
 @app.post("/api/settings")
-async def update_settings(req: SettingsRequest):
+async def update_settings(req: SettingsRequest, request: Request):
     if not app_state.execution_engine:
         raise HTTPException(status_code=500, detail="Engine not initialized.")
         
@@ -1700,6 +1700,26 @@ async def update_settings(req: SettingsRequest):
     config_path = _runtime_config_path()
     if not config_path:
         raise HTTPException(status_code=500, detail="Runtime configuration path is unavailable.")
+    previous: Dict[str, Any] = _load_runtime_config() if config_path.exists() else {}
+    try:
+        raw_body = await request.json()
+    except Exception:
+        raw_body = {}
+    if not isinstance(raw_body, dict):
+        raw_body = {}
+    allowed = set(RuntimeSettings.model_fields) | {"api_key", "confirm_sensitive"}
+    dumped = req.model_dump()
+    incoming = {key: dumped[key] for key in raw_body if key in allowed and key in dumped}
+    confirm_sensitive = bool(incoming.pop("confirm_sensitive", False) or req.confirm_sensitive)
+    llm = app_state.execution_engine.llm_provider
+    api_key = incoming.get("api_key") or previous.get("api_key") or getattr(llm, "api_key", "") or ""
+    incoming.pop("api_key", None)
+    merged = {**previous, **incoming, "api_key": api_key}
+    settings = RuntimeSettings.model_validate(merged).normalized()
+    rebuilt = settings.model_dump()
+    rebuilt["api_key"] = api_key
+    rebuilt["confirm_sensitive"] = confirm_sensitive
+    req = SettingsRequest.model_validate(rebuilt)
     _validate_provider_url(req.base_url)
     
     policy = app_state.execution_engine.policy_provider
@@ -1725,10 +1745,7 @@ async def update_settings(req: SettingsRequest):
     if sensitive and not req.confirm_sensitive:
         raise HTTPException(status_code=409, detail="Sensitive configuration requires explicit confirmation.")
 
-    llm = app_state.execution_engine.llm_provider
     # A blank settings form must not erase an existing secret.
-    api_key = req.api_key or getattr(llm, "api_key", "")
-    previous: Dict[str, Any] = _load_runtime_config() if config_path.exists() else {}
     config_data = {
         "api_key": api_key,
         "base_url": req.base_url,

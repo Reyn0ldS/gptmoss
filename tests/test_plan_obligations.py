@@ -129,6 +129,34 @@ def test_software_architecture_dossier_does_not_inject_implementation_work():
     assert not any(step.get("role") == "developer" for step in plan["steps"])
 
 
+def test_french_create_application_is_software_implementation():
+    task = (
+        "Construire une application locale et portable qui expose une API "
+        "et une interface, avec des tests complets."
+    )
+    analysis = analyze_task_complexity(task)
+    assert analysis["software_implementation_requested"] is True
+    plan = SimplePlanner._fallback_plan(task, analysis, "auto")
+    assert any(step.get("role") == "developer" for step in plan["steps"])
+
+
+def test_french_project_dossier_with_attachments_is_not_a_software_dag():
+    task = "Rédige un dossier du projet à partir des pièces jointes."
+    analysis = analyze_task_complexity(task)
+    assert "software-engineering" in analysis["domains"]
+    assert analysis["software_implementation_requested"] is False
+
+    plan = SimplePlanner._fallback_plan(
+        task, analysis, "auto",
+        workload_profile={"attachment_count": 4, "document_count": 4},
+    )
+    assert not any(step.get("role") == "developer" for step in plan["steps"])
+    assert plan.get("delivery_profile") == "professional-local" or any(
+        "corpus" in str(step.get("specialist") or "").casefold()
+        for step in plan["steps"]
+    )
+
+
 @pytest.mark.parametrize("task", [
     "Build a runnable software application and its tests.",
     "Fix the API authentication bug in the existing source code.",

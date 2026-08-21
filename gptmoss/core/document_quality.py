@@ -547,18 +547,37 @@ def validate_document(path: Path, constraints: Dict[str, Any]) -> ValidationRepo
         )
 
     placeholder_hits = []
+    placeholder_prefixes: List[str] = []
     if constraints.get("forbid_placeholders", False):
         for pattern in placeholder_patterns:
             matches = re.findall(pattern, text, flags=re.IGNORECASE)
             placeholder_hits.extend(str(match) for match in matches)
         if placeholder_hits:
-            _failure(
-                report,
-                f"document contains {len(placeholder_hits)} placeholder marker(s)",
+            for line in lines:
+                if any(
+                    re.search(pattern, line, flags=re.IGNORECASE)
+                    for pattern in placeholder_patterns
+                ):
+                    prefix = " ".join(line.strip().split())[:180]
+                    if prefix and prefix not in placeholder_prefixes:
+                        placeholder_prefixes.append(prefix)
+            message = (
+                f"document contains {len(placeholder_hits)} placeholder marker(s)"
             )
+            if placeholder_prefixes:
+                message += "; paragraph prefix: " + placeholder_prefixes[0]
+            _failure(report, message)
 
     if constraints.get("forbid_external_links", False) and external_links:
-        _failure(report, f"document contains {len(external_links)} external link(s)")
+        link_prefix = ""
+        for line in lines:
+            if _EXTERNAL_LINK.search(line):
+                link_prefix = " ".join(line.strip().split())[:180]
+                break
+        message = f"document contains {len(external_links)} external link(s)"
+        if link_prefix:
+            message += "; paragraph prefix: " + link_prefix
+        _failure(report, message)
 
     arithmetic_mismatches = []
     if constraints.get("validate_arithmetic", False):

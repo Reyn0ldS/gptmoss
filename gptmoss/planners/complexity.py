@@ -54,14 +54,16 @@ def requires_software_implementation(
     mutation = (
         r"(?:implement|develop|fix|repair|debug|modify|update|refactor|"
         r"add|remove|configure|deploy|migrate|integrate|build|create|"
-        r"implemente|developpe|coder|corrige|repare|modifie|mets?\s+a\s+jour|"
-        r"refactorise|ajoute|supprime|configure|deploie|migre|integre|cree)"
+        r"implemente|developpe|developper|coder|corrige|repare|modifie|"
+        r"mets?\s+a\s+jour|refactorise|ajoute|supprime|configure|deploie|"
+        r"migre|integre|cree|creer|construire)"
     )
     target = (
         r"(?:software|application|api|gui|interface|code|source|runtime|server|"
         r"service|module|package|feature|function|endpoint|script|test|repository|"
         r"repo|project|logic|pipeline|workflow|import|export|logiciel|serveur|"
-        r"fonctionnalite|fonction|projet|depot)"
+        r"fonctionnalite|fonction|projet|depot|plateforme|platform|console|"
+        r"programme|program)"
     )
     return bool(
         re.search(rf"\b{mutation}\b[^.\n;:]{{0,96}}\b{target}\b", text)
