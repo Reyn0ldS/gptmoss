@@ -72,6 +72,20 @@ def test_professional_profile_stamps_untagged_llm_plan_from_corpus_policy(tmp_pa
     assert constraints["source_inventory"] == {"source.txt": {"blocks": 2}}
 
 
+def test_professional_profile_skips_software_implementation_even_with_corpus_policy():
+    plan = {
+        "steps": [{"role": "developer", "required_artifacts": ["src/app.py", "README.md"]}],
+        "artifact_validations": [],
+    }
+    apply_professional_profile(
+        plan,
+        task="Construire une application locale avec une API et des tests.",
+        corpus_policy={"enabled": True, "professional_delivery": True},
+        workload={"attachment_count": 4, "document_count": 4},
+    )
+    assert plan.get("delivery_profile") != "professional-local"
+
+
 def test_professional_profile_skips_translation_with_loose_attachments():
     plan = {"steps": [{"required_artifacts": ["note.txt"]}]}
     apply_professional_profile(

@@ -134,6 +134,9 @@ def should_apply_professional_profile(
     """Activate professional floors from policy or a document task, not a planner tag."""
     if isinstance(plan, Mapping) and plan.get("delivery_profile") == PROFILE:
         return True
+    from gptmoss.planners.complexity import requires_software_implementation
+    if requires_software_implementation(task):
+        return False
     policy = corpus_policy if isinstance(corpus_policy, Mapping) else {}
     if policy.get("professional_delivery"):
         return True

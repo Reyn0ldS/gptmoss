@@ -58,17 +58,36 @@ def requires_software_implementation(
         r"mets?\s+a\s+jour|refactorise|ajoute|supprime|configure|deploie|"
         r"migre|integre|cree|creer|construire)"
     )
-    target = (
-        r"(?:software|application|api|gui|interface|code|source|runtime|server|"
-        r"service|module|package|feature|function|endpoint|script|test|repository|"
-        r"repo|project|logic|pipeline|workflow|import|export|logiciel|serveur|"
-        r"fonctionnalite|fonction|projet|depot|plateforme|platform|console|"
-        r"programme|program)"
+    strong_target = (
+        r"(?:software|application|api|gui|interface|code|runtime|server|"
+        r"service|module|package|endpoint|script|repository|repo|"
+        r"pipeline|workflow|logiciel|serveur|fonctionnalite|"
+        r"plateforme|platform|console|programme|program)"
     )
-    return bool(
-        re.search(rf"\b{mutation}\b[^.\n;:]{{0,96}}\b{target}\b", text)
-        or re.search(rf"\b{target}\b[^.\n;:]{{0,48}}\b{mutation}\b", text)
+    weak_target = (
+        r"(?:test|project|projet|source|import|export|feature|function|"
+        r"logic|depot|fonction)"
     )
+    strong = bool(
+        re.search(rf"\b{mutation}\b[^.\n;:]{{0,96}}\b{strong_target}\b", text)
+        or re.search(rf"\b{strong_target}\b[^.\n;:]{{0,48}}\b{mutation}\b", text)
+    )
+    if strong:
+        return True
+    weak = bool(
+        re.search(rf"\b{mutation}\b[^.\n;:]{{0,96}}\b{weak_target}\b", text)
+        or re.search(rf"\b{weak_target}\b[^.\n;:]{{0,48}}\b{mutation}\b", text)
+    )
+    if not weak:
+        return False
+    writing = any(
+        marker in text
+        for marker in (
+            "redige", "redaction", "dossier", "rapport", "synthese", "livrable",
+            "long-form", "write a", "produce a",
+        )
+    )
+    return not writing
 
 
 def analyze_task_complexity(

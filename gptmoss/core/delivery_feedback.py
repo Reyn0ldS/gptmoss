@@ -19,7 +19,7 @@ from gptmoss.core.plan_obligations import (
 INVENTORY_MARKERS = (
     "read every normalized block",
     "analyze every attached image",
-    "incomplete source coverage",
+    "prove complete document coverage",
     "corpus policy lacks machine evidence",
     "no documents.read",
     "no documents.read_image",
@@ -52,6 +52,7 @@ RENDER_APPEND_MARKERS = (
     "cited_sources=",
     "local_references=",
     "citation-like pattern",
+    "incomplete source coverage",
 )
 SOFTWARE_MARKERS = (
     "static integration",
@@ -79,18 +80,28 @@ def _blob(items: Iterable[Any]) -> str:
     return "\n".join(str(item or "") for item in items).casefold()
 
 
-def required_repair_tool(issues: Iterable[Any]) -> str:
-    """Select one bounded mutation for document defects; never a global rewrite."""
+def required_repair_kind(issues: Iterable[Any]) -> str:
+    """Return the winning repair class; callers must not re-scan markers in another order."""
     blob = _blob(issues)
     if any(marker in blob for marker in RENDER_TARGETED_MARKERS):
-        return "filesystem__replace_paragraph"
+        return "targeted_paragraph"
     if any(marker in blob for marker in RENDER_SECTION_MARKERS):
-        return "filesystem__replace_section"
+        return "section"
     if any(marker in blob for marker in RENDER_APPEND_MARKERS):
-        return "filesystem__append"
+        return "append"
     if any(marker in blob for marker in RENDER_LOCAL_MARKERS):
-        return "filesystem__replace_paragraph"
+        return "local_paragraph"
     return ""
+
+
+def required_repair_tool(issues: Iterable[Any]) -> str:
+    """Select one bounded mutation for document defects; never a global rewrite."""
+    return {
+        "targeted_paragraph": "filesystem__replace_paragraph",
+        "section": "filesystem__replace_section",
+        "append": "filesystem__append",
+        "local_paragraph": "filesystem__replace_paragraph",
+    }.get(required_repair_kind(issues), "")
 
 
 def classify_issue_texts(texts: Iterable[Any]) -> FeedbackTarget:

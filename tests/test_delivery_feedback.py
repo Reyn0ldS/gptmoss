@@ -70,6 +70,25 @@ def test_classify_code_wrapped_citations_requires_append_not_rewrite():
     assert select_reopen_step(_plan(), target)["role"] == "writer"
 
 
+def test_classify_incomplete_citation_coverage_targets_writer_append():
+    target = classify_issue_texts([
+        "incomplete source coverage: vision.pptx has uncovered required slides: 3-4; "
+        "add bounded local reference(s) covering these exact ranges",
+    ])
+    assert target.obligation == DOCUMENT_RENDER
+    assert target.required_tool == "filesystem__append"
+    assert select_reopen_step(_plan(), target)["role"] == "writer"
+
+
+def test_classify_block_reads_still_target_inventory_before_citation_gaps():
+    target = classify_issue_texts([
+        "read every normalized block of source.md; missing 1-based block(s): 4, 5",
+        "incomplete source coverage: source.md has uncovered required blocks: 4-5",
+    ])
+    assert target.obligation == SOURCE_INVENTORY
+    assert target.required_tool is None
+
+
 def test_classify_placeholder_requires_paragraph_repair():
     target = classify_issue_texts([
         "document contains 2 placeholder marker(s); paragraph prefix: TODO complete this",

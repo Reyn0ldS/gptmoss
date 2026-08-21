@@ -28,10 +28,10 @@ def _document_deliverable_task(
 ) -> bool:
     """Distinguish source-grounded writing from generic software documentation."""
     policy = corpus_policy if isinstance(corpus_policy, Mapping) else {}
-    if policy.get("professional_delivery"):
-        return True
     if requires_software_implementation(task):
         return False
+    if policy.get("professional_delivery"):
+        return True
     text = str(task or "")
     lowered = text.casefold()
     formats = {

@@ -129,6 +129,36 @@ def test_software_architecture_dossier_does_not_inject_implementation_work():
     assert not any(step.get("role") == "developer" for step in plan["steps"])
 
 
+def test_corpus_folder_does_not_turn_software_implementation_into_a_dossier():
+    task = (
+        "Construire une application locale et portable qui expose une API "
+        "et une interface, avec des tests complets."
+    )
+    analysis = analyze_task_complexity(task)
+    plan = SimplePlanner._fallback_plan(
+        task, analysis, "auto",
+        corpus_policy={"enabled": True, "professional_delivery": True},
+        workload_profile={"attachment_count": 4, "document_count": 4},
+    )
+    assert any(step.get("role") == "developer" for step in plan["steps"])
+    assert plan.get("delivery_profile") != "professional-local"
+    assert not any(
+        "corpus" in str(step.get("specialist") or "").casefold()
+        for step in plan["steps"]
+    )
+
+
+def test_acceptance_test_in_a_dossier_is_not_software_implementation():
+    task = "Créer un test d'acceptation dans le dossier à partir des pièces jointes."
+    analysis = analyze_task_complexity(task)
+    assert analysis["software_implementation_requested"] is False
+    plan = SimplePlanner._fallback_plan(
+        task, analysis, "auto",
+        workload_profile={"attachment_count": 3, "document_count": 3},
+    )
+    assert not any(step.get("role") == "developer" for step in plan["steps"])
+
+
 def test_french_create_application_is_software_implementation():
     task = (
         "Construire une application locale et portable qui expose une API "

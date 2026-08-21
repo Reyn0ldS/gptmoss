@@ -1766,6 +1766,30 @@ def test_missing_source_gate_requires_one_bounded_append(tmp_path):
     assert "one-based bounded locator" in nudge
 
 
+def test_writer_mixed_duplicate_and_placeholder_keeps_duplicate_nudge(tmp_path):
+    engine, state = _engine(tmp_path)
+    state.get_execution("writer-mixed-repair")
+    project = tmp_path / "projects" / "proj-default"
+    project.mkdir(parents=True)
+    (project / "dossier.md").write_text("TODO complete this\n\nDuplicated.\n\nDuplicated.\n", encoding="utf-8")
+    step = {"role": "writer", "required_artifacts": ["dossier.md"]}
+    issues = [
+        "dossier.md: document contains 23 duplicate paragraph occurrence(s)",
+        "dossier.md: document contains 1 placeholder marker(s); paragraph prefix: TODO complete this",
+    ]
+
+    required = engine._writer_incremental_repair_tool(
+        "writer-mixed-repair", "writer", step, issues,
+    )
+    nudge = engine._writer_incremental_repair_nudge(
+        "writer-mixed-repair", "writer", step, issues,
+    )
+
+    assert required == "filesystem__replace_paragraph"
+    assert "occurrence=2" in nudge
+    assert "placeholder" not in nudge.casefold()
+
+
 def test_writer_placeholder_gate_requires_one_targeted_paragraph_repair(tmp_path):
     engine, state = _engine(tmp_path)
     state.get_execution("writer-placeholder-repair")
