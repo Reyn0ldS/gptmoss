@@ -59,14 +59,14 @@ def requires_software_implementation(
         r"migre|integre|cree|creer|construire)"
     )
     strong_target = (
-        r"(?:software|application|api|gui|interface|code|runtime|server|"
+        r"(?:software|application|api|gui|code|runtime|server|"
         r"service|module|package|endpoint|script|repository|repo|"
-        r"pipeline|workflow|logiciel|serveur|fonctionnalite|"
-        r"plateforme|platform|console|programme|program)"
+        r"pipeline|logiciel|serveur|fonctionnalite|"
+        r"plateforme|platform)"
     )
     weak_target = (
         r"(?:test|project|projet|source|import|export|feature|function|"
-        r"logic|depot|fonction)"
+        r"logic|depot|fonction|interface|workflow|programme|program|console)"
     )
     strong = bool(
         re.search(rf"\b{mutation}\b[^.\n;:]{{0,96}}\b{strong_target}\b", text)
@@ -81,10 +81,10 @@ def requires_software_implementation(
     if not weak:
         return False
     writing = any(
-        marker in text
+        re.search(rf"(?<!\w){re.escape(marker)}(?!\w)", text)
         for marker in (
             "redige", "redaction", "dossier", "rapport", "synthese", "livrable",
-            "long-form", "write a", "produce a",
+            "long-form", "write a", "produce a", "document",
         )
     )
     return not writing

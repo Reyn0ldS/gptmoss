@@ -47,7 +47,7 @@ def _document_deliverable_task(
         )
     )
     writing_signal = any(
-        marker in lowered
+        re.search(rf"(?<!\w){re.escape(marker)}(?!\w)", lowered)
         for marker in (
             "rédige", "redige", "rédaction", "redaction", "dossier", "rapport",
             "synthèse", "synthese", "livrable", "long-form", "write a", "produce a",

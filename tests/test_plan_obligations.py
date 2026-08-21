@@ -9,7 +9,10 @@ from gptmoss.core.plan_obligations import (
     validate_plan_obligations,
 )
 from gptmoss.core.workload import MAX_SOURCE_PARTITIONS, compile_work_graph
-from gptmoss.planners.complexity import analyze_task_complexity
+from gptmoss.planners.complexity import (
+    analyze_task_complexity,
+    requires_software_implementation,
+)
 from gptmoss.planners.fallbacks import _step
 from gptmoss.planners.simple import SimplePlanner
 from tests.mock_llm import MockLLMProvider
@@ -145,6 +148,20 @@ def test_corpus_folder_does_not_turn_software_implementation_into_a_dossier():
     assert not any(
         "corpus" in str(step.get("specialist") or "").casefold()
         for step in plan["steps"]
+    )
+
+
+def test_interface_document_and_work_programme_are_not_software_implementation():
+    interface_doc = "Create an interface document from the local corpus."
+    work_programme = "Créer un programme de travail dans le dossier."
+    assert requires_software_implementation(interface_doc) is False
+    assert requires_software_implementation(work_programme) is False
+    assert not any(
+        step.get("role") == "developer"
+        for step in SimplePlanner._fallback_plan(
+            work_programme, analyze_task_complexity(work_programme), "auto",
+            workload_profile={"attachment_count": 2, "document_count": 2},
+        )["steps"]
     )
 
 
