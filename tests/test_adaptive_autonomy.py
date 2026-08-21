@@ -777,8 +777,6 @@ async def test_vision_rejection_is_bound_to_the_current_model(tmp_path):
     llm.default_model = "vision-model"
     llm.supports_vision = True
     llm.vision_rejected_for_model = None
-    assert engine._vision_is_available(child) is False
-    child.variables.pop("vision_rejection")
     assert engine._vision_is_available(child) is True
 
 
@@ -1306,6 +1304,8 @@ def test_exhaustive_inventory_gate_defers_images_to_declared_vision_gap(tmp_path
 def test_vision_rejection_defers_image_coverage_even_if_flag_is_enabled(tmp_path):
     engine, state = _engine(tmp_path, MockLLMProvider())
     engine.llm_provider.supports_vision = True
+    engine.llm_provider.default_model = "text-only"
+    engine.llm_provider.vision_rejected_for_model = "text-only"
     store = ArtifactStore(str(tmp_path / "rejected-vision-artifacts"))
     image = store.save_bytes(
         "evidence.png", b"\x89PNG\r\n\x1a\nevidence", "image/png"

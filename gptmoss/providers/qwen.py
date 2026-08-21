@@ -77,7 +77,14 @@ class QwenProvider(LLMProvider):
 
     @staticmethod
     def _log_completion_error(error: Exception):
-        text = (error.__class__.__name__ + " " + str(error)).lower()
+        parts = []
+        current: BaseException | None = error
+        seen: set[int] = set()
+        while current is not None and id(current) not in seen:
+            seen.add(id(current))
+            parts.append(current.__class__.__name__ + " " + str(current))
+            current = current.__cause__
+        text = " ".join(parts).lower()
         if any(marker in text for marker in (
             "certificate_verify", "does not support image", "invalid image",
             "vision not supported", "401", "403", "invalid api key",

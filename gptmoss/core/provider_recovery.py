@@ -45,6 +45,9 @@ _TLS_MARKERS = (
     "self-signed certificate",
     "unable to get local issuer",
     "tlsv1 alert",
+    "certificate bundle",
+    "ca bundle",
+    "sslcertverification",
 )
 _VISION_MARKERS = (
     "does not support image",

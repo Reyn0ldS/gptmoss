@@ -46,6 +46,8 @@ def test_ssl_certificate_error_is_configuration_not_transient():
     assert not ProviderRecoveryCoordinator.is_tls_configuration(
         ConnectionError("provider unavailable")
     )
+    missing_ca = Exception("SSLError: Could not find a suitable TLS CA certificate bundle")
+    assert ProviderRecoveryCoordinator.is_tls_configuration(missing_ca)
 
 
 def test_openai_wrapped_tls_error_walks_the_exception_cause():

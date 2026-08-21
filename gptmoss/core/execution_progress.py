@@ -19,15 +19,22 @@ from gptmoss.core.execution_plan import (
 
 class ExecutionProgressMixin:
     def _vision_is_available(self, state) -> bool:
-        """Vision is usable only while the provider still accepts image parts."""
+        """Vision is usable only while the current model still accepts image parts."""
         if not getattr(self.llm_provider, "supports_vision", False):
             return False
-        if state.variables.get("vision_rejection"):
-            return False
         rejected_for = getattr(self.llm_provider, "vision_rejected_for_model", None)
-        if rejected_for and rejected_for == getattr(self.llm_provider, "default_model", None):
+        current = getattr(self.llm_provider, "default_model", None)
+        # A per-execution note is stale after the user changes model/vision settings.
+        if rejected_for is not None and rejected_for == current:
             return False
         return True
+
+    def _vision_was_rejected(self, state) -> bool:
+        rejected_for = getattr(self.llm_provider, "vision_rejected_for_model", None)
+        current = getattr(self.llm_provider, "default_model", None)
+        if rejected_for is not None and rejected_for == current:
+            return True
+        return bool(state.variables.get("vision_rejection") and rejected_for is not None)
 
     @staticmethod
     def _freeze_existing_record_ids(path: str, constraints: Dict[str, Any]) -> None:
@@ -516,11 +523,11 @@ class ExecutionProgressMixin:
                 "inputs": image_attachments,
                 "available": False,
                 "resolution": (
-                    "Configure a vision-capable provider, or restrict execution to "
-                    "documented adapters, configuration, routines, and validators."
-                    if not state.variables.get("vision_rejection") else
                     "The provider rejected image parts. Set vision_mode to disabled "
                     "or switch to a vision model before retrying image analysis."
+                    if self._vision_was_rejected(state) else
+                    "Configure a vision-capable provider, or restrict execution to "
+                    "documented adapters, configuration, routines, and validators."
                 ),
             })
         return gaps
