@@ -336,7 +336,7 @@ def _load_runtime_config() -> Dict[str, Any]:
     if not config_path or not config_path.exists():
         return {}
     try:
-        return json.loads(config_path.read_text(encoding="utf-8"))
+        return json.loads(config_path.read_text(encoding="utf-8-sig"))
     except (OSError, json.JSONDecodeError) as exc:
         raise HTTPException(status_code=500, detail="Runtime configuration is unreadable.") from exc
 
@@ -365,7 +365,7 @@ async def get_gui():
     if not os.path.exists(GUI_FILE_PATH):
         raise HTTPException(status_code=404, detail="GUI file not found.")
     with open(GUI_FILE_PATH, "r", encoding="utf-8") as f:
-        return f.read()
+        return HTMLResponse(content=f.read(), media_type="text/html; charset=utf-8")
 
 
 @app.get("/health")

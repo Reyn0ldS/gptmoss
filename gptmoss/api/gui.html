@@ -2856,7 +2856,8 @@
                 document.getElementById("settings-api-key").value = data.api_key || "";
                 document.getElementById("settings-model-name").value = data.model_name || "qwen-turbo";
                 document.getElementById("settings-vision-mode").value = data.vision_mode || "auto";
-                document.getElementById("settings-llm-timeout").value = data.llm_timeout_seconds ?? 300;
+                const llmTimeout = document.getElementById("settings-llm-timeout");
+                if (llmTimeout) llmTimeout.value = data.llm_timeout_seconds ?? 300;
                 updateVisionModeHint();
                 
                 const sslVerify = data.ssl_verify !== false;
@@ -2929,7 +2930,7 @@
                 base_url: document.getElementById("settings-base-url").value.trim(),
                 model_name: document.getElementById("settings-model-name").value.trim(),
                 vision_mode: document.getElementById("settings-vision-mode").value,
-                llm_timeout_seconds: Math.min(3600, Math.max(10, parseInt(document.getElementById("settings-llm-timeout").value, 10) || 300)),
+                llm_timeout_seconds: Math.min(3600, Math.max(10, parseInt(document.getElementById("settings-llm-timeout")?.value, 10) || 300)),
                 ssl_verify: document.getElementById("settings-ssl-verify").checked,
                 ssl_cert_path: document.getElementById("settings-ssl-cert-path").value.trim(),
                 denied_capabilities: Array.from(document.querySelectorAll("input[name='settings-deny']:checked"), cb => cb.value),
@@ -3416,7 +3417,7 @@
                     <input type="text" id="settings-ssl-cert-path" class="approval-reason-input" style="margin: 0;" placeholder="C:\chemin\vers\certificat.pem">
                     <small style="color:var(--text-muted)">gpu01 / PKI interne : coller le PEM de la CA, ne pas décocher la vérification.</small>
                 </div>
-                <label style="font-size: 11px; color: var(--text-normal); margin-top: 6px;">Délai LLM (s, 10–3600)</label>
+                <label style="font-size: 11px; color: var(--text-normal); margin-top: 6px;">Délai LLM (s, 10-3600)</label>
                 <input type="number" id="settings-llm-timeout" class="approval-reason-input" style="margin: 0;" min="10" max="3600" placeholder="300">
                 <button id="settings-test-connection" class="btn-control resume" type="button" onclick="testLlmConnection()">Tester la connexion</button>
 

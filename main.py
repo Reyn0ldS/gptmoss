@@ -85,7 +85,7 @@ def bootstrap_runtime(workspace_root: str):
     original_data: dict = {}
     if os.path.exists(config_path):
         try:
-            with open(config_path, "r", encoding="utf-8") as f:
+            with open(config_path, "r", encoding="utf-8-sig") as f:
                 config_data = json.load(f)
             if not isinstance(config_data, dict):
                 raise ValueError("config.json must contain a JSON object")
