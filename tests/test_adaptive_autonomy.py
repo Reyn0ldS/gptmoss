@@ -759,21 +759,27 @@ async def test_vision_rejection_is_actionable_and_records_gap(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_vision_rejection_is_copied_to_parent_execution(tmp_path):
+async def test_vision_rejection_is_bound_to_the_current_model(tmp_path):
     class VisionLLM(MockLLMProvider):
         async def completion(self, *args, **kwargs):
             raise RuntimeError("BadRequestError: this model does not support image_url content")
 
-    engine, state = _engine(tmp_path, VisionLLM())
-    parent = state.get_execution("vision-parent")
+    llm = VisionLLM()
+    llm.default_model = "text-only"
+    engine, state = _engine(tmp_path, llm)
     child = state.get_execution("vision-child")
-    child.variables["parent_execution_id"] = "vision-parent"
 
     with pytest.raises(ProviderConfigurationError, match="vision_mode"):
         await engine._completion_with_recovery("vision-child", messages=[])
 
-    assert parent.variables.get("vision_rejection")
     assert child.variables.get("vision_rejection")
+    assert llm.vision_rejected_for_model == "text-only"
+    llm.default_model = "vision-model"
+    llm.supports_vision = True
+    llm.vision_rejected_for_model = None
+    assert engine._vision_is_available(child) is False
+    child.variables.pop("vision_rejection")
+    assert engine._vision_is_available(child) is True
 
 
 @pytest.mark.asyncio

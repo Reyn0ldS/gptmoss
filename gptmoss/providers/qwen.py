@@ -36,6 +36,7 @@ class QwenProvider(LLMProvider):
         self.ssl_cert_path = ssl_cert_path or ""
         self.vision_mode = "auto"
         self.supports_vision = self._infer_vision(default_model)
+        self.vision_rejected_for_model: Optional[str] = None
         self._native_tools_supported: Optional[bool] = None
         self._learned_context_chars: Optional[int] = None
         self.context_window_tokens = max(0, int(context_window_tokens or 0))
@@ -72,6 +73,7 @@ class QwenProvider(LLMProvider):
             self._infer_vision(self.default_model)
             if normalized == "auto" else normalized == "enabled"
         )
+        self.vision_rejected_for_model = None
 
     @staticmethod
     def _log_completion_error(error: Exception):
@@ -146,6 +148,7 @@ class QwenProvider(LLMProvider):
             self._infer_vision(model_name)
             if self.vision_mode == "auto" else self.vision_mode == "enabled"
         )
+        self.vision_rejected_for_model = None
         self._native_tools_supported = None
         self._learned_context_chars = None
         self.context_window_tokens = max(0, int(context_window_tokens or 0))

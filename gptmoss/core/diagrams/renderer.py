@@ -58,23 +58,29 @@ def _render_pie(spec: DiagramSpec) -> str:
     angle = -math.pi / 2
     for index, node in enumerate(slices):
         sweep = 2 * math.pi * (float(node.value or 0) / total)
-        next_angle = angle + sweep
-        x1 = cx + radius * math.cos(angle)
-        y1 = cy + radius * math.sin(angle)
-        x2 = cx + radius * math.cos(next_angle)
-        y2 = cy + radius * math.sin(next_angle)
-        large = 1 if sweep > math.pi else 0
         color = colors[index % len(colors)]
-        parts.append(
-            f'<path d="M {cx:.1f} {cy:.1f} L {x1:.1f} {y1:.1f} A {radius} {radius} 0 {large} 1 {x2:.1f} {y2:.1f} Z" '
-            f'fill="{color}" stroke="#f8fafc" stroke-width="2"/>'
-        )
+        if len(slices) == 1 or sweep >= 2 * math.pi - 1e-9:
+            parts.append(
+                f'<circle cx="{cx:.1f}" cy="{cy:.1f}" r="{radius}" fill="{color}" '
+                f'stroke="#f8fafc" stroke-width="2"/>'
+            )
+        else:
+            next_angle = angle + sweep
+            x1 = cx + radius * math.cos(angle)
+            y1 = cy + radius * math.sin(angle)
+            x2 = cx + radius * math.cos(next_angle)
+            y2 = cy + radius * math.sin(next_angle)
+            large = 1 if sweep > math.pi else 0
+            parts.append(
+                f'<path d="M {cx:.1f} {cy:.1f} L {x1:.1f} {y1:.1f} A {radius} {radius} 0 {large} 1 {x2:.1f} {y2:.1f} Z" '
+                f'fill="{color}" stroke="#f8fafc" stroke-width="2"/>'
+            )
+            angle = next_angle
         parts.append(
             f'<rect x="420" y="{80 + index * 28}" width="14" height="14" fill="{color}"/>'
             f'<text x="442" y="{92 + index * 28}" font-family="Arial" font-size="14" fill="#0f172a">'
             f'{html.escape(node.label[:48])} ({float(node.value or 0):g})</text>'
         )
-        angle = next_angle
     parts.append(
         f'<text x="40" y="{height - 24}" font-family="Arial" font-size="12" fill="#475569">{html.escape(spec.caption)}</text></svg>'
     )

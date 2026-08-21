@@ -125,7 +125,16 @@ class ContextWindowPolicy:
                           if message is not first and str(message.get("content") or "")]
             if not candidates:
                 break
-            _, index = max(candidates)
+            digest_candidates = [
+                item for item in candidates
+                if "Pinned local source evidence" not in str(compacted[item[1]].get("content") or "")
+            ]
+            if not digest_candidates:
+                if first is not None:
+                    break
+                _, index = max(candidates)
+            else:
+                _, index = max(digest_candidates)
             original_content = compacted[index].get("content")
             if isinstance(original_content, list):
                 compacted[index]["content"] = (

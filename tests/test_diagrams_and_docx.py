@@ -81,6 +81,15 @@ def test_flowchart_node_named_pie_does_not_hijack_diagram_kind():
     assert {node.node_id for node in spec.nodes} == {"pie", "Store"}
 
 
+def test_mermaid_pie_accepts_percent_suffix_and_draws_a_full_circle():
+    spec = parse_mermaid('pie title Only\n"A" : 100%\n"B" : 0%')
+    assert spec.kind == "pie"
+    assert validate_diagram(spec)["valid"]
+    svg = render_svg(spec)
+    assert "<circle " in svg
+    assert "A (100)" in svg
+
+
 def test_mermaid_pie_with_one_slice_is_invalid():
     spec = parse_mermaid('pie title Only\n"A" : 1')
     assert validate_diagram(spec)["valid"] is False

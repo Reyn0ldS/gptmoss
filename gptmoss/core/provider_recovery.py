@@ -64,15 +64,27 @@ _AUTH_MARKERS = (
 )
 
 
-def _error_text(error: Exception) -> str:
-    return (error.__class__.__name__ + " " + str(error)).lower()
+def _error_text(error: BaseException) -> str:
+    parts: list[str] = []
+    seen: set[int] = set()
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        parts.append(current.__class__.__name__ + " " + str(current))
+        current = current.__cause__
+    return " ".join(parts).lower()
 
 
 def configuration_kind(error: Exception) -> str | None:
     text = _error_text(error)
     if any(marker in text for marker in _TLS_MARKERS):
         return "tls"
-    if any(marker in text for marker in _VISION_MARKERS):
+    vision_hit = any(marker in text for marker in _VISION_MARKERS)
+    if vision_hit and "unknown part type" in text and not any(
+        marker in text for marker in ("image", "vision", "multimodal")
+    ):
+        vision_hit = False
+    if vision_hit:
         return "vision"
     if any(marker in text for marker in _AUTH_MARKERS):
         return "auth"
@@ -143,9 +155,11 @@ class ProviderRecoveryCoordinator:
                 if kind == "vision":
                     state = self.state_engine.get_execution(execution_id)
                     state.variables["vision_rejection"] = str(error)
-                    parent_id = state.variables.get("parent_execution_id")
-                    if parent_id:
-                        self.state_engine.get_execution(parent_id).variables["vision_rejection"] = str(error)
+                    model_name = str(getattr(self.llm_provider, "default_model", "") or "")
+                    if hasattr(self.llm_provider, "vision_rejected_for_model"):
+                        self.llm_provider.vision_rejected_for_model = model_name
+                    else:
+                        setattr(self.llm_provider, "vision_rejected_for_model", model_name)
                 if kind is not None:
                     raise ProviderConfigurationError(error) from error
                 if not self.is_transient(error):

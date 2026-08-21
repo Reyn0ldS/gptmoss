@@ -79,6 +79,23 @@ def test_provider_context_compaction_preserves_instructions_and_recent_order():
     assert any("were compacted" in str(item.get("content")) for item in compacted)
 
 
+def test_provider_compaction_preserves_pinned_source_digest():
+    from gptmoss.providers.qwen_support import ContextWindowPolicy
+
+    messages = [
+        {"role": "system", "content": "authoritative " + "X" * 4000},
+        {"role": "user", "content": "old " + "y" * 2000},
+        {"role": "system", "content": (
+            "Pinned local source evidence (durable tool history; omitted conversation "
+            "messages do not erase this):\n[source.docx > blocks 1-1] MFA is required."
+        )},
+    ]
+    compacted = ContextWindowPolicy.compact(messages, 3_000)
+    digest = [item for item in compacted if "Pinned local source evidence" in str(item.get("content"))]
+    assert digest
+    assert "MFA is required" in digest[0]["content"]
+
+
 def test_provider_compacts_a_single_oversized_user_message():
     messages = [
         {"role": "system", "content": "authoritative"},

@@ -60,8 +60,8 @@ _EDGE_RE = re.compile(
     r"\s*[-.=]+>\s*(?:\|(?P<label>[^|]+)\|\s*)?"
     r"(?P<target>[A-Za-z0-9_-]+)(?:\[\"?(?P<target_label>[^\]\"]+)\"?\])?"
 )
-_PIE_SLICE_RE = re.compile(r'^"([^"]+)"\s*:\s*(-?\d+(?:\.\d+)?)\s*$')
-_PIE_BARE_SLICE_RE = re.compile(r'^([^:]{1,80}?)\s*:\s*(-?\d+(?:\.\d+)?)\s*$')
+_PIE_SLICE_RE = re.compile(r'^"([^"]+)"\s*:\s*(-?\d+(?:\.\d+)?)%?\s*$')
+_PIE_BARE_SLICE_RE = re.compile(r'^([^:]{1,80}?)\s*:\s*(-?\d+(?:\.\d+)?)%?\s*$')
 _UNSUPPORTED_RE = re.compile(
     r"(?i)^(gantt|classDiagram|erDiagram|gitGraph|mindmap|journey|"
     r"sankey(?:-beta)?|xychart-beta|quadrantChart|timeline|"

@@ -18,6 +18,17 @@ from gptmoss.core.execution_plan import (
 
 
 class ExecutionProgressMixin:
+    def _vision_is_available(self, state) -> bool:
+        """Vision is usable only while the provider still accepts image parts."""
+        if not getattr(self.llm_provider, "supports_vision", False):
+            return False
+        if state.variables.get("vision_rejection"):
+            return False
+        rejected_for = getattr(self.llm_provider, "vision_rejected_for_model", None)
+        if rejected_for and rejected_for == getattr(self.llm_provider, "default_model", None):
+            return False
+        return True
+
     @staticmethod
     def _freeze_existing_record_ids(path: str, constraints: Dict[str, Any]) -> None:
         """Persist record IDs already present before a semantic repair begins."""
@@ -430,9 +441,7 @@ class ExecutionProgressMixin:
         # the limitation and requires human scope approval at the parent level.
         # Requiring a visual tool here would create an impossible child loop and
         # could falsely imply that image content had been interpreted.
-        vision_available = bool(
-            getattr(self.llm_provider, "supports_vision", False)
-        ) and not state.variables.get("vision_rejection")
+        vision_available = self._vision_is_available(state)
         missing_images = sorted(image_ids - visualized) if vision_available else []
         if missing_images:
             names = []
@@ -499,9 +508,7 @@ class ExecutionProgressMixin:
                 continue
             if str(metadata.get("content_type") or "").startswith("image/"):
                 image_attachments.append(metadata.get("filename"))
-        vision_available = bool(
-            getattr(self.llm_provider, "supports_vision", False)
-        ) and not state.variables.get("vision_rejection")
+        vision_available = self._vision_is_available(state)
         if image_attachments and not vision_available:
             gaps.append({
                 "capability": "vision",

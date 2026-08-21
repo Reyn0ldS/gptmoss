@@ -71,6 +71,7 @@ def build_source_evidence_digest(history: list, *, budget: int) -> str:
     """Bounded prompt digest of durable documents.read evidence."""
     groups: dict[str, list[str]] = {}
     order: list[str] = []
+    seen_lines: set[str] = set()
     for item in history:
         if str(item.get("capability") or "").lower() != "documents":
             continue
@@ -89,7 +90,11 @@ def build_source_evidence_digest(history: list, *, budget: int) -> str:
         if key not in groups:
             groups[key] = []
             order.append(key)
-        groups[key].extend(lines)
+        for line in lines:
+            if line in seen_lines:
+                continue
+            seen_lines.add(line)
+            groups[key].append(line)
     if not groups:
         return ""
     limit = max(200, int(budget))
@@ -105,10 +110,11 @@ def build_source_evidence_digest(history: list, *, budget: int) -> str:
                 continue
             line = queues[key][0]
             extra = len(line) + 1
-            if selected and used + extra > limit:
-                continue
-            if not selected and used + extra > limit:
-                line = line[: max(0, limit - used - 1)]
+            leftover = limit - used
+            if extra > leftover:
+                if leftover < 80:
+                    continue
+                line = line[: leftover - 1].rstrip()
                 extra = len(line) + 1
             queues[key].pop(0)
             selected.append(line)

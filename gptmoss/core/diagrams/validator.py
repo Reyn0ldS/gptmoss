@@ -33,6 +33,8 @@ def validate_diagram(spec: DiagramSpec, *, max_nodes: int = 80, max_edges: int =
     if spec.kind == "pie":
         if len(spec.nodes) < 2:
             issues.append("pie diagram must contain at least two slices")
+        if len(spec.nodes) > max_nodes:
+            issues.append(f"diagram has {len(spec.nodes)} slices; maximum is {max_nodes}")
         if any(not node.label.strip() for node in spec.nodes):
             issues.append("pie slice labels are required")
         if any(node.value is None or float(node.value) < 0 for node in spec.nodes):

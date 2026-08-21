@@ -48,6 +48,15 @@ def test_ssl_certificate_error_is_configuration_not_transient():
     )
 
 
+def test_openai_wrapped_tls_error_walks_the_exception_cause():
+    wrapped = Exception("Connection error.")
+    wrapped.__cause__ = Exception(
+        "[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: self-signed certificate"
+    )
+    assert ProviderRecoveryCoordinator.is_tls_configuration(wrapped)
+    assert not ProviderRecoveryCoordinator.is_transient(wrapped)
+
+
 def test_vision_rejection_is_configuration_not_transient():
     error = Exception("BadRequestError: this model does not support image_url content")
     assert ProviderRecoveryCoordinator.is_vision_rejected(error)
@@ -56,6 +65,9 @@ def test_vision_rejection_is_configuration_not_transient():
     timeout = Exception("APITimeoutError timed out while sending image_url payload")
     assert not ProviderRecoveryCoordinator.is_vision_rejected(timeout)
     assert ProviderRecoveryCoordinator.is_transient(timeout)
+    assert not ProviderRecoveryCoordinator.is_vision_rejected(
+        Exception("unknown part type in tool schema")
+    )
 
 
 @pytest.mark.asyncio

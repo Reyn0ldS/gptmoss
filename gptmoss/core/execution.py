@@ -2152,8 +2152,6 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
                 sub_exec.variables["role_key"] = role_key
                 sub_exec.variables["generic_role_name"] = generic_role_name
                 sub_exec.variables["parent_execution_id"] = execution_id
-                if state.variables.get("vision_rejection"):
-                    sub_exec.variables["vision_rejection"] = state.variables["vision_rejection"]
                 sub_exec.variables["delegation_depth"] = (
                     int(state.variables.get("delegation_depth", 0)) + 1
                 )
@@ -3015,9 +3013,7 @@ class ExecutionEngine(ExecutionProgressMixin, ExecutionRescueMixin):
                     max(0, min(4, (provider_input_tokens - 4_096) // 4_096))
                     if provider_input_tokens else 4
                 )
-                supports_vision = bool(
-                    getattr(self.llm_provider, "supports_vision", False)
-                ) and not state.variables.get("vision_rejection")
+                supports_vision = self._vision_is_available(state)
                 automatic_images = (
                     visual_slots if iteration == 1 and not pending_images else 0
                 )
